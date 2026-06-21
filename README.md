@@ -154,8 +154,10 @@ Space_Weather_Dashboard/
 * [x] IMF Statistical Analysis
 * [x] IMF Event Investigation
 * [x] Cross Dataset Correlation Analysis
-* [ ] Advanced Space Weather Analysis
-* [ ] Geomagnetic Activity Analysis
+* [x] Geomagnetic Activity Analysis
+* [x] Kp Index Statistical Analysis
+* [x] Kp Event Investigation
+* [x] Sun-Earth Coupling Analysis
 
 ### Phase 4 — Visualization
 
@@ -165,6 +167,9 @@ Space_Weather_Dashboard/
 * [x] IMF Bz Visualization
 * [x] IMF Bt Visualization
 * [x] Speed Vs Temperature Scatter Plot
+* [x] Kp Index Visualization
+* [x] Sun-Earth Correlation Heatmap
+* [x] Bz vs Kp Scatter Plot
 * [ ] Multi-Variable Dashboard
 * [ ] Real-Time Monitoring
 * [ ] Interactive Controls
@@ -208,6 +213,8 @@ Space_Weather_Dashboard/
 * IMF Analysis Completed 
 * Solar Wind + IMF integration Completed
 * Data Cleaning Completed
+* Kp Dataset Downloaded
+* Kp Data Cleaning Completed
 
 ### Phase 3 In Progress
 
@@ -218,6 +225,10 @@ Space_Weather_Dashboard/
 * IMF Event Investigation Completed
 * Cross-Dataset Correlation Analysis Completed
 * Space Weather Relationship Analysis Completed
+* Kp Statistical Analysis Completed
+* Kp Event Investigation Completed
+* Sun-Earth Coupling Analysis Completed
+* Correlation Heatmap Analysis Completed
 
 ---
 
@@ -262,6 +273,29 @@ Dataset Size:
 
 * ~9,600 observations
 * Approximately 7 days of IMF measurements
+
+## Second NOAA Dataset Analysis
+
+## Third NOAA Dataset Analysis
+
+### Dataset
+
+NOAA Planetary Kp Index Dataset
+
+The dataset used for this analysis starts from 14 June 2026 to 21 June 2026.
+
+Variables:
+
+* Time Tag
+* Kp
+* a_running
+* station_count
+
+Dataset Size:
+
+* 59 observations
+* Approximately 7 days of geomagnetic measurements
+
 
 ---
 
@@ -405,6 +439,79 @@ Dataset Size:
 * Forecasting Variables Used in Geomagnetic Storm Prediction
 * IMF Persistence and Duration Analysis
 
+
+## Kp Statistical Summary
+
+### Kp Index
+
+* Average: 1.63
+* Maximum: 3.00
+* Minimum: 0.33
+
+### Interpretation
+
+* Average conditions remained geomagnetically quiet.
+* No geomagnetic storm conditions were observed.
+* The highest activity level reached Kp = 3 (Unsettled Conditions).
+
+
+## Kp Event Investigation
+
+### Highest Kp Event
+
+* Time: 2026-06-19 00:00
+* Kp: 3.00
+* a_running: 15
+
+### Lowest Kp Event
+
+* Time: 2026-06-17 18:00
+* Kp: 0.33
+* a_running: 2
+
+## Solar Wind + IMF + Kp Integrated Analysis
+
+The Solar Wind, IMF, and Kp datasets were merged using NOAA timestamps and common 3-hour aggregation windows.
+
+This analysis represents the first direct investigation of Sun-Earth coupling within the project.
+
+### Correlation Results
+
+| Variables | Correlation |
+| ---------- | ----------: |
+| Kp ↔ Density | 0.161 |
+| Kp ↔ Speed | -0.107 |
+| Kp ↔ Temperature | -0.017 |
+| Kp ↔ Bz | -0.188 |
+| Kp ↔ Bt | 0.190 |
+
+### Findings
+
+* Kp showed weak relationships with all investigated solar wind and IMF variables during the study period.
+* The negative correlation between Kp and Bz is consistent with space weather theory.
+* Southward IMF conditions were associated with increased geomagnetic activity.
+* The study period remained geomagnetically quiet, limiting the strength of observed relationships.
+* Results suggest that geomagnetic activity depends on multiple interacting variables rather than a single parameter.
+
+## Geomagnetic Activity Concepts Explored
+
+* Planetary K Index (Kp)
+* Geomagnetic Activity Monitoring
+* Earth's Response to Solar Activity
+* Quiet, Unsettled, and Storm Conditions
+* Kp Scale Interpretation
+* Geomagnetic Disturbance Classification
+* Sun-Earth Coupling Analysis
+* Geomagnetic Storm Forecasting Indicators
+* Kp Event Investigation
+* Multi-Dataset Space Weather Analysis
+* Solar Wind, IMF, and Kp Integration
+* Correlation Heatmap Analysis
+* Bz-Kp Relationship Investigation
+* Geomagnetic Activity Persistence
+* Time-Lag Effects in Space Weather
+
+
 ## Lessons Learned
 
 Through this project the following concepts have been implemented and explored:
@@ -432,23 +539,37 @@ Through this project the following concepts have been implemented and explored:
 * Cross-Dataset Correlation Analysis
 * Scientific Hypothesis Testing
 * Space Weather Forecasting Fundamentals
+* Kp Index Interpretation
+* Geomagnetic Activity Analysis
+* Geomagnetic Activity Classification
+* Kp Index Event Investigation
+* Duration-Based Event Analysis
+* IMF Persistence Analysis
+* Bz-Kp Relationship Investigation
+* Sun-Earth Coupling Analysis
+* Sun-Earth Data Aggregation Techniques
+* Time-Series Resampling and Alignment
+* Correlation Heatmap Visualization
+* Scatter Plot Analysis
+* Space Weather Event Interpretation
+* Geomagnetic Storm Forecasting Concepts
 
 ---
 
 ## Next Milestone
 
-### Kp Index Analysis
+### Dst Index Analysis
 
 Upcoming objectives:
 
-* Download NOAA Kp Index dataset
-* Study Earth's geomagnetic response
-* Compare Solar Wind, IMF, and Kp conditions
-* Investigate geomagnetic disturbances
-* Analyze Earth-Sun coupling
-* Begin storm prediction feature engineering
+* Download NOAA Dst dataset
+* Study ring current dynamics
+* Compare Kp and Dst responses
+* Investigate geomagnetic storm intensity
+* Analyze magnetospheric energy storage
+* Continue Sun-Earth coupling research
 
-Kp Index analysis will be the first stage of the project focused on measuring Earth's response to solar and interplanetary conditions rather than only studying conditions arriving from the Sun.
+Dst analysis will provide a second measure of Earth's response and help distinguish between geomagnetic activity levels and geomagnetic storm intensity.
 
 ---
 
