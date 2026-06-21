@@ -138,6 +138,8 @@ Space_Weather_Dashboard/
 * [x] Solar Wind Dataset Download
 * [x] JSON Data Parsing
 * [x] DataFrame Creation
+* [x] Data Type Conversion
+* [x] Multi Dataset Integration
 * [ ] Automated Data Retrieval
 * [ ] Historical Data Pipeline
 * [ ] Raw Data Storage Pipeline
@@ -149,6 +151,9 @@ Space_Weather_Dashboard/
 * [x] Descriptive Statistics
 * [x] Correlation Analysis
 * [x] Solar Wind Event Investigation
+* [x] IMF Statistical Analysis
+* [x] IMF Event Investigation
+* [x] Cross Dataset Correlation Analysis
 * [ ] Advanced Space Weather Analysis
 * [ ] Geomagnetic Activity Analysis
 
@@ -156,6 +161,10 @@ Space_Weather_Dashboard/
 
 * [x] Solar Wind Speed Visualization
 * [x] Solar Wind Density Visualization
+* [x] Solar Wind Temperature Visualization
+* [x] IMF Bz Visualization
+* [x] IMF Bt Visualization
+* [x] Speed Vs Temperature Scatter Plot
 * [ ] Multi-Variable Dashboard
 * [ ] Real-Time Monitoring
 * [ ] Interactive Controls
@@ -194,6 +203,10 @@ Space_Weather_Dashboard/
 * Solar Wind Dataset Downloaded
 * JSON Parsing Implemented
 * DataFrame Construction Completed
+* IMF Dataset Downloaded
+* IMF Data Cleaning Completed
+* IMF Analysis Completed 
+* Solar Wind + IMF integration Completed
 * Data Cleaning Completed
 
 ### Phase 3 In Progress
@@ -201,14 +214,20 @@ Space_Weather_Dashboard/
 * Descriptive Statistics Completed
 * Correlation Analysis Completed
 * Solar Wind Event Investigation Completed
+* IMF Statistical Analysis Completed
+* IMF Event Investigation Completed
+* Cross-Dataset Correlation Analysis Completed
+* Space Weather Relationship Analysis Completed
 
 ---
 
 ## First NOAA Dataset Analysis
 
-### Dataset
+### Dataset 
 
 NOAA Solar Wind Plasma Dataset
+
+The dataset used for this analysis starts from 13 june 2026 to 20 june 2026.
 
 Variables:
 
@@ -221,6 +240,28 @@ Dataset Size:
 
 * ~9,200 observations
 * Approximately 7 days of solar wind measurements
+
+
+## Second NOAA Dataset Analysis
+
+### Dataset
+
+NOAA Interplanetary Magnetic Field (IMF) Dataset
+
+The dataset used for this analysis starts from 14 june 2026 to 21 june 2026.
+
+Variables:
+
+* Time Tag
+* Bx
+* By
+* Bz
+* Bt
+
+Dataset Size:
+
+* ~9,600 observations
+* Approximately 7 days of IMF measurements
 
 ---
 
@@ -288,6 +329,82 @@ Dataset Size:
 
 ---
 
+## IMF Statistical Summary
+
+### Bz
+
+* Average: ~0.56 nT
+* Maximum: 11.40 nT
+* Minimum: -7.51 nT
+
+### Bt
+
+* Average: ~6.00 nT
+* Maximum: 12.00 nT
+* Minimum: 0.62 nT
+
+## IMF Event Investigation
+
+### Strongest Southward IMF Event
+
+* Time: 2026-06-16 13:47
+* Bz: -7.51 nT
+* Bt: 7.75 nT
+
+### Strongest Magnetic Field Event
+
+* Time: 2026-06-17 05:32
+* Bt: 12.00 nT
+* Bz: 7.58 nT
+
+## IMF Direction Analysis
+
+### Positive Bz
+
+* 5,408 observations
+
+### Negative Bz
+
+* 4,194 observations
+
+### Findings
+
+* Approximately 56% of IMF observations were northward.
+* Approximately 44% of IMF observations were southward.
+* Bz remained one of the most important forecasting variables identified during analysis.
+
+## Solar Wind + IMF Integrated Analysis
+
+* The Solar Wind Plasma and IMF datasets were merged using NOAA timestamps. (for this Again the solar wind data is from dates 14 June and 21 June)
+
+### Correlation Results
+| Variables             | Correlation | Interpretation |
+| --------------------- | ----------: | -------------- |
+| Speed ↔ Temperature   |       0.810 | Strong positive relationship |
+| Speed ↔ Bz            |       0.046 | No meaningful relationship |
+| Density ↔ Bz          |       0.251 | Weak positive relationship |
+| Temperature ↔ Bz      |      -0.181 | Weak negative relationship |
+| Bz ↔ Bt               |       0.247 | Weak positive relationship |
+
+### Major Observations
+
+* Solar wind speed strongly correlates with plasma temperature.
+* Solar wind properties show little relationship with Bz orientation.
+* Bz behaves largely independently from plasma conditions.
+* Plasma properties and magnetic field orientation should be analyzed separately when assessing space weather conditions.
+
+## Advanced Space Weather Concepts Explored
+
+* Interplanetary Magnetic Field (IMF)
+* Frozen-In Magnetic Fields
+* Bx, By, Bz Components
+* Total Magnetic Field Strength (Bt)
+* Southward Bz and Magnetic Reconnection
+* Geoeffective Space Weather Conditions
+* Solar Wind and IMF Coupling
+* Forecasting Variables Used in Geomagnetic Storm Prediction
+* IMF Persistence and Duration Analysis
+
 ## Lessons Learned
 
 Through this project the following concepts have been implemented and explored:
@@ -304,21 +421,34 @@ Through this project the following concepts have been implemented and explored:
 * Correlation Analysis
 * Time-Series Visualization
 * Scientific Data Investigation
+* Interplanetary Magnetic Field (IMF)
+* Frozen-In Magnetic Fields
+* Bx, By, Bz Components
+* Total Magnetic Field Strength (Bt)
+* Southward Bz and Magnetic Reconnection
+* Solar Wind and IMF Relationship Analysis
+* Geoeffective Space Weather Conditions
+* Multi-Dataset Integration
+* Cross-Dataset Correlation Analysis
+* Scientific Hypothesis Testing
+* Space Weather Forecasting Fundamentals
 
 ---
 
 ## Next Milestone
 
-### Interplanetary Magnetic Field (IMF) Analysis
+### Kp Index Analysis
 
 Upcoming objectives:
 
-* Download IMF dataset from NOAA
-* Analyze Bx, By, and Bz magnetic field components
-* Investigate magnetic field dynamics
-* Understand geomagnetic coupling
-* Explore the role of southward Bz in geomagnetic storms
-* Begin geomagnetic storm forecasting research
+* Download NOAA Kp Index dataset
+* Study Earth's geomagnetic response
+* Compare Solar Wind, IMF, and Kp conditions
+* Investigate geomagnetic disturbances
+* Analyze Earth-Sun coupling
+* Begin storm prediction feature engineering
+
+Kp Index analysis will be the first stage of the project focused on measuring Earth's response to solar and interplanetary conditions rather than only studying conditions arriving from the Sun.
 
 ---
 
