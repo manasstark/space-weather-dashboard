@@ -158,6 +158,10 @@ Space_Weather_Dashboard/
 * [x] Kp Index Statistical Analysis
 * [x] Kp Event Investigation
 * [x] Sun-Earth Coupling Analysis
+* [x] Dst Statistical Analysis
+* [x] Dst Event Investigation
+* [x] Time-Lag Analysis
+* [x] Forecast Feature Investigation
 
 ### Phase 4 — Visualization
 
@@ -170,6 +174,10 @@ Space_Weather_Dashboard/
 * [x] Kp Index Visualization
 * [x] Sun-Earth Correlation Heatmap
 * [x] Bz vs Kp Scatter Plot
+* [x] Dst Index Visualization
+* [x] Kp vs Dst Scatter Plot
+* [x] Bz vs Dst Scatter Plot
+* [x] Lag Analysis Visualization
 * [ ] Multi-Variable Dashboard
 * [ ] Real-Time Monitoring
 * [ ] Interactive Controls
@@ -215,6 +223,8 @@ Space_Weather_Dashboard/
 * Data Cleaning Completed
 * Kp Dataset Downloaded
 * Kp Data Cleaning Completed
+* Dst Dataset Downloaded
+* Dst Data Cleaning Completed
 
 ### Phase 3 In Progress
 
@@ -229,6 +239,11 @@ Space_Weather_Dashboard/
 * Kp Event Investigation Completed
 * Sun-Earth Coupling Analysis Completed
 * Correlation Heatmap Analysis Completed
+* Dst Statistical Analysis Completed
+* Dst Event Investigation Completed
+* Solar Wind + IMF + Kp + Dst Integration Completed
+* Time-Lag Analysis Completed
+* Forecast Feature Investigation Completed
 
 ---
 
@@ -274,7 +289,7 @@ Dataset Size:
 * ~9,600 observations
 * Approximately 7 days of IMF measurements
 
-## Second NOAA Dataset Analysis
+
 
 ## Third NOAA Dataset Analysis
 
@@ -295,6 +310,24 @@ Dataset Size:
 
 * 59 observations
 * Approximately 7 days of geomagnetic measurements
+
+## Fourth NOAA Dataset Analysis
+
+### Dataset
+
+NOAA Dst Index Dataset
+
+The dataset used for this analysis starts from 15 June 2026 to 22 June 2026.
+
+Variables:
+
+* Time Tag
+* Dst
+
+Dataset Size:
+
+* 167 observations
+* Approximately 7 days of hourly geomagnetic storm measurements
 
 
 ---
@@ -511,6 +544,123 @@ This analysis represents the first direct investigation of Sun-Earth coupling wi
 * Geomagnetic Activity Persistence
 * Time-Lag Effects in Space Weather
 
+## Dst Statistical Summary
+
+### Dst Index
+
+* Average: 2.33 nT
+* Maximum: 22 nT
+* Minimum: -14 nT
+
+### Interpretation
+
+* Geomagnetic conditions remained quiet throughout the observation period.
+* No geomagnetic storm conditions were observed.
+* Dst never approached the minor storm threshold of -50 nT.
+
+## Dst Event Investigation
+
+### Lowest Dst Event
+
+* Time: 2026-06-19 02:00
+* Dst: -14 nT
+
+### Highest Dst Event
+
+* Time: 2026-06-17 02:00
+* Dst: 22 nT
+
+### Findings
+
+* The lowest Dst event occurred approximately two hours after the highest Kp event.
+* This behavior is consistent with expected Sun-Earth coupling processes.
+* The study period remained geomagnetically quiet despite periods of southward IMF.
+
+## Solar Wind + IMF + Kp + Dst Integrated Analysis
+
+The Solar Wind, IMF, Kp, and Dst datasets were merged into a unified Sun-Earth dataset using NOAA timestamps.
+
+### Correlation Results
+
+| Variables | Correlation |
+| ---------- | ----------: |
+| Kp ↔ Dst | -0.268 |
+| Bz ↔ Kp | -0.190 |
+| Bz ↔ Dst | 0.242 |
+| Bt ↔ Dst | 0.344 |
+| Density ↔ Dst | 0.303 |
+
+### Findings
+
+* Negative Bz conditions were associated with higher geomagnetic activity.
+* Higher Kp values were associated with lower Dst values.
+* The observed relationships are consistent with established space weather theory.
+* The study period remained geomagnetically quiet, limiting correlation strength.
+
+## Time-Lag Analysis
+
+A lag analysis was performed to investigate delayed geomagnetic responses to IMF conditions.
+
+### Bz → Future Kp
+
+| Lag | Correlation |
+|------|------------:|
+| Current | -0.190 |
+| 1 Hour | -0.284 |
+| 3 Hours | -0.218 |
+| 6 Hours | 0.009 |
+
+### Bz → Future Dst
+
+| Lag | Correlation |
+|------|------------:|
+| Current | 0.242 |
+| 1 Hour | 0.374 |
+| 3 Hours | 0.534 |
+| 6 Hours | 0.321 |
+
+### Findings
+
+* Kp showed the strongest response approximately 1 hour after Bz changes.
+* Dst showed the strongest response approximately 3 hours after Bz changes.
+* These results support the expected sequence:
+
+Negative Bz → Magnetic Reconnection → Kp Increase → Dst Decrease
+
+* Time-lag behavior provides a foundation for future forecasting models.
+
+## Forecast Feature Investigation
+
+The strongest predictors of future geomagnetic activity were investigated.
+
+### Future Kp (+1 Hour)
+
+| Variable | Correlation |
+| ---------- | ----------: |
+| Bz | -0.284 |
+| Bt | 0.242 |
+| Density | 0.171 |
+| Speed | -0.082 |
+| Temperature | -0.054 |
+
+### Future Dst (+3 Hours)
+
+| Variable | Correlation |
+| ---------- | ----------: |
+| Bz | 0.534 |
+| Temperature | -0.405 |
+| Speed | -0.291 |
+| Bt | 0.281 |
+| Density | 0.276 |
+
+### Findings
+
+* Bz was the strongest predictor of future geomagnetic activity.
+* Bz was also the strongest predictor of future Dst conditions.
+* Time-lag analysis improved predictive relationships significantly.
+* These findings provide a foundation for future machine learning forecasting models.
+
+
 
 ## Lessons Learned
 
@@ -553,23 +703,46 @@ Through this project the following concepts have been implemented and explored:
 * Scatter Plot Analysis
 * Space Weather Event Interpretation
 * Geomagnetic Storm Forecasting Concepts
+* Dst Index Interpretation
+* Ring Current Dynamics
+* Geomagnetic Storm Intensity Analysis
+* Time-Lag Analysis
+* Forecast Feature Engineering
+* Predictive Space Weather Analysis
+* Integrated Sun-Earth System Analysis
 
 ---
 
+
 ## Next Milestone
 
-### Dst Index Analysis
+### AE Index and Solar Flare Analysis
 
 Upcoming objectives:
 
-* Download NOAA Dst dataset
-* Study ring current dynamics
-* Compare Kp and Dst responses
-* Investigate geomagnetic storm intensity
-* Analyze magnetospheric energy storage
-* Continue Sun-Earth coupling research
+#### AE Index
 
-Dst analysis will provide a second measure of Earth's response and help distinguish between geomagnetic activity levels and geomagnetic storm intensity.
+* Download NOAA AE Index dataset
+* Investigate auroral activity
+* Study polar electrojet currents
+* Compare AE, Kp and Dst responses
+* Analyze energy transfer into polar regions
+
+#### Solar Flare Dataset
+
+* Download NOAA Solar Flare dataset
+* Investigate flare classifications (C, M, X)
+* Analyze flare occurrence frequency
+* Study flare intensity distributions
+* Explore relationships between solar activity and geomagnetic conditions
+
+### Expected Outcomes
+
+* Extend the Sun-Earth analysis chain beyond geomagnetic activity.
+* Investigate auroral processes within Earth's magnetosphere.
+* Begin analysis of direct solar activity indicators.
+* Connect solar events with downstream space weather effects.
+* Continue development of forecasting-oriented space weather datasets.
 
 ---
 
