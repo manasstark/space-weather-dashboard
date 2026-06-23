@@ -162,6 +162,17 @@ Space_Weather_Dashboard/
 * [x] Dst Event Investigation
 * [x] Time-Lag Analysis
 * [x] Forecast Feature Investigation
+* [x] Solar Activity Event Analysis
+* [x] X-Ray Event Classification Analysis
+* [x] Solar Flare Analysis
+* [x] Active Region Investigation
+* [x] Cross-Dataset Active Region Analysis
+* [x] Coronal Mass Ejection (CME) Analysis
+* [x] CME Speed Distribution Analysis
+* [x] CME Source Region Analysis
+* [x] F10.7 Solar Flux Analysis
+* [x] Background Solar Activity Analysis
+
 
 ### Phase 4 — Visualization
 
@@ -329,6 +340,79 @@ Dataset Size:
 * 167 observations
 * Approximately 7 days of hourly geomagnetic storm measurements
 
+# Solar Activity Event Analysis
+
+## Dataset Overview
+
+The Solar Activity Event dataset contains 1,427 recorded solar events and 29 variables describing event timing, location, observatory information, event classifications, and active region associations.
+
+### Event Distribution
+
+| Event Type | Count |
+| ---------- | ----: |
+| XRA        |   501 |
+| RSP        |   457 |
+| RBR        |   311 |
+| FLA        |   129 |
+| RNS        |    14 |
+| DSF        |    11 |
+| EPL        |     3 |
+| BSL        |     1 |
+
+### Key Findings
+
+* 501 X-Ray events were recorded.
+* 129 optical solar flares were observed.
+* One X-Class event and 22 M-Class events were identified.
+* Solar activity peaked on 2026-06-03.
+* AR4455 was the most active NOAA active region with 153 recorded events.
+
+# Coronal Mass Ejection (CME) Analysis
+
+## CME Statistics
+
+| Metric        |     Value |
+| ------------- | --------: |
+| CME Events    |       124 |
+| CME Analyses  |       141 |
+| Average Speed |  618 km/s |
+| Median Speed  |  522 km/s |
+| Maximum Speed | 1692 km/s |
+
+### Most Active CME Regions
+
+| Active Region | CME Count |
+| ------------- | --------: |
+| AR14464       |        14 |
+| AR14455       |         8 |
+| AR14461       |         3 |
+| AR14463       |         3 |
+| AR14465       |         3 |
+
+### Key Findings
+
+* AR14464 was the most productive CME region.
+* AR14455 (AR4455) produced 8 CMEs.
+* The fastest CME reached 1692 km/s.
+* Multiple fast CMEs occurred during the June 3 solar activity peak.
+
+# F10.7 Solar Flux Analysis
+
+## Daily Flux Statistics
+
+| Metric  | Value |
+| ------- | ----: |
+| Mean    | 125.7 |
+| Median  |   128 |
+| Minimum |   101 |
+| Maximum |   148 |
+
+### Key Findings
+
+* The Sun remained moderately active throughout the observation period.
+* The 90-day average remained stable between 124 and 126.
+* Elevated solar activity persisted throughout June 2026.
+* Results are consistent with observed flare and CME activity.
 
 ---
 
@@ -710,39 +794,41 @@ Through this project the following concepts have been implemented and explored:
 * Forecast Feature Engineering
 * Predictive Space Weather Analysis
 * Integrated Sun-Earth System Analysis
+* Solar Flare Classification Systems
+* Active Region Analysis
+* Coronal Mass Ejection Analysis
+* Solar Radio Flux (F10.7)
+* Sun-Earth Space Weather Chain
+* Solar Event Catalog Analysis
+* NASA DONKI Data Products
+* Space Weather Event Correlation
 
 ---
 
 
 ## Next Milestone
 
-### AE Index and Solar Flare Analysis
+### AE Index Analysis
 
 Upcoming objectives:
 
 #### AE Index
 
-* Download NOAA AE Index dataset
-* Investigate auroral activity
-* Study polar electrojet currents
-* Compare AE, Kp and Dst responses
-* Analyze energy transfer into polar regions
-
-#### Solar Flare Dataset
-
-* Download NOAA Solar Flare dataset
-* Investigate flare classifications (C, M, X)
-* Analyze flare occurrence frequency
-* Study flare intensity distributions
-* Explore relationships between solar activity and geomagnetic conditions
+* Acquire AE Index data
+* Investigate auroral electrojet activity
+* Study polar ionospheric current systems
+* Compare AE, Kp, and Dst relationships
+* Analyze geomagnetic energy dissipation
+* Extend the Sun-Earth coupling chain to auroral activity
 
 ### Expected Outcomes
 
-* Extend the Sun-Earth analysis chain beyond geomagnetic activity.
-* Investigate auroral processes within Earth's magnetosphere.
-* Begin analysis of direct solar activity indicators.
-* Connect solar events with downstream space weather effects.
-* Continue development of forecasting-oriented space weather datasets.
+* Complete the first version of the end-to-end Sun-Earth dataset stack.
+* Investigate auroral activity during geomagnetic disturbances.
+* Compare global geomagnetic indices (Kp, Dst) with auroral responses (AE).
+* Improve understanding of energy transfer through Earth's magnetosphere.
+* Prepare datasets for future machine learning forecasting models.
+
 
 ---
 
