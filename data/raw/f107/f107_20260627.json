@@ -1,0 +1,1091 @@
+[
+  {
+    "time_tag": "2026-06-26T22:00:00",
+    "frequency": 2800,
+    "flux": 164.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-26T20:00:00",
+    "frequency": 2800,
+    "flux": 163.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-29T20:00:00",
+    "ninety_day_mean": 126.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-26T17:00:00",
+    "frequency": 2800,
+    "flux": 157.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-25T22:00:00",
+    "frequency": 2800,
+    "flux": 157.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-25T20:00:00",
+    "frequency": 2800,
+    "flux": 156.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-28T20:00:00",
+    "ninety_day_mean": 126.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-25T17:00:00",
+    "frequency": 2800,
+    "flux": 158.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-24T22:00:00",
+    "frequency": 2800,
+    "flux": 141.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-24T20:00:00",
+    "frequency": 2800,
+    "flux": 137.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-27T20:00:00",
+    "ninety_day_mean": 126.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-24T17:00:00",
+    "frequency": 2800,
+    "flux": 136.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-23T22:00:00",
+    "frequency": 2800,
+    "flux": 135.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-23T20:00:00",
+    "frequency": 2800,
+    "flux": 130.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-26T20:00:00",
+    "ninety_day_mean": 126.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-23T17:00:00",
+    "frequency": 2800,
+    "flux": 129.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-22T22:00:00",
+    "frequency": 2800,
+    "flux": 122.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-22T20:00:00",
+    "frequency": 2800,
+    "flux": 122.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-25T20:00:00",
+    "ninety_day_mean": 126.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-22T17:00:00",
+    "frequency": 2800,
+    "flux": 121.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-21T22:00:00",
+    "frequency": 2800,
+    "flux": 125.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-21T20:00:00",
+    "frequency": 2800,
+    "flux": 128.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-24T20:00:00",
+    "ninety_day_mean": 126.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-21T17:00:00",
+    "frequency": 2800,
+    "flux": 117.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-20T22:00:00",
+    "frequency": 2800,
+    "flux": 114.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-20T20:00:00",
+    "frequency": 2800,
+    "flux": 113.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-23T20:00:00",
+    "ninety_day_mean": 126.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-20T17:00:00",
+    "frequency": 2800,
+    "flux": 111.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-19T22:00:00",
+    "frequency": 2800,
+    "flux": 108.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-19T20:00:00",
+    "frequency": 2800,
+    "flux": 111.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-22T20:00:00",
+    "ninety_day_mean": 126.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-19T17:00:00",
+    "frequency": 2800,
+    "flux": 110.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-18T22:00:00",
+    "frequency": 2800,
+    "flux": 111.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-18T20:00:00",
+    "frequency": 2800,
+    "flux": 111.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-21T20:00:00",
+    "ninety_day_mean": 126.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-18T17:00:00",
+    "frequency": 2800,
+    "flux": 109.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-17T22:00:00",
+    "frequency": 2800,
+    "flux": 111.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-17T20:00:00",
+    "frequency": 2800,
+    "flux": 111.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-20T20:00:00",
+    "ninety_day_mean": 126.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-17T17:00:00",
+    "frequency": 2800,
+    "flux": 111.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-16T22:00:00",
+    "frequency": 2800,
+    "flux": 113.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-16T20:00:00",
+    "frequency": 2800,
+    "flux": 113.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-19T20:00:00",
+    "ninety_day_mean": 126.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-16T17:00:00",
+    "frequency": 2800,
+    "flux": 114.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-15T20:00:00",
+    "frequency": 2800,
+    "flux": 117.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-18T20:00:00",
+    "ninety_day_mean": 126.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-15T17:00:00",
+    "frequency": 2800,
+    "flux": 118.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-14T20:00:00",
+    "frequency": 2800,
+    "flux": 128.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-17T20:00:00",
+    "ninety_day_mean": 126.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-14T17:00:00",
+    "frequency": 2800,
+    "flux": 118.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-13T22:00:00",
+    "frequency": 2800,
+    "flux": 121.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-13T20:00:00",
+    "frequency": 2800,
+    "flux": 122.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-16T20:00:00",
+    "ninety_day_mean": 126.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-13T17:00:00",
+    "frequency": 2800,
+    "flux": 122.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-12T22:00:00",
+    "frequency": 2800,
+    "flux": 127.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-12T20:00:00",
+    "frequency": 2800,
+    "flux": 128.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-15T20:00:00",
+    "ninety_day_mean": 126.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-12T17:00:00",
+    "frequency": 2800,
+    "flux": 128.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-11T22:00:00",
+    "frequency": 2800,
+    "flux": 129.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-11T20:00:00",
+    "frequency": 2800,
+    "flux": 127.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-14T20:00:00",
+    "ninety_day_mean": 126.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-11T17:00:00",
+    "frequency": 2800,
+    "flux": 129.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-10T22:00:00",
+    "frequency": 2800,
+    "flux": 124.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-10T20:00:00",
+    "frequency": 2800,
+    "flux": 124.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-13T20:00:00",
+    "ninety_day_mean": 125.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-10T17:00:00",
+    "frequency": 2800,
+    "flux": 124.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-09T22:00:00",
+    "frequency": 2800,
+    "flux": 132.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-09T20:00:00",
+    "frequency": 2800,
+    "flux": 130.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-12T20:00:00",
+    "ninety_day_mean": 125.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-09T17:00:00",
+    "frequency": 2800,
+    "flux": 129.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-08T22:00:00",
+    "frequency": 2800,
+    "flux": 130.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-08T20:00:00",
+    "frequency": 2800,
+    "flux": 131.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-11T20:00:00",
+    "ninety_day_mean": 125.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-08T17:00:00",
+    "frequency": 2800,
+    "flux": 131.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-07T22:00:00",
+    "frequency": 2800,
+    "flux": 134.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-07T20:00:00",
+    "frequency": 2800,
+    "flux": 134.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-10T20:00:00",
+    "ninety_day_mean": 125.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-07T17:00:00",
+    "frequency": 2800,
+    "flux": 136.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-06T22:00:00",
+    "frequency": 2800,
+    "flux": 137.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-06T20:00:00",
+    "frequency": 2800,
+    "flux": 138.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-09T20:00:00",
+    "ninety_day_mean": 125.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-06T17:00:00",
+    "frequency": 2800,
+    "flux": 140.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-05T22:00:00",
+    "frequency": 2800,
+    "flux": 141.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-05T20:00:00",
+    "frequency": 2800,
+    "flux": 141.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-08T20:00:00",
+    "ninety_day_mean": 125.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-05T17:00:00",
+    "frequency": 2800,
+    "flux": 138.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-04T22:00:00",
+    "frequency": 2800,
+    "flux": 147.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-04T20:00:00",
+    "frequency": 2800,
+    "flux": 148.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-07T20:00:00",
+    "ninety_day_mean": 125.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-04T17:00:00",
+    "frequency": 2800,
+    "flux": 151.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-03T22:00:00",
+    "frequency": 2800,
+    "flux": 147.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-03T20:00:00",
+    "frequency": 2800,
+    "flux": 147.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-06T20:00:00",
+    "ninety_day_mean": 125.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-03T17:00:00",
+    "frequency": 2800,
+    "flux": 147.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-02T22:00:00",
+    "frequency": 2800,
+    "flux": 148.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-02T20:00:00",
+    "frequency": 2800,
+    "flux": 146.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-05T20:00:00",
+    "ninety_day_mean": 125.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-02T17:00:00",
+    "frequency": 2800,
+    "flux": 153.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-01T22:00:00",
+    "frequency": 2800,
+    "flux": 133.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-06-01T20:00:00",
+    "frequency": 2800,
+    "flux": 132.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-04T20:00:00",
+    "ninety_day_mean": 125.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-06-01T17:00:00",
+    "frequency": 2800,
+    "flux": 132.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-31T22:00:00",
+    "frequency": 2800,
+    "flux": 136.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-31T20:00:00",
+    "frequency": 2800,
+    "flux": 136.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-03T20:00:00",
+    "ninety_day_mean": 125.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-05-31T17:00:00",
+    "frequency": 2800,
+    "flux": 135.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-30T22:00:00",
+    "frequency": 2800,
+    "flux": 140.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-30T20:00:00",
+    "frequency": 2800,
+    "flux": 142.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-02T20:00:00",
+    "ninety_day_mean": 125.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-05-30T17:00:00",
+    "frequency": 2800,
+    "flux": 143.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-29T22:00:00",
+    "frequency": 2800,
+    "flux": 141.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-29T20:00:00",
+    "frequency": 2800,
+    "flux": 148.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-03-01T20:00:00",
+    "ninety_day_mean": 125.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-05-29T17:00:00",
+    "frequency": 2800,
+    "flux": 142.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-28T22:00:00",
+    "frequency": 2800,
+    "flux": 145.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-28T20:00:00",
+    "frequency": 2800,
+    "flux": 145.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-02-28T20:00:00",
+    "ninety_day_mean": 125.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-05-28T17:00:00",
+    "frequency": 2800,
+    "flux": 144.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-27T22:00:00",
+    "frequency": 2800,
+    "flux": 142.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-27T20:00:00",
+    "frequency": 2800,
+    "flux": 142.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-02-27T20:00:00",
+    "ninety_day_mean": 125.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-05-27T17:00:00",
+    "frequency": 2800,
+    "flux": 142.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-26T22:00:00",
+    "frequency": 2800,
+    "flux": 142.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-26T20:00:00",
+    "frequency": 2800,
+    "flux": 141.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-02-26T20:00:00",
+    "ninety_day_mean": 125.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-05-26T17:00:00",
+    "frequency": 2800,
+    "flux": 141.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-25T22:00:00",
+    "frequency": 2800,
+    "flux": 141.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-25T20:00:00",
+    "frequency": 2800,
+    "flux": 139.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-02-25T20:00:00",
+    "ninety_day_mean": 125.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-05-25T17:00:00",
+    "frequency": 2800,
+    "flux": 136.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-24T22:00:00",
+    "frequency": 2800,
+    "flux": 135.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-24T20:00:00",
+    "frequency": 2800,
+    "flux": 133.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-02-24T20:00:00",
+    "ninety_day_mean": 125.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-05-24T17:00:00",
+    "frequency": 2800,
+    "flux": 132.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-23T22:00:00",
+    "frequency": 2800,
+    "flux": 133.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-23T20:00:00",
+    "frequency": 2800,
+    "flux": 137.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-02-23T20:00:00",
+    "ninety_day_mean": 124.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-05-23T17:00:00",
+    "frequency": 2800,
+    "flux": 132.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-22T22:00:00",
+    "frequency": 2800,
+    "flux": 125.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-22T20:00:00",
+    "frequency": 2800,
+    "flux": 124.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-02-22T20:00:00",
+    "ninety_day_mean": 124.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-05-22T17:00:00",
+    "frequency": 2800,
+    "flux": 124.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-21T22:00:00",
+    "frequency": 2800,
+    "flux": 121.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-21T20:00:00",
+    "frequency": 2800,
+    "flux": 118.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-02-21T20:00:00",
+    "ninety_day_mean": 124.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-05-21T17:00:00",
+    "frequency": 2800,
+    "flux": 116.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-20T22:00:00",
+    "frequency": 2800,
+    "flux": 114.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-20T20:00:00",
+    "frequency": 2800,
+    "flux": 114.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-02-20T20:00:00",
+    "ninety_day_mean": 124.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-05-20T17:00:00",
+    "frequency": 2800,
+    "flux": 114.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-19T22:00:00",
+    "frequency": 2800,
+    "flux": 107.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-19T20:00:00",
+    "frequency": 2800,
+    "flux": 106.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-02-19T20:00:00",
+    "ninety_day_mean": 124.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-05-19T17:00:00",
+    "frequency": 2800,
+    "flux": 105.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-18T22:00:00",
+    "frequency": 2800,
+    "flux": 104.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-18T20:00:00",
+    "frequency": 2800,
+    "flux": 105.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-02-18T20:00:00",
+    "ninety_day_mean": 124.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-05-18T17:00:00",
+    "frequency": 2800,
+    "flux": 104.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-17T22:00:00",
+    "frequency": 2800,
+    "flux": 106.0,
+    "reporting_schedule": "Afternoon",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  },
+  {
+    "time_tag": "2026-05-17T20:00:00",
+    "frequency": 2800,
+    "flux": 104.0,
+    "reporting_schedule": "Noon",
+    "avg_begin_date": "2026-02-17T20:00:00",
+    "ninety_day_mean": 124.0,
+    "rec_count": 90
+  },
+  {
+    "time_tag": "2026-05-17T17:00:00",
+    "frequency": 2800,
+    "flux": 104.0,
+    "reporting_schedule": "Morning",
+    "avg_begin_date": null,
+    "ninety_day_mean": null,
+    "rec_count": null
+  }
+]

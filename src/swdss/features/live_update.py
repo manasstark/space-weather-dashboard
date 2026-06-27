@@ -1,18 +1,25 @@
+from __future__ import annotations
+
 import time
 import traceback
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
 
 from swdss.features.build_master import (
+    clean_cme,
     clean_dst,
+    clean_f107,
     clean_imf,
     clean_kp,
+    clean_solar_events,
     clean_solar_wind,
+    fetch_cme,
     fetch_json,
     save_processed,
+    save_processed_append,
     save_raw_json,
     to_hourly_for_master,
 )
@@ -24,6 +31,9 @@ class DatasetJob:
     name: str
     cadence_seconds: int
     cleaner: callable
+    fetch_fn: callable | None = None
+    append: bool = False
+    dedupe_keys: tuple[str, ...] | None = None
 
 
 DATASET_JOBS = {
@@ -50,6 +60,36 @@ DATASET_JOBS = {
 }
 
 
+def fetch_recent_cme() -> list:
+    end_date = datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=30)
+    return fetch_cme(start_date.isoformat(), end_date.isoformat())
+
+
+# Sun-side datasets: event catalogs / daily indices, not continuous
+# measurements. They are intentionally kept out of DATASET_JOBS so they
+# never get merged into master_df_v1 or resampled to hourly rows.
+EXTRA_DATASET_JOBS = {
+    "solar_events": DatasetJob(
+        name="solar_events",
+        cadence_seconds=30 * 60,
+        cleaner=clean_solar_events,
+        append=True,
+    ),
+    "cme": DatasetJob(
+        name="cme",
+        cadence_seconds=60 * 60,
+        cleaner=clean_cme,
+        fetch_fn=fetch_recent_cme,
+    ),
+    "f107": DatasetJob(
+        name="f107",
+        cadence_seconds=24 * 60 * 60,
+        cleaner=clean_f107,
+    ),
+}
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -61,11 +101,15 @@ def processed_path(name: str) -> Path:
 def update_dataset(job: DatasetJob) -> bool:
     print(f"[{utc_now().isoformat()}] Updating {job.name}...")
 
-    payload = fetch_json(job.name)
+    payload = job.fetch_fn() if job.fetch_fn is not None else fetch_json(job.name)
     save_raw_json(job.name, payload)
 
     cleaned = job.cleaner(payload)
-    save_processed(job.name, cleaned)
+
+    if job.append:
+        cleaned = save_processed_append(job.name, cleaned, list(job.dedupe_keys) if job.dedupe_keys else None)
+    else:
+        save_processed(job.name, cleaned)
 
     latest_time = cleaned["timestamp_utc"].max() if not cleaned.empty else None
     print(f"[{utc_now().isoformat()}] Finished {job.name}. Latest timestamp: {latest_time}")
@@ -139,6 +183,7 @@ def run_live_update_loop() -> None:
     ensure_data_dirs()
 
     last_run = {name: 0.0 for name in DATASET_JOBS}
+    extra_last_run = {name: 0.0 for name in EXTRA_DATASET_JOBS}
     first_run = True
 
     print("Starting SW-DSS live data updater.")
@@ -147,6 +192,9 @@ def run_live_update_loop() -> None:
     print("- IMF: 60 seconds")
     print("- Dst: 1 hour")
     print("- Kp: 3 hours")
+    print("- Solar Events: 30 minutes")
+    print("- CME (DONKI): 1 hour")
+    print("- F10.7: 24 hours")
     print("Press Ctrl+C to stop.")
 
     while True:
@@ -172,6 +220,20 @@ def run_live_update_loop() -> None:
                 rebuild_master_from_processed()
             except Exception:
                 print(f"[{utc_now().isoformat()}] Failed to rebuild master dataset:")
+                traceback.print_exc()
+
+        # Sun-side datasets update independently and never touch master_df_v1.
+        for name, job in EXTRA_DATASET_JOBS.items():
+            due = first_run or (loop_started - extra_last_run[name] >= job.cadence_seconds)
+
+            if not due:
+                continue
+
+            try:
+                update_dataset(job)
+                extra_last_run[name] = time.time()
+            except Exception:
+                print(f"[{utc_now().isoformat()}] Failed to update {name}:")
                 traceback.print_exc()
 
         first_run = False
