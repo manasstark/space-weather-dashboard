@@ -70,7 +70,21 @@ This project will work with:
 
 ### Dashboard
 
-* Streamlit
+* Streamlit (multi-page application with a custom retro/vintage UI theme)
+* streamlit-autorefresh (live periodic refresh)
+
+### Data Acquisition (Expanded)
+
+* NASA DONKI API (Coronal Mass Ejections)
+
+### Visualization (Expanded)
+
+* Plotly Graph Objects & Subplots (multi-panel synced time-series charts)
+* Pillow (image processing for the embedded solar-disk background)
+
+### Persistence
+
+* JSON-based local persistence (Saved Events, Space Weather Concepts document library)
 
 ### Machine Learning
 
@@ -116,6 +130,43 @@ Space_Weather_Dashboard/
 ├── README.md
 ├── requirements.txt
 └── .gitignore
+```
+
+### Current Project Structure (Updated)
+
+The structure above reflects the project's earliest notebook-driven phase. The project has since grown into a real package + live dashboard application:
+
+```text
+Space Weather Dashboard/
+│
+├── data/
+│   ├── raw/             # Exact NOAA / DONKI API responses, per dataset
+│   ├── processed/       # Cleaned per-dataset parquet (minute-level for Solar
+│   │                    #   Wind/IMF, native cadence for Kp/Dst/Solar
+│   │                    #   Events/CME/F10.7)
+│   ├── features/
+│   │   └── master_df_v1.parquet   # Hourly merged Sun-Earth feature table
+│   ├── library/         # Uploaded Space Weather Concepts documents
+│   └── saved_events.json / library_index.json
+│
+├── src/swdss/
+│   ├── paths.py
+│   ├── ingest/
+│   ├── transform/
+│   ├── features/
+│   │   ├── build_master.py    # Fetch + clean + merge (one-shot build)
+│   │   └── live_update.py     # Continuous per-dataset updater (own cadences)
+│   └── utils/
+│
+├── dashboard/
+│   ├── home.py           # Full multi-page Streamlit application
+│   └── assets/            # Background imagery (magnetosphere, solar disk)
+│
+├── notebooks/            # Original exploratory research notebooks (kept as
+│                          #   historical record of the underlying analysis)
+│
+├── docs/
+└── models/               # Reserved for the upcoming ML forecasting phase
 ```
 
 ---
@@ -189,10 +240,10 @@ Space_Weather_Dashboard/
 * [x] Kp vs Dst Scatter Plot
 * [x] Bz vs Dst Scatter Plot
 * [x] Lag Analysis Visualization
-* [ ] Multi-Variable Dashboard
-* [ ] Real-Time Monitoring
-* [ ] Interactive Controls
-* [ ] Live Data Refresh
+* [x] Multi-Variable Dashboard
+* [x] Real-Time Monitoring
+* [x] Interactive Controls
+* [x] Live Data Refresh
 
 ### Phase 5 — Machine Learning
 
@@ -205,10 +256,30 @@ Space_Weather_Dashboard/
 
 ### Phase 6 — Deployment
 
-* [ ] Streamlit Application
+* [x] Streamlit Application
 * [ ] Dashboard Deployment
 * [ ] Documentation
 * [ ] Public Release
+
+### Phase 7 — Space Weather Decision Support System (SW-DSS)
+
+* [x] Multi-Page Dashboard Architecture (Home, Photosphere, Heliosphere, Geospace, Analytics)
+* [x] Continuous Per-Dataset Live Updater (own cadence per dataset)
+* [x] Solar Events, CME (DONKI), and F10.7 Ingestion Pipelines
+* [x] Minute-Level vs Hourly-Aggregate Data Architecture (no more smoothed-away extremes)
+* [x] Status Terminal (live Meaning + Risk per variable)
+* [x] Strongest Value Cards with Reverse Solar-Event Lookup
+* [x] Forward + Reverse Event Explorer (Sun-to-Earth causal chain)
+* [x] Auto-Playing Event Storyboard Animation
+* [x] Heliomap (real heliographic CME / Solar Event positions on an SDO solar-disk image)
+* [x] Sun-to-Earth Overview Multi-Panel Chart (click-to-inspect all panels)
+* [x] Per-Page Reference Tables (Bz/Kp/Dst/Speed/Density/Temperature/CME/Flare/Radio Burst/F10.7)
+* [x] Saved Events (persistent bookmarking)
+* [x] Space Weather Concepts Document Library (Concepts / Articles / Research Papers)
+* [x] Retro/Vintage UI Theme Applied Across the Entire Application
+* [ ] Cross-Validation Against Independent Real Data
+* [ ] Multi-Day Continuous Pipeline Stress Test
+* [ ] Additional Derived Parameters Review (dynamic pressure, IMF clock angle, SSC flags, etc.)
 
 ---
 
@@ -802,35 +873,95 @@ Through this project the following concepts have been implemented and explored:
 * Solar Event Catalog Analysis
 * NASA DONKI Data Products
 * Space Weather Event Correlation
+* Multi-Page Streamlit Application Architecture
+* Continuous, Per-Dataset Live Data Pipelines
+* Minute-Resolution vs Hourly-Aggregate Data Tradeoffs
+* Streamlit Dialog State Management Across Reruns
+* Multi-Panel Synced Plotly Visualizations
+* Heliographic Coordinate Parsing and Mapping
+* Heuristic CME Transit / Arrival Estimation
+* JSON-Based Local Application Persistence
+* Custom CSS Theming of a Data Application
+* Iterative UI/UX Debugging From User Feedback
+
+---
+
+## SW-DSS Dashboard — Live Application Overview
+
+The notebooks and analysis above were the research foundation. That research has since grown into a real, continuously-updating Streamlit application — the **Space Weather Decision Support System (SW-DSS)**. This section documents what's actually running.
+
+### Data Pipeline
+
+```text
+NOAA SWPC / NASA DONKI
+        ↓
+raw JSON snapshots (data/raw/)
+        ↓
+per-dataset cleaning (src/swdss/features/build_master.py)
+        ↓
+processed parquet (data/processed/) — minute-level for Solar Wind/IMF,
+                                       native cadence for everything else
+        ↓
+master_df_v1.parquet — hourly-merged Sun-Earth feature table
+        ↓
+dashboard/home.py
+```
+
+`src/swdss/features/live_update.py` keeps every dataset refreshed on its own real-world cadence, independently:
+
+| Dataset | Cadence | Notes |
+| --- | --- | --- |
+| Solar Wind | 1 minute | retained at native minute resolution |
+| IMF | 1 minute | retained at native minute resolution |
+| Dst | 1 hour | native cadence |
+| Kp | 3 hours | forward-filled to hourly in the master table |
+| Solar Events | 30 minutes | appended + deduplicated (NOAA only returns a recent snapshot per call) |
+| CME (DONKI) | 1 hour | rolling 30-day fetch each cycle |
+| F10.7 | 24 hours | NOAA's own file already covers a monthly window |
+
+A key architectural decision: `master_df_v1.parquet` resamples Solar Wind/IMF to hourly means so they can be merged with the inherently-hourly Kp/Dst. That's necessary for combined Earth-response analysis, but it quietly smooths away genuine short-lived spikes. Anywhere the dashboard reports a "true extreme" (Strongest Value cards, Current Analysis tabs), it now reads from the **minute-level processed file directly**, not the hourly-merged table — fixing a real bug where the dashboard once under-reported true peak Solar Wind Speed/Density/Temperature/Bz.
+
+### Dashboard Pages
+
+* **Home** — the mission-control view: a live status terminal (Speed/Density/Temperature/Bz/Kp/Dst with plain-language Meaning + Risk), six Strongest Value cards (each with a reverse Solar-Event lookup button), the Sun-to-Earth Overview chart, the Solar Activity News Feed (By Severity / Latest Recorded, with a 💾 save-for-later), the Event Storyboard, Top 5 Recorded Conditions tables, the Heliomap, and a rotating reference-table panel.
+* **Photosphere** — Solar Events / CME / F10.7 tabs, each with Current Analysis + Predictions placeholder sub-tabs, an Event Animations grid, and its own CME/Flare/Radio-Burst/F10.7 reference panel.
+* **Heliosphere** — Solar Wind and IMF Current Analysis (corrected true-extreme cards), Dynamic Pressure, plus a Speed/Density/Temperature/Bz reference panel.
+* **Geospace** — Kp and Dst Current Analysis with their own reference panel.
+* **Analytics** — combined Earth-response correlation explorer across Solar Wind, IMF, Kp, and Dst.
+
+### Key Features
+
+* **Event Explorer** — given a solar event, finds its nearest associated CME (if any), estimates Earth-arrival via a constant-speed transit heuristic, and reports the actual recorded Solar Wind/IMF/Kp/Dst response at that time. A **reverse mode** starts from an effect (e.g. the week's lowest Dst) and traces back to a plausible solar cause.
+* **Event Storyboard** — an auto-playing, step-by-step animated retelling of one event's Sun-to-Earth journey, limited to events with a complete recorded chain through Dst.
+* **Heliomap** — plots Solar Events and CMEs at their real heliographic positions over an actual NASA SDO solar-disk image, parsed from NOAA's `location` field and DONKI's latitude/longitude.
+* **Sun-to-Earth Overview Chart** — a 6-panel stacked Plotly chart (IMF Bt/Bz, Dst, Density, Temperature, Speed, Kp) on one shared time axis; click anywhere to get every panel's value at that instant in one combined readout.
+* **Saved Events & Space Weather Concepts Library** — JSON-backed local persistence for bookmarking notable events and for organizing reference documents (Concepts / Articles / Research Papers) inside the dashboard.
+* **Retro/Vintage UI** — a deliberate Windows-95-meets-MATLAB visual theme applied consistently across every table, chart, dialog, and button.
+
+### Known Limitations (carried into the next milestone, deliberately not hidden)
+
+* CME-to-Earth arrival timing uses a constant-speed transit heuristic, not a validated propagation model (e.g. WSA-Enlil) — useful for ordering and context, not for precision forecasting.
+* Event-to-CME linking is time-proximity based, not physically confirmed causality.
+* True cross-panel hover-tooltip merging isn't supported by Plotly across separate y-axes within one figure; the Overview chart uses click-to-inspect instead of continuous hover.
+* `edited_events.json` field parsing (flare class, radio burst type, heliographic location) is defensive/best-effort against NOAA's live schema and hasn't yet been cross-validated against an independent source.
+
+---
+
+## Current Milestone — Validation, Testing, and Prediction Readiness
+
+With the SW-DSS dashboard now functional end-to-end, the focus shifts from building features to **validating** them before any forecasting work begins:
+
+* Cross-check dashboard-reported values (extremes, event chains, Heliomap positions) against independent real-data pulls.
+* Stress-test the live updater across multi-day continuous runs.
+* Review whether additional derived parameters are worth adding before model training — candidates include solar wind dynamic pressure, IMF clock angle, and storm-sudden-commencement flags.
+* Once the data and pipeline are validated, begin the Machine Learning phase: Kp/Dst (and eventually AE) forecasting models, using the now-stable master dataset as the feature source.
+
+The AE Index milestone below remains a real objective, but it's deferred until real-time AE data access is resolved — it now sits inside the upcoming Machine Learning phase as a prediction target, rather than as the immediate next data-collection task.
 
 ---
 
 
-## Next Milestone
 
-### AE Index Analysis
-
-Upcoming objectives:
-
-#### AE Index
-
-* Acquire AE Index data
-* Investigate auroral electrojet activity
-* Study polar ionospheric current systems
-* Compare AE, Kp, and Dst relationships
-* Analyze geomagnetic energy dissipation
-* Extend the Sun-Earth coupling chain to auroral activity
-
-### Expected Outcomes
-
-* Complete the first version of the end-to-end Sun-Earth dataset stack.
-* Investigate auroral activity during geomagnetic disturbances.
-* Compare global geomagnetic indices (Kp, Dst) with auroral responses (AE).
-* Improve understanding of energy transfer through Earth's magnetosphere.
-* Prepare datasets for future machine learning forecasting models.
-
-
----
 
 ## Long-Term Vision
 
