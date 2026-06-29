@@ -1,0 +1,22 @@
+# Block all space weather data formats everywhere
+*.csv
+*.json
+*.parquet
+*.ipynb
+*.lst
+*.fmt
+*.txt
+
+# Block all active data and asset storage directories
+data/
+raw/
+processed/
+notebooks/
+docs/
+models/
+dashboard/assets/
+
+# Block hidden system files
+.DS_Store
+.vscode/
+venv/
