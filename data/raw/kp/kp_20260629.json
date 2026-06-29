@@ -352,5 +352,17 @@
     "Kp": 0.33,
     "a_running": 2,
     "station_count": 8
+  },
+  {
+    "time_tag": "2026-06-29T09:00:00",
+    "Kp": 1.33,
+    "a_running": 5,
+    "station_count": 8
+  },
+  {
+    "time_tag": "2026-06-29T12:00:00",
+    "Kp": 1.0,
+    "a_running": 4,
+    "station_count": 8
   }
 ]

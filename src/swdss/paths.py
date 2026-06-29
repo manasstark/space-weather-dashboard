@@ -6,8 +6,11 @@ DATA_DIR = PROJECT_ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"
 PROCESSED_DIR = DATA_DIR / "processed"
 FEATURES_DIR = DATA_DIR / "features"
+TRAINING_FEATURES_DIR = FEATURES_DIR / "training"
 
 MASTER_V1_PATH = FEATURES_DIR / "master_df_v1.parquet"
+
+MODELS_DIR = PROJECT_ROOT / "models"
 
 
 def ensure_data_dirs() -> None:
@@ -27,5 +30,7 @@ def ensure_data_dirs() -> None:
         PROCESSED_DIR / "cme",
         PROCESSED_DIR / "f107",
         FEATURES_DIR,
+        TRAINING_FEATURES_DIR,
+        MODELS_DIR,
     ]:
         folder.mkdir(parents=True, exist_ok=True)

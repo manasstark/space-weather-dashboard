@@ -1,5 +1,6 @@
 import base64
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,32 @@ except ImportError:
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MASTER_PATH = PROJECT_ROOT / "data" / "features" / "master_df_v1.parquet"
 REFRESH_SECONDS = 15
+
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from swdss.models.jobs import (
+    accuracy_label,
+    confidence_pct,
+    delete_job,
+    get_job,
+    get_job_stats,
+    get_jobs,
+    job_mae,
+    poll_jobs,
+    save_job,
+    stability_metric,
+    start_job,
+)
+from swdss.models.predict import latest_minute_observation
+from swdss.models.registry import (
+    HORIZONS,
+    IMF_VARIABLES,
+    SOLAR_WIND_VARIABLES,
+    VARIABLE_LABELS,
+    VARIABLE_UNITS,
+)
 
 
 st.set_page_config(
@@ -1439,6 +1466,309 @@ def correlation_explorer(df: pd.DataFrame, columns: list[str], title: str) -> No
     plot_retro(scatter)
 
 
+def render_prediction_queue_stats(dataset: str) -> None:
+    stats = get_job_stats(dataset)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        metric_card("Running", str(stats["running"]), "Active prediction jobs")
+    with c2:
+        metric_card("Completed Today", str(stats["completed_today"]), "Jobs finished today")
+    with c3:
+        avg_mae_text = "N/A" if stats["avg_mae"] is None else f"{stats['avg_mae']:.2f}"
+        metric_card("Average MAE", avg_mae_text, "Across all completed jobs")
+
+
+def render_prediction_job_tiles(dataset: str) -> None:
+    jobs = get_jobs(dataset)
+    if not jobs:
+        st.info("No predictions started yet. Pick a variable and horizon, then click Start Prediction.")
+        return
+
+    cols_per_row = 4
+    for row_start in range(0, len(jobs), cols_per_row):
+        chunk = jobs[row_start : row_start + cols_per_row]
+        cols = st.columns(cols_per_row)
+
+        for col, job in zip(cols, chunk):
+            with col:
+                label = VARIABLE_LABELS.get(job["variable"], job["variable"])
+                unit = VARIABLE_UNITS.get(job["variable"], "")
+                in_progress = job["status"] == "in_progress"
+                icon = "🟢" if in_progress else "✅"
+                color = "#1f4a7a" if in_progress else "#3a3a3a"
+
+                st.markdown(
+                    f"""
+                    <div style="
+                        background:{color};
+                        border:2px solid #808080;
+                        border-radius:4px;
+                        height:70px;
+                        display:flex;
+                        align-items:center;
+                        justify-content:center;
+                        margin-bottom:6px;
+                        font-size:1.8rem;
+                    ">{icon}</div>
+                    <div style="font-weight:700;">{escape(label)} — {job['horizon']}h</div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                start_hour = pd.Timestamp(job["start_hour"])
+                if in_progress:
+                    st.caption(f"Running | Started {start_hour.strftime('%d %b %H:%M UTC')}")
+                else:
+                    error_text = "N/A"
+                    if job["actual_value"] is not None and job["ticks"]:
+                        error = abs(job["ticks"][-1]["predicted_value"] - job["actual_value"])
+                        error_text = f"{error:.2f} {unit}"
+                    st.caption(f"Completed | Error: {error_text}")
+
+                if st.button("Open", key=f"job_tile_{job['job_id']}", use_container_width=True):
+                    open_dialog("prediction_job", job["job_id"])
+
+
+@st.dialog("Prediction Job", width="large", dismissible=False)
+def show_prediction_job(job_id: str) -> None:
+    render_dialog_close_button("close_prediction_job")
+
+    job = get_job(job_id)
+    if job is None:
+        st.error("This prediction job could not be found.")
+        return
+
+    poll_jobs(job["dataset"])
+    job = get_job(job_id)
+
+    dataset = job["dataset"]
+    variable = job["variable"]
+    horizon = job["horizon"]
+    label = VARIABLE_LABELS.get(variable, variable)
+    unit = VARIABLE_UNITS.get(variable, "")
+    decimals = 0 if unit == "K" else 2
+
+    start_hour = pd.Timestamp(job["start_hour"])
+    target_hour = pd.Timestamp(job["target_hour"])
+    status_text = "In Progress" if job["status"] == "in_progress" else "Completed"
+    ticks = job["ticks"]
+
+    st.subheader(f"{label} — {horizon}h Forecast")
+    st.caption(
+        f"Status: {status_text} | Started {start_hour.strftime('%Y-%m-%d %H:%M UTC')} | "
+        f"Target: {target_hour.strftime('%Y-%m-%d %H:%M UTC')}"
+    )
+
+    live_ts, live_val = latest_minute_observation(dataset, variable)
+    latest_predicted = ticks[-1]["predicted_value"] if ticks else None
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        metric_card(
+            "Current NOAA",
+            format_value(live_val, f" {unit}", decimals),
+            "N/A" if live_ts is None else live_ts.strftime("%H:%M:%S UTC"),
+        )
+    with c2:
+        conf = confidence_pct(job)
+        metric_card(
+            "Confidence",
+            "N/A" if conf is None else f"{conf:.0f}%",
+            "Derived from model R²",
+        )
+    with c3:
+        if latest_predicted is not None and live_val is not None:
+            change = latest_predicted - live_val
+            trend = "Stable" if abs(change) < 1e-9 else ("Increasing" if change > 0 else "Decreasing")
+            sign = "+" if change >= 0 else ""
+            metric_card("Expected Change", f"{sign}{format_value(change, f' {unit}', decimals)}", f"Trend: {trend}")
+        else:
+            metric_card("Expected Change", "N/A", "")
+    with c4:
+        stability_label, stability_delta = stability_metric(job)
+        metric_card(
+            "Stability",
+            "N/A" if stability_label is None else stability_label,
+            "N/A" if stability_delta is None else f"Δ = {stability_delta:.2f} {unit}",
+        )
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+
+    if job["status"] == "completed" and job["actual_value"] is not None:
+        final_pred = ticks[-1]["predicted_value"] if ticks else None
+        error = None if final_pred is None else abs(final_pred - job["actual_value"])
+        error_pct = None if error is None or job["actual_value"] == 0 else error / abs(job["actual_value"]) * 100
+        a1, a2, a3, a4 = st.columns(4)
+        with a1:
+            metric_card("Final Prediction", format_value(final_pred, f" {unit}", decimals), "")
+        with a2:
+            metric_card("Actual NOAA", format_value(job["actual_value"], f" {unit}", decimals), "")
+        with a3:
+            metric_card("Absolute Error", "N/A" if error is None else format_value(error, f" {unit}", decimals), "")
+        with a4:
+            acc_label = "N/A" if error_pct is None else accuracy_label(error_pct)
+            metric_card("Accuracy", acc_label, "" if error_pct is None else f"{error_pct:.1f}% error")
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+
+    metrics = job.get("metrics", {})
+    st.markdown(
+        f"""
+        <style>
+        .job-terminal {{
+            background: #050505;
+            border: 2px solid #ffffff;
+            box-shadow: 3px 3px 0px #808080;
+            padding: 12px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.78rem;
+            color: #00ff88;
+        }}
+        .job-terminal .pipeline-step {{ color: #9adfff; margin-left: 12px; }}
+        .job-terminal div {{ margin-bottom: 3px; }}
+        .job-terminal.scroll {{ max-height: 320px; overflow-y: auto; }}
+        </style>
+        <div class="job-terminal">
+            <div>MODEL: {escape(job['model_name'])}</div>
+            <div>R&sup2;: {metrics.get('r2', float('nan')):.4f} &nbsp;|&nbsp; MAE: {metrics.get('mae', float('nan')):.3f} {escape(unit)}
+            &nbsp;|&nbsp; RMSE: {metrics.get('rmse', float('nan')):.3f} {escape(unit)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+
+    if not ticks:
+        st.info("No ticks logged yet.")
+        return
+
+    blocks = []
+    for i, tick in enumerate(reversed(ticks)):
+        minute_at = tick["minute_at"]
+        minute_label = "N/A" if minute_at is None else pd.Timestamp(minute_at).strftime("%H:%M:%S UTC")
+        noaa_text = "N/A" if tick["noaa_value"] is None else f"{tick['noaa_value']:.{decimals}f} {unit}"
+        pred_text = f"{tick['predicted_value']:.{decimals}f} {unit}"
+        used_horizon = tick.get("used_horizon", horizon)
+        next_step = "Waiting For Next NOAA Update..." if i == 0 and job["status"] == "in_progress" else "Superseded"
+        blocks.append(
+            f"<div>[{escape(minute_label)}] NOAA {escape(label)}: {escape(noaa_text)}</div>"
+            f"<div class='pipeline-step'>&rarr; Features Generated</div>"
+            f"<div class='pipeline-step'>&rarr; Model Loaded (Horizon: {used_horizon}h)</div>"
+            f"<div class='pipeline-step'>&rarr; Prediction (Target {target_hour.strftime('%H:%M UTC')}): {escape(pred_text)}</div>"
+            f"<div class='pipeline-step'>&rarr; {next_step}</div>"
+        )
+
+    st.markdown(
+        f"""
+        <div class="job-terminal scroll">
+            {''.join(blocks)}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    plotted = [t for t in ticks if t["minute_at"] is not None]
+    if plotted:
+        chart_times = [pd.Timestamp(t["minute_at"]) for t in plotted]
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=chart_times,
+                y=[t["predicted_value"] for t in plotted],
+                mode="lines+markers",
+                name=f"Predicted ({target_hour.strftime('%H:%M UTC')})",
+            )
+        )
+        fig.update_layout(
+            title=f"{label} — Prediction Drift Toward Target",
+            height=360,
+            legend_title_text="",
+        )
+        plot_retro(fig)
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Job Summary")
+
+    mae = job_mae(job)
+    summary_df = pd.DataFrame(
+        [
+            {
+                "Variable": label,
+                "Horizon": f"{horizon}h",
+                "Started": start_hour.strftime("%Y-%m-%d %H:%M UTC"),
+                "Target": target_hour.strftime("%Y-%m-%d %H:%M UTC"),
+                f"Initial Prediction ({unit})": round(ticks[0]["predicted_value"], decimals),
+                f"Final Prediction ({unit})": round(ticks[-1]["predicted_value"], decimals),
+                f"Actual NOAA ({unit})": "Pending" if job["actual_value"] is None else round(job["actual_value"], decimals),
+                f"Mean Error - All Ticks ({unit})": "N/A" if mae is None else round(mae, decimals),
+                "Model": job["model_name"],
+                "R²": round(metrics.get("r2", float("nan")), 4),
+            }
+        ]
+    )
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+    if job["status"] == "completed":
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+        already_saved = job.get("saved", False)
+        save_col, delete_col = st.columns(2)
+        with save_col:
+            if st.button(
+                "💾 Saved" if already_saved else "💾 Save",
+                key=f"save_{job['job_id']}",
+                use_container_width=True,
+                disabled=already_saved,
+            ):
+                save_job(job["job_id"])
+                st.toast("Prediction saved.")
+                st.rerun()
+        with delete_col:
+            if st.button("🗑️ Delete", key=f"delete_{job['job_id']}", use_container_width=True):
+                delete_job(job["job_id"])
+                close_active_dialog()
+
+
+def prediction_panel(dataset: str, variables: list[str]) -> None:
+    poll_jobs(dataset)
+
+    render_prediction_queue_stats(dataset)
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+
+    col1, col2 = st.columns(2)
+    variable = col1.selectbox(
+        "Target Variable",
+        variables,
+        format_func=lambda v: VARIABLE_LABELS[v],
+        key=f"{dataset}_pred_var",
+    )
+    horizon = col2.selectbox(
+        "Forecast Horizon",
+        HORIZONS,
+        format_func=lambda h: f"{h} Hour" + ("s" if h != 1 else ""),
+        key=f"{dataset}_pred_horizon",
+    )
+
+    if st.button("Start Prediction", key=f"{dataset}_pred_btn"):
+        try:
+            job, created = start_job(dataset, variable, horizon)
+        except Exception as exc:
+            st.error(f"Could not start prediction: {exc}")
+            return
+        label = VARIABLE_LABELS.get(variable, variable)
+        if created:
+            st.toast(f"Started {label} {horizon}h prediction.")
+        else:
+            start_hour = pd.Timestamp(job["start_hour"])
+            st.warning(
+                f"A {label} {horizon}h prediction is already in progress "
+                f"(started {start_hour.strftime('%H:%M UTC')}). Open its card below to view live drift."
+            )
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("#### Active & Recent Predictions")
+    render_prediction_job_tiles(dataset)
+
+
 def current_analysis_solar_wind(df: pd.DataFrame) -> None:
     st.subheader("Solar Wind Current Analysis")
 
@@ -1778,14 +2108,14 @@ def heliosphere_page(df: pd.DataFrame) -> None:
         with inner[0]:
             current_analysis_solar_wind(df)
         with inner[1]:
-            st.info("Prediction module will be added later.")
+            prediction_panel("solar_wind", SOLAR_WIND_VARIABLES)
 
     with tabs[1]:
         inner = st.tabs(["Current Analysis", "Predictions"])
         with inner[0]:
             current_analysis_imf(df)
         with inner[1]:
-            st.info("Prediction module will be added later.")
+            prediction_panel("imf", IMF_VARIABLES)
 
     with tabs[2]:
         st.subheader("Derived Parameters")
@@ -3711,6 +4041,8 @@ if active_dialog is not None:
         show_animations_grid()
     elif kind == "library":
         show_space_weather_library()
+    elif kind == "prediction_job":
+        show_prediction_job(payload)
 
 if page == "Home Page":
     home_page(df_7d)
