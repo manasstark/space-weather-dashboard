@@ -1,894 +1,56 @@
 # Space Weather Dashboard
 
-An end-to-end Data Science, Machine Learning, and Space Systems project that collects, analyzes, visualizes, and forecasts space weather conditions using real-world NOAA datasets.
+**SW-DSS — Space Weather Decision Support System**
 
-This project is being developed as a portfolio project to learn professional software development, data engineering, data analysis, machine learning, scientific computing, and dashboard deployment while working with real scientific datasets from the field of Space Weather.
+An end-to-end data engineering, machine learning, and scientific visualization project that ingests live NOAA / NASA DONKI space weather data, analyzes Sun-Earth coupling, and runs a continuous, self-evaluating forecasting engine — all inside a custom-themed Streamlit application.
 
----
-
-## Project Objectives
-
-The primary objectives of this project are:
-
-* Collect real-time space weather data from NOAA APIs
-* Build automated data pipelines
-* Analyze solar and geomagnetic activity
-* Create interactive visualizations
-* Develop forecasting models
-* Build a production-style dashboard
-* Apply machine learning to scientific datasets
-* Practice professional Git and GitHub workflows
+Built as a portfolio project to practice professional software development, data pipeline design, applied machine learning, and dashboard engineering using real scientific datasets.
 
 ---
 
-## Space Weather Variables
+## Table of Contents
 
-This project will work with:
-
-### Solar Activity
-
-* Solar Flares
-* Coronal Mass Ejections (CMEs)
-* Sunspot Activity
-* F10.7 Solar Flux
-
-### Solar Wind
-
-* Solar Wind Speed
-* Proton Density
-* Plasma Temperature
-* Interplanetary Magnetic Field (IMF)
-
-### Geomagnetic Activity
-
-* Kp Index
-* Dst Index
-* Auroral Activity
-* Geomagnetic Storm Events
+* [Overview](#overview)
+* [Key Features](#key-features)
+* [Architecture](#architecture)
+* [Project Structure](#project-structure)
+* [Live Prediction Engine](#live-prediction-engine)
+* [Dashboard Pages](#dashboard-pages)
+* [Technology Stack](#technology-stack)
+* [Running the Project](#running-the-project)
+* [Research & Exploratory Analysis](#research--exploratory-analysis)
+* [Known Limitations](#known-limitations)
+* [Development Roadmap](#development-roadmap)
+* [Concepts & Skills Demonstrated](#concepts--skills-demonstrated)
+* [Author](#author)
 
 ---
 
-## Technology Stack
+## Overview
 
-### Programming
+The project tracks the full Sun-to-Earth space weather chain — solar activity, solar wind, the interplanetary magnetic field, and the resulting geomagnetic response — using real NOAA SWPC and NASA DONKI data. It started as a series of exploratory Jupyter notebooks and has since grown into:
 
-* Python 3.11
-
-### Data Science
-
-* Pandas
-* NumPy
-
-### Data Acquisition
-
-* Requests
-* NOAA APIs
-
-### Visualization
-
-* Plotly
-
-### Dashboard
-
-* Streamlit (multi-page application with a custom retro/vintage UI theme)
-* streamlit-autorefresh (live periodic refresh)
-
-### Data Acquisition (Expanded)
-
-* NASA DONKI API (Coronal Mass Ejections)
-
-### Visualization (Expanded)
-
-* Plotly Graph Objects & Subplots (multi-panel synced time-series charts)
-* Pillow (image processing for the embedded solar-disk background)
-
-### Persistence
-
-* JSON-based local persistence (Saved Events, Space Weather Concepts document library)
-
-### Machine Learning
-
-* Scikit-Learn
-* XGBoost (Planned)
-
-### Development Tools
-
-* Git
-* GitHub
-* VS Code
-* Jupyter Notebook
+1. A **continuous ingestion pipeline** that refreshes seven independent datasets on their own real-world cadences.
+2. A **multi-page Streamlit dashboard** with a deliberate retro/vintage UI, live status terminals, event tracing, and a heliographic event map.
+3. A **live, self-evaluating machine learning forecasting engine** for Solar Wind and IMF variables, with automatic model selection and forecast-vs-actual accuracy tracking.
 
 ---
 
-## Project Structure
+## Key Features
 
-```text
-Space_Weather_Dashboard/
-│
-├── data/
-│   ├── raw/
-│   └── processed/
-│
-├── notebooks/
-│   ├── Day2_practice.ipynb
-│   └── NOAA_Solar_Wind_EDA.ipynb
-│
-├── src/
-│   ├── get_noaa_data.py
-│   ├── data_collection/
-│   ├── data_processing/
-│   ├── visualization/
-│   └── forecasting/
-│
-├── dashboard/
-│
-├── models/
-│
-├── docs/
-│   └── Day3_Notes.md
-│
-├── README.md
-├── requirements.txt
-└── .gitignore
-```
-
-### Current Project Structure (Updated)
-
-The structure above reflects the project's earliest notebook-driven phase. The project has since grown into a real package + live dashboard application:
-
-```text
-Space Weather Dashboard/
-│
-├── data/
-│   ├── raw/             # Exact NOAA / DONKI API responses, per dataset
-│   ├── processed/       # Cleaned per-dataset parquet (minute-level for Solar
-│   │                    #   Wind/IMF, native cadence for Kp/Dst/Solar
-│   │                    #   Events/CME/F10.7)
-│   ├── features/
-│   │   └── master_df_v1.parquet   # Hourly merged Sun-Earth feature table
-│   ├── library/         # Uploaded Space Weather Concepts documents
-│   └── saved_events.json / library_index.json
-│
-├── src/swdss/
-│   ├── paths.py
-│   ├── ingest/
-│   ├── transform/
-│   ├── features/
-│   │   ├── build_master.py    # Fetch + clean + merge (one-shot build)
-│   │   └── live_update.py     # Continuous per-dataset updater (own cadences)
-│   └── utils/
-│
-├── dashboard/
-│   ├── home.py           # Full multi-page Streamlit application
-│   └── assets/            # Background imagery (magnetosphere, solar disk)
-│
-├── notebooks/            # Original exploratory research notebooks (kept as
-│                          #   historical record of the underlying analysis)
-│
-├── docs/
-└── models/               # Reserved for the upcoming ML forecasting phase
-```
+* Continuous, per-dataset live ingestion from NOAA SWPC and NASA DONKI (own cadence per dataset — see [Architecture](#architecture))
+* Minute-resolution storage for Solar Wind/IMF so true extremes aren't smoothed away by hourly aggregation
+* Live status terminal with plain-language Meaning + Risk per variable
+* Forward + reverse **Event Explorer** tracing a Sun-to-Earth causal chain, plus an auto-playing **Event Storyboard**
+* **Heliomap** — real heliographic Solar Event / CME positions plotted over an NASA SDO solar-disk image
+* 6-panel synced **Sun-to-Earth Overview** chart with click-to-inspect readout
+* Saved Events bookmarking and a Space Weather Concepts document library, both JSON-backed
+* **Live Prediction Engine**: continuous, self-refining forecasting jobs for Solar Wind and IMF, with automatic model selection, live drift tracking, and forecast-vs-actual accuracy evaluation (see below)
+* Retro/vintage UI theme applied consistently across every table, chart, dialog, and button
 
 ---
 
-## Development Roadmap
-
-### Phase 1 — Foundation
-
-* [x] Project Structure
-* [x] Python Environment
-* [x] Virtual Environment Setup
-* [x] Package Management
-* [x] Git & GitHub Setup
-* [x] Initial Repository
-* [x] Development Workflow
-
-### Phase 2 — Data Collection
-
-* [x] NOAA API Integration
-* [x] Solar Wind Dataset Download
-* [x] JSON Data Parsing
-* [x] DataFrame Creation
-* [x] Data Type Conversion
-* [x] Multi Dataset Integration
-* [ ] Automated Data Retrieval
-* [ ] Historical Data Pipeline
-* [ ] Raw Data Storage Pipeline
-
-### Phase 3 — Data Analysis
-
-* [x] Exploratory Data Analysis (EDA)
-* [x] Data Type Conversion
-* [x] Descriptive Statistics
-* [x] Correlation Analysis
-* [x] Solar Wind Event Investigation
-* [x] IMF Statistical Analysis
-* [x] IMF Event Investigation
-* [x] Cross Dataset Correlation Analysis
-* [x] Geomagnetic Activity Analysis
-* [x] Kp Index Statistical Analysis
-* [x] Kp Event Investigation
-* [x] Sun-Earth Coupling Analysis
-* [x] Dst Statistical Analysis
-* [x] Dst Event Investigation
-* [x] Time-Lag Analysis
-* [x] Forecast Feature Investigation
-* [x] Solar Activity Event Analysis
-* [x] X-Ray Event Classification Analysis
-* [x] Solar Flare Analysis
-* [x] Active Region Investigation
-* [x] Cross-Dataset Active Region Analysis
-* [x] Coronal Mass Ejection (CME) Analysis
-* [x] CME Speed Distribution Analysis
-* [x] CME Source Region Analysis
-* [x] F10.7 Solar Flux Analysis
-* [x] Background Solar Activity Analysis
-
-
-### Phase 4 — Visualization
-
-* [x] Solar Wind Speed Visualization
-* [x] Solar Wind Density Visualization
-* [x] Solar Wind Temperature Visualization
-* [x] IMF Bz Visualization
-* [x] IMF Bt Visualization
-* [x] Speed Vs Temperature Scatter Plot
-* [x] Kp Index Visualization
-* [x] Sun-Earth Correlation Heatmap
-* [x] Bz vs Kp Scatter Plot
-* [x] Dst Index Visualization
-* [x] Kp vs Dst Scatter Plot
-* [x] Bz vs Dst Scatter Plot
-* [x] Lag Analysis Visualization
-* [x] Multi-Variable Dashboard
-* [x] Real-Time Monitoring
-* [x] Interactive Controls
-* [x] Live Data Refresh
-
-### Phase 5 — Machine Learning
-
-* [ ] Feature Engineering
-* [ ] Kp Index Forecasting
-* [ ] Dst Index Forecasting
-* [ ] Model Training
-* [ ] Model Evaluation
-* [ ] Prediction Pipeline
-
-### Phase 6 — Deployment
-
-* [x] Streamlit Application
-* [ ] Dashboard Deployment
-* [ ] Documentation
-* [ ] Public Release
-
-### Phase 7 — Space Weather Decision Support System (SW-DSS)
-
-* [x] Multi-Page Dashboard Architecture (Home, Photosphere, Heliosphere, Geospace, Analytics)
-* [x] Continuous Per-Dataset Live Updater (own cadence per dataset)
-* [x] Solar Events, CME (DONKI), and F10.7 Ingestion Pipelines
-* [x] Minute-Level vs Hourly-Aggregate Data Architecture (no more smoothed-away extremes)
-* [x] Status Terminal (live Meaning + Risk per variable)
-* [x] Strongest Value Cards with Reverse Solar-Event Lookup
-* [x] Forward + Reverse Event Explorer (Sun-to-Earth causal chain)
-* [x] Auto-Playing Event Storyboard Animation
-* [x] Heliomap (real heliographic CME / Solar Event positions on an SDO solar-disk image)
-* [x] Sun-to-Earth Overview Multi-Panel Chart (click-to-inspect all panels)
-* [x] Per-Page Reference Tables (Bz/Kp/Dst/Speed/Density/Temperature/CME/Flare/Radio Burst/F10.7)
-* [x] Saved Events (persistent bookmarking)
-* [x] Space Weather Concepts Document Library (Concepts / Articles / Research Papers)
-* [x] Retro/Vintage UI Theme Applied Across the Entire Application
-* [ ] Cross-Validation Against Independent Real Data
-* [ ] Multi-Day Continuous Pipeline Stress Test
-* [ ] Additional Derived Parameters Review (dynamic pressure, IMF clock angle, SSC flags, etc.)
-
----
-
-## Current Progress
-
-### Phase 1 Completed
-
-* Environment Setup
-* GitHub Repository
-* Development Workflow
-* Project Foundation
-
-### Phase 2 In Progress
-
-* NOAA API Connected
-* Solar Wind Dataset Downloaded
-* JSON Parsing Implemented
-* DataFrame Construction Completed
-* IMF Dataset Downloaded
-* IMF Data Cleaning Completed
-* IMF Analysis Completed 
-* Solar Wind + IMF integration Completed
-* Data Cleaning Completed
-* Kp Dataset Downloaded
-* Kp Data Cleaning Completed
-* Dst Dataset Downloaded
-* Dst Data Cleaning Completed
-
-### Phase 3 In Progress
-
-* Descriptive Statistics Completed
-* Correlation Analysis Completed
-* Solar Wind Event Investigation Completed
-* IMF Statistical Analysis Completed
-* IMF Event Investigation Completed
-* Cross-Dataset Correlation Analysis Completed
-* Space Weather Relationship Analysis Completed
-* Kp Statistical Analysis Completed
-* Kp Event Investigation Completed
-* Sun-Earth Coupling Analysis Completed
-* Correlation Heatmap Analysis Completed
-* Dst Statistical Analysis Completed
-* Dst Event Investigation Completed
-* Solar Wind + IMF + Kp + Dst Integration Completed
-* Time-Lag Analysis Completed
-* Forecast Feature Investigation Completed
-
----
-
-## First NOAA Dataset Analysis
-
-### Dataset 
-
-NOAA Solar Wind Plasma Dataset
-
-The dataset used for this analysis starts from 13 june 2026 to 20 june 2026.
-
-Variables:
-
-* Time Tag
-* Density
-* Speed
-* Temperature
-
-Dataset Size:
-
-* ~9,200 observations
-* Approximately 7 days of solar wind measurements
-
-
-## Second NOAA Dataset Analysis
-
-### Dataset
-
-NOAA Interplanetary Magnetic Field (IMF) Dataset
-
-The dataset used for this analysis starts from 14 june 2026 to 21 june 2026.
-
-Variables:
-
-* Time Tag
-* Bx
-* By
-* Bz
-* Bt
-
-Dataset Size:
-
-* ~9,600 observations
-* Approximately 7 days of IMF measurements
-
-
-
-## Third NOAA Dataset Analysis
-
-### Dataset
-
-NOAA Planetary Kp Index Dataset
-
-The dataset used for this analysis starts from 14 June 2026 to 21 June 2026.
-
-Variables:
-
-* Time Tag
-* Kp
-* a_running
-* station_count
-
-Dataset Size:
-
-* 59 observations
-* Approximately 7 days of geomagnetic measurements
-
-## Fourth NOAA Dataset Analysis
-
-### Dataset
-
-NOAA Dst Index Dataset
-
-The dataset used for this analysis starts from 15 June 2026 to 22 June 2026.
-
-Variables:
-
-* Time Tag
-* Dst
-
-Dataset Size:
-
-* 167 observations
-* Approximately 7 days of hourly geomagnetic storm measurements
-
-# Solar Activity Event Analysis
-
-## Dataset Overview
-
-The Solar Activity Event dataset contains 1,427 recorded solar events and 29 variables describing event timing, location, observatory information, event classifications, and active region associations.
-
-### Event Distribution
-
-| Event Type | Count |
-| ---------- | ----: |
-| XRA        |   501 |
-| RSP        |   457 |
-| RBR        |   311 |
-| FLA        |   129 |
-| RNS        |    14 |
-| DSF        |    11 |
-| EPL        |     3 |
-| BSL        |     1 |
-
-### Key Findings
-
-* 501 X-Ray events were recorded.
-* 129 optical solar flares were observed.
-* One X-Class event and 22 M-Class events were identified.
-* Solar activity peaked on 2026-06-03.
-* AR4455 was the most active NOAA active region with 153 recorded events.
-
-# Coronal Mass Ejection (CME) Analysis
-
-## CME Statistics
-
-| Metric        |     Value |
-| ------------- | --------: |
-| CME Events    |       124 |
-| CME Analyses  |       141 |
-| Average Speed |  618 km/s |
-| Median Speed  |  522 km/s |
-| Maximum Speed | 1692 km/s |
-
-### Most Active CME Regions
-
-| Active Region | CME Count |
-| ------------- | --------: |
-| AR14464       |        14 |
-| AR14455       |         8 |
-| AR14461       |         3 |
-| AR14463       |         3 |
-| AR14465       |         3 |
-
-### Key Findings
-
-* AR14464 was the most productive CME region.
-* AR14455 (AR4455) produced 8 CMEs.
-* The fastest CME reached 1692 km/s.
-* Multiple fast CMEs occurred during the June 3 solar activity peak.
-
-# F10.7 Solar Flux Analysis
-
-## Daily Flux Statistics
-
-| Metric  | Value |
-| ------- | ----: |
-| Mean    | 125.7 |
-| Median  |   128 |
-| Minimum |   101 |
-| Maximum |   148 |
-
-### Key Findings
-
-* The Sun remained moderately active throughout the observation period.
-* The 90-day average remained stable between 124 and 126.
-* Elevated solar activity persisted throughout June 2026.
-* Results are consistent with observed flare and CME activity.
-
----
-
-## Statistical Summary
-
-### Solar Wind Speed
-
-* Average Speed: ~435 km/s
-* Maximum Speed: ~607 km/s
-* Minimum Speed: ~357 km/s
-
-### Solar Wind Density
-
-* Average Density: ~6.53 particles/cm³
-* Maximum Density: ~17.49 particles/cm³
-* Minimum Density: ~0.09 particles/cm³
-
-### Solar Wind Temperature
-
-* Average Temperature: ~112,257 K
-* Maximum Temperature: ~552,298 K
-* Minimum Temperature: ~2,000 K
-
----
-
-## Correlation Analysis
-
-| Variables             | Correlation |
-| --------------------- | ----------: |
-| Density ↔ Speed       |      -0.189 |
-| Density ↔ Temperature |       0.345 |
-| Speed ↔ Temperature   |       0.522 |
-
-### Initial Findings
-
-* Solar Wind Speed and Temperature show a moderate positive relationship.
-* Density and Speed show a weak inverse relationship.
-* Faster solar wind streams generally tend to be hotter.
-* Density appears to be more variable and less predictive than speed.
-
----
-
-## Event Investigation
-
-### Fastest Solar Wind Event
-
-* Time: 2026-06-13 15:59
-* Speed: 606.9 km/s
-* Density: 0.27 particles/cm³
-* Temperature: 8,092 K
-
-### Densest Solar Wind Event
-
-* Time: 2026-06-17 01:55
-* Density: 17.49 particles/cm³
-* Speed: 403.2 km/s
-* Temperature: 73,222 K
-
-### Hottest Solar Wind Event
-
-* Time: 2026-06-14 03:33
-* Temperature: 552,298 K
-* Density: 12.85 particles/cm³
-* Speed: 530.7 km/s
-
----
-
-## IMF Statistical Summary
-
-### Bz
-
-* Average: ~0.56 nT
-* Maximum: 11.40 nT
-* Minimum: -7.51 nT
-
-### Bt
-
-* Average: ~6.00 nT
-* Maximum: 12.00 nT
-* Minimum: 0.62 nT
-
-## IMF Event Investigation
-
-### Strongest Southward IMF Event
-
-* Time: 2026-06-16 13:47
-* Bz: -7.51 nT
-* Bt: 7.75 nT
-
-### Strongest Magnetic Field Event
-
-* Time: 2026-06-17 05:32
-* Bt: 12.00 nT
-* Bz: 7.58 nT
-
-## IMF Direction Analysis
-
-### Positive Bz
-
-* 5,408 observations
-
-### Negative Bz
-
-* 4,194 observations
-
-### Findings
-
-* Approximately 56% of IMF observations were northward.
-* Approximately 44% of IMF observations were southward.
-* Bz remained one of the most important forecasting variables identified during analysis.
-
-## Solar Wind + IMF Integrated Analysis
-
-* The Solar Wind Plasma and IMF datasets were merged using NOAA timestamps. (for this Again the solar wind data is from dates 14 June and 21 June)
-
-### Correlation Results
-| Variables             | Correlation | Interpretation |
-| --------------------- | ----------: | -------------- |
-| Speed ↔ Temperature   |       0.810 | Strong positive relationship |
-| Speed ↔ Bz            |       0.046 | No meaningful relationship |
-| Density ↔ Bz          |       0.251 | Weak positive relationship |
-| Temperature ↔ Bz      |      -0.181 | Weak negative relationship |
-| Bz ↔ Bt               |       0.247 | Weak positive relationship |
-
-### Major Observations
-
-* Solar wind speed strongly correlates with plasma temperature.
-* Solar wind properties show little relationship with Bz orientation.
-* Bz behaves largely independently from plasma conditions.
-* Plasma properties and magnetic field orientation should be analyzed separately when assessing space weather conditions.
-
-## Advanced Space Weather Concepts Explored
-
-* Interplanetary Magnetic Field (IMF)
-* Frozen-In Magnetic Fields
-* Bx, By, Bz Components
-* Total Magnetic Field Strength (Bt)
-* Southward Bz and Magnetic Reconnection
-* Geoeffective Space Weather Conditions
-* Solar Wind and IMF Coupling
-* Forecasting Variables Used in Geomagnetic Storm Prediction
-* IMF Persistence and Duration Analysis
-
-
-## Kp Statistical Summary
-
-### Kp Index
-
-* Average: 1.63
-* Maximum: 3.00
-* Minimum: 0.33
-
-### Interpretation
-
-* Average conditions remained geomagnetically quiet.
-* No geomagnetic storm conditions were observed.
-* The highest activity level reached Kp = 3 (Unsettled Conditions).
-
-
-## Kp Event Investigation
-
-### Highest Kp Event
-
-* Time: 2026-06-19 00:00
-* Kp: 3.00
-* a_running: 15
-
-### Lowest Kp Event
-
-* Time: 2026-06-17 18:00
-* Kp: 0.33
-* a_running: 2
-
-## Solar Wind + IMF + Kp Integrated Analysis
-
-The Solar Wind, IMF, and Kp datasets were merged using NOAA timestamps and common 3-hour aggregation windows.
-
-This analysis represents the first direct investigation of Sun-Earth coupling within the project.
-
-### Correlation Results
-
-| Variables | Correlation |
-| ---------- | ----------: |
-| Kp ↔ Density | 0.161 |
-| Kp ↔ Speed | -0.107 |
-| Kp ↔ Temperature | -0.017 |
-| Kp ↔ Bz | -0.188 |
-| Kp ↔ Bt | 0.190 |
-
-### Findings
-
-* Kp showed weak relationships with all investigated solar wind and IMF variables during the study period.
-* The negative correlation between Kp and Bz is consistent with space weather theory.
-* Southward IMF conditions were associated with increased geomagnetic activity.
-* The study period remained geomagnetically quiet, limiting the strength of observed relationships.
-* Results suggest that geomagnetic activity depends on multiple interacting variables rather than a single parameter.
-
-## Geomagnetic Activity Concepts Explored
-
-* Planetary K Index (Kp)
-* Geomagnetic Activity Monitoring
-* Earth's Response to Solar Activity
-* Quiet, Unsettled, and Storm Conditions
-* Kp Scale Interpretation
-* Geomagnetic Disturbance Classification
-* Sun-Earth Coupling Analysis
-* Geomagnetic Storm Forecasting Indicators
-* Kp Event Investigation
-* Multi-Dataset Space Weather Analysis
-* Solar Wind, IMF, and Kp Integration
-* Correlation Heatmap Analysis
-* Bz-Kp Relationship Investigation
-* Geomagnetic Activity Persistence
-* Time-Lag Effects in Space Weather
-
-## Dst Statistical Summary
-
-### Dst Index
-
-* Average: 2.33 nT
-* Maximum: 22 nT
-* Minimum: -14 nT
-
-### Interpretation
-
-* Geomagnetic conditions remained quiet throughout the observation period.
-* No geomagnetic storm conditions were observed.
-* Dst never approached the minor storm threshold of -50 nT.
-
-## Dst Event Investigation
-
-### Lowest Dst Event
-
-* Time: 2026-06-19 02:00
-* Dst: -14 nT
-
-### Highest Dst Event
-
-* Time: 2026-06-17 02:00
-* Dst: 22 nT
-
-### Findings
-
-* The lowest Dst event occurred approximately two hours after the highest Kp event.
-* This behavior is consistent with expected Sun-Earth coupling processes.
-* The study period remained geomagnetically quiet despite periods of southward IMF.
-
-## Solar Wind + IMF + Kp + Dst Integrated Analysis
-
-The Solar Wind, IMF, Kp, and Dst datasets were merged into a unified Sun-Earth dataset using NOAA timestamps.
-
-### Correlation Results
-
-| Variables | Correlation |
-| ---------- | ----------: |
-| Kp ↔ Dst | -0.268 |
-| Bz ↔ Kp | -0.190 |
-| Bz ↔ Dst | 0.242 |
-| Bt ↔ Dst | 0.344 |
-| Density ↔ Dst | 0.303 |
-
-### Findings
-
-* Negative Bz conditions were associated with higher geomagnetic activity.
-* Higher Kp values were associated with lower Dst values.
-* The observed relationships are consistent with established space weather theory.
-* The study period remained geomagnetically quiet, limiting correlation strength.
-
-## Time-Lag Analysis
-
-A lag analysis was performed to investigate delayed geomagnetic responses to IMF conditions.
-
-### Bz → Future Kp
-
-| Lag | Correlation |
-|------|------------:|
-| Current | -0.190 |
-| 1 Hour | -0.284 |
-| 3 Hours | -0.218 |
-| 6 Hours | 0.009 |
-
-### Bz → Future Dst
-
-| Lag | Correlation |
-|------|------------:|
-| Current | 0.242 |
-| 1 Hour | 0.374 |
-| 3 Hours | 0.534 |
-| 6 Hours | 0.321 |
-
-### Findings
-
-* Kp showed the strongest response approximately 1 hour after Bz changes.
-* Dst showed the strongest response approximately 3 hours after Bz changes.
-* These results support the expected sequence:
-
-Negative Bz → Magnetic Reconnection → Kp Increase → Dst Decrease
-
-* Time-lag behavior provides a foundation for future forecasting models.
-
-## Forecast Feature Investigation
-
-The strongest predictors of future geomagnetic activity were investigated.
-
-### Future Kp (+1 Hour)
-
-| Variable | Correlation |
-| ---------- | ----------: |
-| Bz | -0.284 |
-| Bt | 0.242 |
-| Density | 0.171 |
-| Speed | -0.082 |
-| Temperature | -0.054 |
-
-### Future Dst (+3 Hours)
-
-| Variable | Correlation |
-| ---------- | ----------: |
-| Bz | 0.534 |
-| Temperature | -0.405 |
-| Speed | -0.291 |
-| Bt | 0.281 |
-| Density | 0.276 |
-
-### Findings
-
-* Bz was the strongest predictor of future geomagnetic activity.
-* Bz was also the strongest predictor of future Dst conditions.
-* Time-lag analysis improved predictive relationships significantly.
-* These findings provide a foundation for future machine learning forecasting models.
-
-
-
-## Lessons Learned
-
-Through this project the following concepts have been implemented and explored:
-
-* API Fundamentals
-* HTTP Requests
-* JSON Data Structures
-* NOAA Space Weather Data Sources
-* Pandas DataFrames
-* Data Cleaning
-* Data Type Conversion
-* Exploratory Data Analysis
-* Statistical Analysis
-* Correlation Analysis
-* Time-Series Visualization
-* Scientific Data Investigation
-* Interplanetary Magnetic Field (IMF)
-* Frozen-In Magnetic Fields
-* Bx, By, Bz Components
-* Total Magnetic Field Strength (Bt)
-* Southward Bz and Magnetic Reconnection
-* Solar Wind and IMF Relationship Analysis
-* Geoeffective Space Weather Conditions
-* Multi-Dataset Integration
-* Cross-Dataset Correlation Analysis
-* Scientific Hypothesis Testing
-* Space Weather Forecasting Fundamentals
-* Kp Index Interpretation
-* Geomagnetic Activity Analysis
-* Geomagnetic Activity Classification
-* Kp Index Event Investigation
-* Duration-Based Event Analysis
-* IMF Persistence Analysis
-* Bz-Kp Relationship Investigation
-* Sun-Earth Coupling Analysis
-* Sun-Earth Data Aggregation Techniques
-* Time-Series Resampling and Alignment
-* Correlation Heatmap Visualization
-* Scatter Plot Analysis
-* Space Weather Event Interpretation
-* Geomagnetic Storm Forecasting Concepts
-* Dst Index Interpretation
-* Ring Current Dynamics
-* Geomagnetic Storm Intensity Analysis
-* Time-Lag Analysis
-* Forecast Feature Engineering
-* Predictive Space Weather Analysis
-* Integrated Sun-Earth System Analysis
-* Solar Flare Classification Systems
-* Active Region Analysis
-* Coronal Mass Ejection Analysis
-* Solar Radio Flux (F10.7)
-* Sun-Earth Space Weather Chain
-* Solar Event Catalog Analysis
-* NASA DONKI Data Products
-* Space Weather Event Correlation
-* Multi-Page Streamlit Application Architecture
-* Continuous, Per-Dataset Live Data Pipelines
-* Minute-Resolution vs Hourly-Aggregate Data Tradeoffs
-* Streamlit Dialog State Management Across Reruns
-* Multi-Panel Synced Plotly Visualizations
-* Heliographic Coordinate Parsing and Mapping
-* Heuristic CME Transit / Arrival Estimation
-* JSON-Based Local Application Persistence
-* Custom CSS Theming of a Data Application
-* Iterative UI/UX Debugging From User Feedback
-
----
-
-## SW-DSS Dashboard — Live Application Overview
-
-The notebooks and analysis above were the research foundation. That research has since grown into a real, continuously-updating Streamlit application — the **Space Weather Decision Support System (SW-DSS)**. This section documents what's actually running.
+## Architecture
 
 ### Data Pipeline
 
@@ -907,7 +69,7 @@ master_df_v1.parquet — hourly-merged Sun-Earth feature table
 dashboard/home.py
 ```
 
-`src/swdss/features/live_update.py` keeps every dataset refreshed on its own real-world cadence, independently:
+`src/swdss/features/live_update.py` keeps every dataset refreshed independently, on its own real-world cadence:
 
 | Dataset | Cadence | Notes |
 | --- | --- | --- |
@@ -919,61 +81,267 @@ dashboard/home.py
 | CME (DONKI) | 1 hour | rolling 30-day fetch each cycle |
 | F10.7 | 24 hours | NOAA's own file already covers a monthly window |
 
-A key architectural decision: `master_df_v1.parquet` resamples Solar Wind/IMF to hourly means so they can be merged with the inherently-hourly Kp/Dst. That's necessary for combined Earth-response analysis, but it quietly smooths away genuine short-lived spikes. Anywhere the dashboard reports a "true extreme" (Strongest Value cards, Current Analysis tabs), it now reads from the **minute-level processed file directly**, not the hourly-merged table — fixing a real bug where the dashboard once under-reported true peak Solar Wind Speed/Density/Temperature/Bz.
+**Design note:** `master_df_v1.parquet` resamples Solar Wind/IMF to hourly means so they can be merged with the inherently-hourly Kp/Dst series for combined Earth-response analysis. That averaging is necessary for that purpose, but it quietly smooths away genuine short-lived spikes. Anywhere the dashboard reports a "true extreme" (Strongest Value cards, Current Analysis tabs, the prediction engine's live features), it reads from the **minute-level processed file directly**, never from the hourly-merged table.
 
-### Dashboard Pages
+### Live Prediction Pipeline
 
-* **Home** — the mission-control view: a live status terminal (Speed/Density/Temperature/Bz/Kp/Dst with plain-language Meaning + Risk), six Strongest Value cards (each with a reverse Solar-Event lookup button), the Sun-to-Earth Overview chart, the Solar Activity News Feed (By Severity / Latest Recorded, with a 💾 save-for-later), the Event Storyboard, Top 5 Recorded Conditions tables, the Heliomap, and a rotating reference-table panel.
-* **Photosphere** — Solar Events / CME / F10.7 tabs, each with Current Analysis + Predictions placeholder sub-tabs, an Event Animations grid, and its own CME/Flare/Radio-Burst/F10.7 reference panel.
-* **Heliosphere** — Solar Wind and IMF Current Analysis (corrected true-extreme cards), Dynamic Pressure, plus a Speed/Density/Temperature/Bz reference panel.
+```text
+NOAA live minute-level data
+        ↓
+hourly resample + interpolation (matches training preprocessing exactly)
+        ↓
+lag / rolling-mean / rolling-std / rate-of-change feature generation
+        ↓
+trained model lookup (best algorithm per variable × horizon)
+        ↓
+forecast + drift logging (SQLite)
+        ↓
+forecast-vs-actual evaluation once the target hour is observed
+```
+
+---
+
+## Project Structure
+
+```text
+Space Weather Dashboard V2/
+│
+├── data/
+│   ├── raw/                       # Exact NOAA / DONKI API responses, per dataset
+│   ├── processed/                 # Cleaned per-dataset parquet (minute-level for
+│   │                               #   Solar Wind/IMF, native cadence otherwise)
+│   ├── features/
+│   │   ├── master_df_v1.parquet   # Hourly-merged Sun-Earth feature table
+│   │   └── training/              # Engineered training datasets for the ML models
+│   │       ├── solar_wind_features.csv
+│   │       └── imf_features.csv
+│   ├── predictions/
+│   │   └── predictions.db         # SQLite store for live forecast jobs + tick history
+│   └── saved_events.json / library_index.json
+│
+├── src/swdss/
+│   ├── paths.py                   # Centralized path constants
+│   ├── ingest/                    # NOAA API client
+│   ├── transform/                 # Per-dataset cleaning logic
+│   ├── features/
+│   │   ├── build_master.py        # One-shot fetch + clean + merge
+│   │   └── live_update.py         # Continuous per-dataset updater (own cadences)
+│   ├── models/                    # Live prediction engine (see below)
+│   │   ├── registry.py            # Shared config: variables, horizons, model paths
+│   │   ├── features.py            # Lag/rolling/change feature engineering
+│   │   ├── train.py               # Multi-algorithm training + best-model selection
+│   │   ├── predict.py             # Live feature pipeline + single-point inference
+│   │   └── jobs.py                # Continuous forecast job lifecycle (SQLite-backed)
+│   └── utils/
+│
+├── dashboard/
+│   ├── home.py                    # Full multi-page Streamlit application
+│   └── assets/                    # Background imagery (magnetosphere, solar disk)
+│
+├── models/                        # Trained model artifacts (.joblib + metrics.json)
+│   ├── solar_wind/
+│   └── imf/
+│
+├── notebooks/                     # Original exploratory research notebooks
+├── docs/                          # Day-by-day research notes
+├── requirements.txt
+└── README.md
+```
+
+---
+
+## Live Prediction Engine
+
+The Heliosphere page's **Solar Wind** and **IMF** tabs each have a Predictions sub-tab backed by a real, continuously-running forecasting system — not a one-shot "click to predict" demo.
+
+### How a prediction works
+
+1. **Pick a variable and horizon, click Start Prediction.** Solar Wind supports Speed, Density, and Temperature; IMF supports Bt, Bx, By, and Bz — each at 1, 3, 6, 12, or 24-hour horizons.
+2. **A forecast job starts**, anchored to a fixed target time (e.g. start at 17:15, horizon 3h → target 20:00).
+3. **The job keeps refining its forecast** every time a new NOAA minute-level reading arrives, for as long as it takes the target time's actual observation to be published — not a fixed window. Since only five discrete horizon models are trained (1/3/6/12/24h), a long-horizon job refines at "checkpoints": the moments when the remaining time to target exactly matches one of those trained horizons (e.g. a 24h job refines at remaining = 24, 12, 6, 3, and 1 hour before target), switching to the correspondingly-trained model each time.
+4. **The job completes automatically** once NOAA publishes the actual value for the target hour, and is immediately evaluated against it.
+
+### Model training and selection
+
+For each variable, at each horizon, three algorithms are trained and benchmarked on a held-out time-ordered split — **Linear Regression**, **Random Forest**, and **XGBoost** — and the best performer (by R²) is automatically selected and saved. The user never picks an algorithm.
+
+Training features (identical between training and live inference, by construction — both call the same `swdss.models.features` functions):
+
+* Lag features at 1h, 3h, 6h, 12h, 24h
+* 24-hour rolling mean and rolling standard deviation
+* Rate-of-change (first difference)
+
+### What each job shows
+
+* **Live cards** — current NOAA reading, model confidence (derived from the model's R²), expected change & trend, and a prediction-stability indicator (variance across recent ticks)
+* **Pipeline-style terminal log** — every tick rendered as `NOAA reading → Features Generated → Model Loaded → Prediction → Waiting for Next Update`, newest first
+* **Drift chart** — how the forecast for the fixed target has moved over time
+* **Job Summary** — initial vs. final prediction, actual NOAA observation, mean error across all ticks, model used, and R²
+* **Final accuracy block** (once completed) — Absolute Error and a qualitative accuracy label (Excellent / Good / Fair / Poor)
+
+Multiple jobs (any mix of variables and horizons) can run concurrently, each as its own card. Completed jobs can be **saved** (kept permanently, exempt from the recent-jobs display cap) or **deleted**. A **Prediction Queue** widget summarizes Running jobs, jobs Completed Today, and Average MAE across every completed job for that dataset.
+
+### Persistence
+
+All jobs and their full tick history are stored in `data/predictions/predictions.db` (SQLite) — chosen over JSON specifically because tick history accumulates indefinitely (a job can run for 24+ hours, logging a tick roughly every NOAA-update minute during each checkpoint window), and SQLite supports incremental writes without rewriting a growing file on every update. Jobs, ticks, and saved/completed state all survive a dashboard restart.
+
+---
+
+## Dashboard Pages
+
+* **Home** — mission-control view: a live status terminal (Speed/Density/Temperature/Bz/Kp/Dst with plain-language Meaning + Risk), six Strongest Value cards (each with a reverse Solar-Event lookup), the Sun-to-Earth Overview chart, a severity/recency-filterable Solar Activity News Feed, the Event Storyboard, Top 5 Recorded Conditions tables, the Heliomap, and a rotating reference-table panel.
+* **Photosphere** — Solar Events / CME / F10.7 tabs, each with Current Analysis + Predictions sub-tabs, an Event Animations grid, and its own reference panel.
+* **Heliosphere** — Solar Wind and IMF Current Analysis (true-extreme cards) and the **Live Prediction Engine**, plus Dynamic Pressure and a Speed/Density/Temperature/Bz reference panel.
 * **Geospace** — Kp and Dst Current Analysis with their own reference panel.
 * **Analytics** — combined Earth-response correlation explorer across Solar Wind, IMF, Kp, and Dst.
 
-### Key Features
+### Key dashboard features
 
 * **Event Explorer** — given a solar event, finds its nearest associated CME (if any), estimates Earth-arrival via a constant-speed transit heuristic, and reports the actual recorded Solar Wind/IMF/Kp/Dst response at that time. A **reverse mode** starts from an effect (e.g. the week's lowest Dst) and traces back to a plausible solar cause.
-* **Event Storyboard** — an auto-playing, step-by-step animated retelling of one event's Sun-to-Earth journey, limited to events with a complete recorded chain through Dst.
-* **Heliomap** — plots Solar Events and CMEs at their real heliographic positions over an actual NASA SDO solar-disk image, parsed from NOAA's `location` field and DONKI's latitude/longitude.
-* **Sun-to-Earth Overview Chart** — a 6-panel stacked Plotly chart (IMF Bt/Bz, Dst, Density, Temperature, Speed, Kp) on one shared time axis; click anywhere to get every panel's value at that instant in one combined readout.
-* **Saved Events & Space Weather Concepts Library** — JSON-backed local persistence for bookmarking notable events and for organizing reference documents (Concepts / Articles / Research Papers) inside the dashboard.
-* **Retro/Vintage UI** — a deliberate Windows-95-meets-MATLAB visual theme applied consistently across every table, chart, dialog, and button.
+* **Event Storyboard** — an auto-playing, step-by-step animated retelling of one event's Sun-to-Earth journey.
+* **Heliomap** — Solar Events and CMEs at their real heliographic positions over an actual NASA SDO solar-disk image.
+* **Saved Events & Space Weather Concepts Library** — JSON-backed local persistence for bookmarking events and organizing reference documents.
 
-### Known Limitations (carried into the next milestone, deliberately not hidden)
+---
 
-* CME-to-Earth arrival timing uses a constant-speed transit heuristic, not a validated propagation model (e.g. WSA-Enlil) — useful for ordering and context, not for precision forecasting.
+## Technology Stack
+
+| Category | Tools |
+| --- | --- |
+| Language | Python 3.11 |
+| Data Science | Pandas, NumPy |
+| Machine Learning | scikit-learn (Linear Regression, Random Forest), XGBoost, joblib |
+| Data Acquisition | Requests, NOAA SWPC API, NASA DONKI API |
+| Visualization | Plotly (Graph Objects & Subplots), Pillow |
+| Dashboard | Streamlit, streamlit-autorefresh |
+| Persistence | SQLite (prediction jobs), JSON (saved events, document library) |
+| Dev Tools | Git, GitHub, VS Code, Jupyter Notebook |
+
+---
+
+## Running the Project
+
+```bash
+# 1. Activate the project's virtual environment
+source venv/bin/activate
+
+# 2. Start the live data updater (refreshes all datasets on their own cadences)
+PYTHONPATH=src venv/bin/python3 -m swdss.features.live_update
+
+# 3. In a separate terminal, launch the dashboard
+venv/bin/python3 -m streamlit run dashboard/home.py
+```
+
+To (re)train the prediction models from scratch:
+
+```bash
+PYTHONPATH=src venv/bin/python3 -m swdss.models.train
+```
+
+This retrains all 35 models (3 Solar Wind + 4 IMF variables × 5 horizons), benchmarks all three algorithms per combination, and writes the selected models plus `metrics.json` into `models/<dataset>/`.
+
+---
+
+## Research & Exploratory Analysis
+
+The notebooks in `notebooks/` and the day-by-day notes in `docs/` capture the exploratory research that preceded the live dashboard. Highlights from that analysis (NOAA data, mid-June 2026 observation window):
+
+### Solar Wind
+
+| Metric | Speed (km/s) | Density (p/cm³) | Temperature (K) |
+| --- | ---: | ---: | ---: |
+| Average | ~435 | ~6.53 | ~112,257 |
+| Maximum | ~607 | ~17.49 | ~552,298 |
+| Minimum | ~357 | ~0.09 | ~2,000 |
+
+Correlations: Speed↔Temperature **0.522** (moderate positive), Density↔Speed **-0.189** (weak inverse).
+
+### Interplanetary Magnetic Field (IMF)
+
+| Metric | Bz (nT) | Bt (nT) |
+| --- | ---: | ---: |
+| Average | ~0.56 | ~6.00 |
+| Maximum | 11.40 | 12.00 |
+| Minimum | -7.51 | 0.62 |
+
+~56% of observations were northward (Bz > 0), ~44% southward. Southward Bz is the classic trigger for magnetic reconnection and remained the strongest single forecasting variable identified.
+
+### Geomagnetic Indices
+
+| Index | Average | Max | Min | Interpretation |
+| --- | ---: | ---: | ---: | --- |
+| Kp | 1.63 | 3.00 | 0.33 | Quiet throughout; no storm conditions |
+| Dst (nT) | 2.33 | 22 | -14 | Quiet; never approached the -50 nT minor-storm threshold |
+
+### Sun-Earth Coupling & Time-Lag Analysis
+
+Merging Solar Wind, IMF, Kp, and Dst on shared timestamps surfaced the expected causal sequence:
+
+```text
+Negative Bz → Magnetic Reconnection → Kp Increase → Dst Decrease
+```
+
+| Lag (Bz → Kp) | Correlation | Lag (Bz → Dst) | Correlation |
+| --- | ---: | --- | ---: |
+| Current | -0.190 | Current | 0.242 |
+| 1 Hour | **-0.284** | 1 Hour | 0.374 |
+| 3 Hours | -0.218 | **3 Hours** | **0.534** |
+| 6 Hours | 0.009 | 6 Hours | 0.321 |
+
+Kp responds most strongly ~1 hour after a Bz change; Dst responds most strongly ~3 hours after — a delay consistent with established magnetospheric physics, and the basis for choosing the 1h–24h horizon set used in the live forecasting engine.
+
+### Solar Activity, CME, and F10.7
+
+* 1,427 recorded solar events across 29 descriptive variables; 501 X-ray events, 129 optical flares (1 X-class, 22 M-class); activity peaked 2026-06-03; AR4455 was the most active region (153 events).
+* 124 CME events (avg speed 618 km/s, max 1,692 km/s); AR14464 was the most productive CME-producing region.
+* F10.7 solar flux averaged 125.7 (range 101–148), moderately active and consistent with the observed flare/CME activity.
+
+---
+
+## Known Limitations
+
+* CME-to-Earth arrival timing uses a constant-speed transit heuristic, not a validated propagation model (e.g. WSA-Enlil) — useful for ordering and context, not precision forecasting.
 * Event-to-CME linking is time-proximity based, not physically confirmed causality.
 * True cross-panel hover-tooltip merging isn't supported by Plotly across separate y-axes within one figure; the Overview chart uses click-to-inspect instead of continuous hover.
-* `edited_events.json` field parsing (flare class, radio burst type, heliographic location) is defensive/best-effort against NOAA's live schema and hasn't yet been cross-validated against an independent source.
+* Live "confidence" and "stability" metrics on prediction cards are explicitly-labeled heuristics (R²-derived confidence, tick-variance-derived stability) — not calibrated statistical prediction intervals.
+* `edited_events.json` field parsing (flare class, radio burst type, heliographic location) is defensive/best-effort against NOAA's live schema and hasn't been cross-validated against an independent source.
+* Prediction jobs only advance while the dashboard process is open and the Heliosphere page has been rendered; closing the app for an extended period doesn't backfill missed minute-level ticks (checkpoints still fire correctly on resume since they're time-based, not tick-count-based).
 
 ---
 
-## Current Milestone — Validation, Testing, and Prediction Readiness
+## Development Roadmap
 
-With the SW-DSS dashboard now functional end-to-end, the focus shifts from building features to **validating** them before any forecasting work begins:
+### Completed
 
-* Cross-check dashboard-reported values (extremes, event chains, Heliomap positions) against independent real-data pulls.
-* Stress-test the live updater across multi-day continuous runs.
-* Review whether additional derived parameters are worth adding before model training — candidates include solar wind dynamic pressure, IMF clock angle, and storm-sudden-commencement flags.
-* Once the data and pipeline are validated, begin the Machine Learning phase: Kp/Dst (and eventually AE) forecasting models, using the now-stable master dataset as the feature source.
+* Continuous, per-dataset live data pipelines (NOAA SWPC + NASA DONKI)
+* Minute-resolution vs. hourly-aggregate data architecture
+* Multi-page dashboard (Home, Photosphere, Heliosphere, Geospace, Analytics)
+* Event Explorer, Event Storyboard, Heliomap, Sun-to-Earth Overview chart
+* Saved Events + Space Weather Concepts library
+* Solar Wind & IMF feature engineering (lag, rolling, rate-of-change)
+* Multi-algorithm training with automatic best-model selection, 5 horizons × 7 variables
+* Live, self-refining, self-evaluating prediction engine with SQLite-backed job history
 
-The AE Index milestone below remains a real objective, but it's deferred until real-time AE data access is resolved — it now sits inside the upcoming Machine Learning phase as a prediction target, rather than as the immediate next data-collection task.
+### In Progress / Next
+
+* Kp, Dst, and AE index forecasting
+* Cross-dataset (integrated Sun-to-Earth) forecasting models
+* Cross-validation of dashboard-reported extremes and event chains against independent data
+* Multi-day continuous live-updater stress testing
+* Additional derived parameters (IMF clock angle, storm-sudden-commencement flags)
+* Public deployment
 
 ---
 
+## Concepts & Skills Demonstrated
 
+**Data Engineering** — REST API integration, JSON parsing, multi-cadence ingestion pipelines, raw/processed data separation, minute-vs-hourly resolution tradeoffs, time-series resampling and alignment.
 
+**Scientific Analysis** — descriptive statistics, correlation and lag analysis, cross-dataset integration, hypothesis-driven event investigation, Sun-Earth coupling physics (IMF orientation, magnetic reconnection, geomagnetic storm indices).
 
-## Long-Term Vision
+**Machine Learning** — time-series feature engineering (lag/rolling/rate-of-change), multi-horizon forecasting, model benchmarking and automatic selection (Linear Regression, Random Forest, XGBoost), live inference pipelines with train/serve feature parity, forecast drift tracking, and operational forecast verification.
 
-The final system will:
-
-* Collect real-time NOAA space weather data
-* Process and clean incoming datasets
-* Visualize current solar and geomagnetic conditions
-* Monitor solar wind and magnetic field behavior
-* Forecast geomagnetic storm activity
-* Predict Kp and Dst indices using machine learning
-* Provide an interactive dashboard for monitoring space weather
+**Software & Application Development** — multi-page Streamlit architecture, dialog state management across reruns, SQLite for incremental time-series persistence, custom CSS theming, and iterative UI/UX design driven by direct feedback.
 
 ---
 
@@ -982,17 +350,8 @@ The final system will:
 **Manas Anumala**
 
 Bachelor of Mechanical Engineering
-
 Postgraduate Certificate in Space Exploration Systems
 
-Interests:
-
-* Space Systems
-* Space Weather
-* Artificial Intelligence
-* Machine Learning
-* Data Science
-* Scientific Computing
-* Software Development
+Interests: Space Systems · Space Weather · Artificial Intelligence · Machine Learning · Data Science · Scientific Computing · Software Development
 
 Building projects at the intersection of Space Systems, Data Science, Artificial Intelligence, and Scientific Computing.
