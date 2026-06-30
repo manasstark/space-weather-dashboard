@@ -42,6 +42,47 @@ def add_change_features(df: pd.DataFrame, columns: list[str]) -> list[str]:
     return created
 
 
+def add_derived_physics_features(df: pd.DataFrame) -> list[str]:
+    """Adds Sun-Earth coupling features in memory — never as separate
+    datasets — so training and live inference always compute them
+    identically from the same merged Solar Wind + IMF (+ geomagnetic)
+    frame, with zero risk of train/serve drift.
+
+    - VBz = Speed x min(Bz, 0): geoeffective coupling function (e.g.
+      Burton et al. 1975). Southward IMF (negative Bz) drives dayside
+      reconnection; energy injection into the ring current scales with
+      how fast the solar wind is moving it in. Positive (northward, non-
+      geoeffective) Bz is clipped to 0, so VBz spikes more negative
+      exactly when conditions are most likely to drive a storm.
+    - Ey = -Speed x Bz x 1e-3 (mV/m): the interplanetary dawn-dusk
+      electric field. Southward Bz makes this positive — the convention
+      used across space weather literature for "geoeffective E-field".
+    - Dynamic Pressure = 1.6726e-6 x Density x Speed^2 (nPa): solar wind
+      ram pressure on the magnetopause — same formula already used by
+      the dashboard's own Heliosphere > Dynamic Pressure panel.
+
+    Each is only added when its required inputs are present — a no-op
+    for datasets that don't have all of them, e.g. standalone Solar Wind
+    (no Bz) or standalone IMF (no Speed/Density).
+    """
+    created = []
+    has_speed = "speed" in df.columns
+    has_bz = "bz_gsm" in df.columns
+    has_density = "density" in df.columns
+
+    if has_speed and has_bz:
+        df["vbz"] = df["speed"] * df["bz_gsm"].clip(upper=0)
+        created.append("vbz")
+        df["ey"] = -df["speed"] * df["bz_gsm"] * 1e-3
+        created.append("ey")
+
+    if has_speed and has_density:
+        df["dynamic_pressure"] = 1.6726e-6 * df["density"] * df["speed"] ** 2
+        created.append("dynamic_pressure")
+
+    return created
+
+
 def build_feature_frame(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFrame, list[str]]:
     """Adds lag/rolling/change features for `columns` onto a copy of df.
 

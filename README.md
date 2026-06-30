@@ -15,12 +15,14 @@ Built as a portfolio project to practice professional software development, data
 * [Architecture](#architecture)
 * [Project Structure](#project-structure)
 * [Live Prediction Engine](#live-prediction-engine)
+  * [Combined Sun-Earth Forecasting (Analytics page)](#combined-sun-earth-forecasting-analytics-page)
 * [Dashboard Pages](#dashboard-pages)
 * [Technology Stack](#technology-stack)
 * [Running the Project](#running-the-project)
 * [Research & Exploratory Analysis](#research--exploratory-analysis)
 * [Known Limitations](#known-limitations)
 * [Development Roadmap](#development-roadmap)
+  * [AE Index — Planned Integration](#ae-index--planned-integration)
 * [Concepts & Skills Demonstrated](#concepts--skills-demonstrated)
 * [Author](#author)
 
@@ -46,6 +48,7 @@ The project tracks the full Sun-to-Earth space weather chain — solar activity,
 * 6-panel synced **Sun-to-Earth Overview** chart with click-to-inspect readout
 * Saved Events bookmarking and a Space Weather Concepts document library, both JSON-backed
 * **Live Prediction Engine**: continuous, self-refining forecasting jobs for Solar Wind and IMF, with automatic model selection, live drift tracking, and forecast-vs-actual accuracy evaluation (see below)
+* **Combined Sun-Earth Forecasting (Analytics page)**: Kp and Dst predicted from a single physics-informed model spanning Solar Wind + IMF + geomagnetic history + derived coupling features (VBz, Ey, Dynamic Pressure) — Kp follows NOAA's real 3-hour publishing cadence rather than an arbitrary hourly horizon
 * Retro/vintage UI theme applied consistently across every table, chart, dialog, and button
 
 ---
@@ -114,7 +117,10 @@ Space Weather Dashboard V2/
 │   │   ├── master_df_v1.parquet   # Hourly-merged Sun-Earth feature table
 │   │   └── training/              # Engineered training datasets for the ML models
 │   │       ├── solar_wind_features.csv
-│   │       └── imf_features.csv
+│   │       ├── imf_features.csv
+│   │       ├── kp_features.csv
+│   │       ├── dst_features.csv
+│   │       └── analytics_features.csv   # Combined Solar Wind + IMF + Kp + Dst, for the Analytics page's models
 │   ├── predictions/
 │   │   └── predictions.db         # SQLite store for live forecast jobs + tick history
 │   └── saved_events.json / library_index.json
@@ -127,8 +133,9 @@ Space Weather Dashboard V2/
 │   │   ├── build_master.py        # One-shot fetch + clean + merge
 │   │   └── live_update.py         # Continuous per-dataset updater (own cadences)
 │   ├── models/                    # Live prediction engine (see below)
-│   │   ├── registry.py            # Shared config: variables, horizons, model paths
-│   │   ├── features.py            # Lag/rolling/change feature engineering
+│   │   ├── registry.py            # Shared config: variables, horizons, model paths,
+│   │   │                          #   multi-source merging, per-dataset unit scale factors
+│   │   ├── features.py            # Lag/rolling/change + derived physics feature engineering
 │   │   ├── train.py               # Multi-algorithm training + best-model selection
 │   │   ├── predict.py             # Live feature pipeline + single-point inference
 │   │   └── jobs.py                # Continuous forecast job lifecycle (SQLite-backed)
@@ -140,7 +147,11 @@ Space Weather Dashboard V2/
 │
 ├── models/                        # Trained model artifacts (.joblib + metrics.json)
 │   ├── solar_wind/
-│   └── imf/
+│   ├── imf/
+│   ├── kp/                        # Standalone (self-referential) Kp model — trained, not exposed in the UI
+│   ├── dst/                       # Standalone (self-referential) Dst model — trained, not exposed in the UI
+│   └── analytics/                 # Combined Sun-Earth models actually used by the Analytics page
+│       └── kp_interval.joblib     # Single model targeting NOAA's next official 3h Kp interval
 │
 ├── notebooks/                     # Original exploratory research notebooks
 ├── docs/                          # Day-by-day research notes
@@ -185,6 +196,35 @@ Multiple jobs (any mix of variables and horizons) can run concurrently, each as 
 
 All jobs and their full tick history are stored in `data/predictions/predictions.db` (SQLite) — chosen over JSON specifically because tick history accumulates indefinitely (a job can run for 24+ hours, logging a tick roughly every NOAA-update minute during each checkpoint window), and SQLite supports incremental writes without rewriting a growing file on every update. Jobs, ticks, and saved/completed state all survive a dashboard restart.
 
+A job can also be stopped manually at any time (`⏹ Stop Prediction`), which marks it `stopped` rather than `completed` — an honest distinction, since a stopped job never got compared against a real NOAA observation.
+
+### Combined Sun-Earth Forecasting (Analytics page)
+
+Kp and Dst aren't predicted as isolated, self-referential time series. Instead, the **Analytics → Combined Earth Analysis → Prediction** tab runs a single physics-informed model per target, trained on the full causal chain:
+
+```text
+Sun → Solar Wind → IMF → Earth Response (Dst, Kp)
+```
+
+**Inputs** (all engineered with lag-1h/3h/6h/12h/24h, 24h rolling mean, 24h rolling std, and rate-of-change):
+
+* Solar Wind: Speed, Density, Temperature
+* IMF: Bt, Bx, By, Bz
+* Geomagnetic history: previous Kp, previous Dst
+* Derived coupling features, computed in memory from the merged frame (never as separate datasets, so training and live inference can never drift apart):
+  * **VBz** = Speed × min(Bz, 0) — the geoeffective driver (Burton et al. 1975); positive Bz is clipped to 0
+  * **Ey** = −Speed × Bz × 1e-3 (mV/m) — interplanetary dawn-dusk electric field
+  * **Dynamic Pressure** = 1.6726e-6 × Density × Speed² (nPa) — solar wind ram pressure on the magnetopause
+
+**Dst** keeps the familiar 1h/3h/6h/12h/24h horizon dropdown, same checkpoint-based drift mechanism as the standalone engine.
+
+**Kp** is handled differently on purpose: NOAA only publishes an official Kp value every 3 hours (00, 03, 06, ... UTC), so the model always targets the *next official interval* rather than an arbitrary hourly horizon — e.g. starting at 16:10 UTC (inside the 15:00–18:00 interval) continuously refines a forecast for 18:00–21:00 UTC as new Solar Wind/IMF minutes arrive, with no horizon to pick.
+
+Both share a dedicated dialog UI distinct from the standalone engine's pipeline-style log:
+
+* **Live Forecast Console** — a real scrolling terminal table (black background, monospace, green-on-black), one row per NOAA minute, columns for every live input plus a dynamic `Forecast (target time)` column — never preloads historical rows; the first row is always timestamped at job start
+* **Forecast Summary** (once completed or stopped) — Final Prediction (the operational forecast — last tick before the target arrived) vs. Average Prediction (mean across the whole session, a stability indicator only), both compared against the actual observation with separate error metrics, plus Forecast Drift (how far the prediction moved from first tick to last) and Model Quality
+
 ---
 
 ## Dashboard Pages
@@ -192,8 +232,8 @@ All jobs and their full tick history are stored in `data/predictions/predictions
 * **Home** — mission-control view: a live status terminal (Speed/Density/Temperature/Bz/Kp/Dst with plain-language Meaning + Risk), six Strongest Value cards (each with a reverse Solar-Event lookup), the Sun-to-Earth Overview chart, a severity/recency-filterable Solar Activity News Feed, the Event Storyboard, Top 5 Recorded Conditions tables, the Heliomap, and a rotating reference-table panel.
 * **Photosphere** — Solar Events / CME / F10.7 tabs, each with Current Analysis + Predictions sub-tabs, an Event Animations grid, and its own reference panel.
 * **Heliosphere** — Solar Wind and IMF Current Analysis (true-extreme cards) and the **Live Prediction Engine**, plus Dynamic Pressure and a Speed/Density/Temperature/Bz reference panel.
-* **Geospace** — Kp and Dst Current Analysis with their own reference panel.
-* **Analytics** — combined Earth-response correlation explorer across Solar Wind, IMF, Kp, and Dst.
+* **Geospace** — Kp and Dst Current Analysis with their own reference panel. (Prediction lives exclusively on the Analytics page now — see below — since the combined model strictly outperforms each variable's standalone, self-referential version.)
+* **Analytics** — Combined Earth Analysis, with **Current Analysis** (correlation explorer across Solar Wind, IMF, Kp, and Dst) and **Prediction** (the combined Sun-Earth forecasting engine for Kp and Dst — see [Combined Sun-Earth Forecasting](#combined-sun-earth-forecasting-analytics-page)) as two sub-tabs.
 
 ### Key dashboard features
 
@@ -305,7 +345,9 @@ Kp responds most strongly ~1 hour after a Bz change; Dst responds most strongly 
 * True cross-panel hover-tooltip merging isn't supported by Plotly across separate y-axes within one figure; the Overview chart uses click-to-inspect instead of continuous hover.
 * Live "confidence" and "stability" metrics on prediction cards are explicitly-labeled heuristics (R²-derived confidence, tick-variance-derived stability) — not calibrated statistical prediction intervals.
 * `edited_events.json` field parsing (flare class, radio burst type, heliographic location) is defensive/best-effort against NOAA's live schema and hasn't been cross-validated against an independent source.
-* Prediction jobs only advance while the dashboard process is open and the Heliosphere page has been rendered; closing the app for an extended period doesn't backfill missed minute-level ticks (checkpoints still fire correctly on resume since they're time-based, not tick-count-based).
+* Prediction jobs only advance while the dashboard process is open and the relevant page has been rendered; closing the app for an extended period doesn't backfill missed minute-level ticks (checkpoints still fire correctly on resume since they're time-based, not tick-count-based).
+* VBz, Ey, and Dynamic Pressure are standard space-weather coupling formulas (Burton et al. 1975 and conventional solar-wind electrodynamics), but haven't been independently cross-validated against published reference values for this specific dataset.
+* The Kp interval model picks a single best algorithm across the full 1–3 hour variable lookahead inherent in "next official interval" (rather than one model per fixed lookahead, like the discrete-horizon variables) — this is a deliberate simplification, not a bug, but means its accuracy is somewhat coarser than a horizon-matched model would be.
 
 ---
 
@@ -321,15 +363,37 @@ Kp responds most strongly ~1 hour after a Bz change; Dst responds most strongly 
 * Solar Wind & IMF feature engineering (lag, rolling, rate-of-change)
 * Multi-algorithm training with automatic best-model selection, 5 horizons × 7 variables
 * Live, self-refining, self-evaluating prediction engine with SQLite-backed job history
+* Standalone Kp and Dst forecasting models trained (kept as a self-referential baseline, not exposed in the UI)
+* **Cross-dataset (integrated Sun-to-Earth) forecasting** for Kp and Dst — combined Solar Wind + IMF + geomagnetic history + derived coupling features (VBz, Ey, Dynamic Pressure), with Kp following NOAA's real 3-hour publishing cadence instead of an arbitrary hourly horizon
+* Manual job control (Stop) and a dedicated live-console dialog UI for the combined forecasting engine
 
 ### In Progress / Next
 
-* Kp, Dst, and AE index forecasting
-* Cross-dataset (integrated Sun-to-Earth) forecasting models
+* AE index forecasting — see [AE Index — Planned Integration](#ae-index--planned-integration) below for the agreed staged approach
 * Cross-validation of dashboard-reported extremes and event chains against independent data
 * Multi-day continuous live-updater stress testing
 * Additional derived parameters (IMF clock angle, storm-sudden-commencement flags)
 * Public deployment
+
+### AE Index — Planned Integration
+
+AE (Auroral Electrojet index) is the next variable going into the Analytics combined model. Before writing any code, the architecture was deliberately planned out, because AE sits in a physically different — and earlier — part of the Sun-Earth chain than Kp or Dst:
+
+```text
+Solar Wind → IMF → Magnetic Reconnection → Auroral Electrojets (AE) → Ring Current → Kp / Dst
+```
+
+AE reacts to solar wind driving almost immediately (minutes), versus Kp's 3-hour cadence and Dst's hour-by-hour ring-current buildup — so AE is, physically, an early/fast signal that *could* inform Kp and Dst predictions, not just a third independent target. That created an obvious follow-up question: should AE's *predicted* value feed forward into Kp/Dst (a "stacked"/cascaded model), or should it stay a parallel, independent target?
+
+**Decision: build it in three deliberate stages, each one earning its way into the architecture by measured improvement, not assumption.**
+
+1. **Version 1 (build first, this is the current plan)** — AE trained and predicted as its own independent target, **parallel** to Kp and Dst, from the same Solar Wind + IMF + derived-physics feature set. No cross-feeding yet. Simple, safe, easy to validate in isolation — exactly how Kp and Dst were each first introduced.
+
+2. **Version 2 (natural next step, low risk)** — feed **observed** (historical/lagged) AE into Kp's and Dst's own feature sets, the same way Kp and Dst already cross-feed each other today via lag/rolling-mean/rolling-std/rate-of-change features. This requires no new architecture — `ANALYTICS_FEATURE_VARIABLES` already works as one shared pool that every combined-model target draws from, so adding `ae` to that pool is the same mechanism already used for Kp/Dst, not a redesign. Observed AE carries zero model error (it's ground truth, just like observed Kp/Dst lags), so this is expected to be a safe, likely-positive change.
+
+3. **Version 3 (research / experimental, only after 1 and 2 are validated)** — test whether a **predicted** next-AE value, fed forward as an input feature into Kp/Dst ("Solar Wind → Predicted AE → Predicted Kp/Dst"), measurably improves Kp/Dst accuracy. This is a real, named ML technique (stacking / cascaded prediction), and operational forecasting centers do use it — but it carries a real risk: every prediction has error, and chaining a noisy predicted value into a downstream model propagates that error forward instead of adding clean information. The rule for this stage: only keep it if it produces a *measured* R² improvement on held-out data, not because it's architecturally elegant — and evaluate the comparison segmented by geomagnetic activity level (quiet vs. storm-time), not just one aggregate R², since a stacked feature could help disproportionately during the disturbed periods that actually matter operationally while looking flat or worse on an aggregate dominated by quiet-time data.
+
+This staged approach also explains a deliberate non-decision already reflected elsewhere in this README: the Analytics page's existing VBz/Ey/Dynamic Pressure features were added because they're *exact, error-free* derived math (Speed × Bz, no uncertainty), which is a fundamentally different (and safer) kind of feature than a model's *predicted* output — that distinction is exactly why Version 3 is gated behind 1 and 2, not done first.
 
 ---
 
@@ -339,7 +403,7 @@ Kp responds most strongly ~1 hour after a Bz change; Dst responds most strongly 
 
 **Scientific Analysis** — descriptive statistics, correlation and lag analysis, cross-dataset integration, hypothesis-driven event investigation, Sun-Earth coupling physics (IMF orientation, magnetic reconnection, geomagnetic storm indices).
 
-**Machine Learning** — time-series feature engineering (lag/rolling/rate-of-change), multi-horizon forecasting, model benchmarking and automatic selection (Linear Regression, Random Forest, XGBoost), live inference pipelines with train/serve feature parity, forecast drift tracking, and operational forecast verification.
+**Machine Learning** — time-series feature engineering (lag/rolling/rate-of-change), domain-physics-informed derived features (VBz, Ey, Dynamic Pressure) computed identically across training and live inference, multi-source feature fusion, multi-horizon forecasting, model benchmarking and automatic selection (Linear Regression, Random Forest, XGBoost), live inference pipelines with train/serve feature parity, forecast drift tracking, and operational forecast verification.
 
 **Software & Application Development** — multi-page Streamlit architecture, dialog state management across reruns, SQLite for incremental time-series persistence, custom CSS theming, and iterative UI/UX design driven by direct feedback.
 

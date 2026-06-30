@@ -26,20 +26,26 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from swdss.models.jobs import (
-    accuracy_label,
-    confidence_pct,
+    average_prediction,
     delete_job,
+    forecast_drift,
+    forecast_evaluation_label,
     get_job,
     get_job_stats,
-    get_jobs,
+    get_prediction_statistics,
+    get_running_jobs,
+    get_saved_jobs,
     job_mae,
+    model_quality_label,
     poll_jobs,
     save_job,
     stability_metric,
     start_job,
+    stop_job,
 )
 from swdss.models.predict import latest_minute_observation
 from swdss.models.registry import (
+    ANALYTICS_VARIABLES,
     HORIZONS,
     IMF_VARIABLES,
     SOLAR_WIND_VARIABLES,
@@ -374,10 +380,12 @@ def format_value(value, suffix: str = "", decimals: int = 2) -> str:
     return f"{value:.{decimals}f}{suffix}"
 
 
-def metric_card(label: str, value: str, caption: str = "") -> None:
+def metric_card(label: str, value: str, caption: str = "", tooltip: str = "", value_color: str = "#000000") -> None:
+    title_attr = f' title="{escape(tooltip)}"' if tooltip else ""
+    info_icon = " ⓘ" if tooltip else ""
     st.markdown(
         f"""
-        <div style="
+        <div{title_attr} style="
             border-top: 2px solid #ffffff;
             border-left: 2px solid #ffffff;
             border-right: 2px solid #808080;
@@ -388,12 +396,38 @@ def metric_card(label: str, value: str, caption: str = "") -> None:
             color: #000000;
             font-family: 'MS Sans Serif', Tahoma, sans-serif;
         ">
-            <div style="font-size: 0.85rem; color: #000080;">{label}</div>
-            <div style="font-size: 1.8rem; font-weight: 700; margin-top: 6px; color: #000000;">{value}</div>
+            <div style="font-size: 0.85rem; color: #000080;">{label}{info_icon}</div>
+            <div style="font-size: 1.8rem; font-weight: 700; margin-top: 6px; color: {value_color};">{value}</div>
             <div style="font-size: 0.8rem; color: #404040; margin-top: 8px;">{caption}</div>
         </div>
         """,
         unsafe_allow_html=True,
+    )
+
+
+DATASET_LABELS = {
+    "solar_wind": "Solar Wind",
+    "imf": "IMF",
+    "kp": "Kp",
+    "dst": "Dst",
+    "analytics": "Analytics (Combined Earth)",
+}
+
+STATUS_BADGE_STYLES = {
+    "in_progress": ("Predicting", "#7a5a1f", "#fff3cd"),
+    "evaluating": ("Evaluating", "#1f5a7a", "#d0eaf7"),
+    "completed": ("Completed", "#1f5a2e", "#d4f4dd"),
+    "stopped": ("Stopped", "#4a4a4a", "#e2e2e2"),
+    "failed": ("Failed", "#7a1f1f", "#fddede"),
+}
+
+
+def status_badge_html(status: str) -> str:
+    text, border_color, bg_color = STATUS_BADGE_STYLES.get(status, (status.title(), "#808080", "#dcdcdc"))
+    return (
+        f'<span style="display:inline-block; padding:2px 10px; border-radius:10px; '
+        f'background:{bg_color}; border:1px solid {border_color}; color:{border_color}; '
+        f'font-size:0.75rem; font-weight:700;">{escape(text)}</span>'
     )
 
 
@@ -1478,10 +1512,9 @@ def render_prediction_queue_stats(dataset: str) -> None:
         metric_card("Average MAE", avg_mae_text, "Across all completed jobs")
 
 
-def render_prediction_job_tiles(dataset: str) -> None:
-    jobs = get_jobs(dataset)
+def render_prediction_job_tiles(jobs: list[dict], empty_message: str) -> None:
     if not jobs:
-        st.info("No predictions started yet. Pick a variable and horizon, then click Start Prediction.")
+        st.info(empty_message)
         return
 
     cols_per_row = 4
@@ -1492,41 +1525,602 @@ def render_prediction_job_tiles(dataset: str) -> None:
         for col, job in zip(cols, chunk):
             with col:
                 label = VARIABLE_LABELS.get(job["variable"], job["variable"])
-                unit = VARIABLE_UNITS.get(job["variable"], "")
-                in_progress = job["status"] == "in_progress"
-                icon = "🟢" if in_progress else "✅"
-                color = "#1f4a7a" if in_progress else "#3a3a3a"
+                tile_icon = {"in_progress": "🟡", "evaluating": "🔵", "stopped": "⏹️"}.get(job["status"], "✅")
+                tile_color = {"in_progress": "#7a5a1f", "evaluating": "#1f4a7a", "stopped": "#4a4a4a"}.get(
+                    job["status"], "#3a3a3a"
+                )
+                start_hour = pd.Timestamp(job["start_hour"])
+                is_kp_interval = job["dataset"] == "analytics" and job["variable"] == "kp"
+                horizon_label = "Next Interval" if is_kp_interval else f"{job['horizon']}h"
 
                 st.markdown(
                     f"""
                     <div style="
-                        background:{color};
+                        background:{tile_color};
                         border:2px solid #808080;
-                        border-radius:4px;
-                        height:70px;
+                        border-radius:4px 4px 0 0;
+                        height:64px;
                         display:flex;
                         align-items:center;
                         justify-content:center;
+                        font-size:1.6rem;
+                    ">{tile_icon}</div>
+                    <div style="
+                        background:#1c1c24;
+                        border:2px solid #808080;
+                        border-top:none;
+                        border-radius:0 0 4px 4px;
+                        padding:8px 10px 10px 10px;
                         margin-bottom:6px;
-                        font-size:1.8rem;
-                    ">{icon}</div>
-                    <div style="font-weight:700;">{escape(label)} — {job['horizon']}h</div>
+                    ">
+                        <div style="font-weight:700; font-size:0.95rem; color:#f2f2f2; line-height:1.3;">
+                            {escape(label)} &mdash; {horizon_label}
+                        </div>
+                        <div style="font-size:0.74rem; color:#b8b8c0; margin-top:4px; line-height:1.3;">
+                            Started {start_hour.strftime('%d %b %H:%M UTC')}
+                        </div>
+                        <div style="margin-top:6px;">{status_badge_html(job['status'])}</div>
+                    </div>
                     """,
                     unsafe_allow_html=True,
                 )
 
-                start_hour = pd.Timestamp(job["start_hour"])
-                if in_progress:
-                    st.caption(f"Running | Started {start_hour.strftime('%d %b %H:%M UTC')}")
-                else:
-                    error_text = "N/A"
-                    if job["actual_value"] is not None and job["ticks"]:
-                        error = abs(job["ticks"][-1]["predicted_value"] - job["actual_value"])
-                        error_text = f"{error:.2f} {unit}"
-                    st.caption(f"Completed | Error: {error_text}")
-
                 if st.button("Open", key=f"job_tile_{job['job_id']}", use_container_width=True):
                     open_dialog("prediction_job", job["job_id"])
+
+
+@st.dialog("Saved Predictions", width="large", dismissible=False)
+def show_saved_predictions(dataset: str) -> None:
+    render_dialog_close_button("close_saved_predictions")
+
+    label = DATASET_LABELS.get(dataset, dataset.title())
+    st.subheader(f"{label} — Saved Predictions")
+
+    jobs = get_saved_jobs(dataset)
+    render_prediction_job_tiles(jobs, "No saved predictions yet. Save a completed job to keep it here permanently.")
+
+
+def format_analytics_inputs(inputs: dict) -> str:
+    """Renders the Solar Wind + IMF readings captured for one Analytics
+    tick as two terminal lines — the live upstream conditions feeding the
+    combined Kp/Dst model, distinct from the single self-referential
+    reading the standalone Solar Wind/IMF/Kp/Dst tabs show.
+    """
+    if not inputs:
+        return ""
+    sw_parts = []
+    if inputs.get("speed") is not None:
+        sw_parts.append(f"Speed {inputs['speed']:.1f} km/s")
+    if inputs.get("density") is not None:
+        sw_parts.append(f"Density {inputs['density']:.2f} p/cm3")
+    if inputs.get("temperature") is not None:
+        sw_parts.append(f"Temp {inputs['temperature']:.0f} K")
+
+    imf_parts = []
+    for key, lbl in [("bt", "Bt"), ("bx_gsm", "Bx"), ("by_gsm", "By"), ("bz_gsm", "Bz")]:
+        if inputs.get(key) is not None:
+            imf_parts.append(f"{lbl} {inputs[key]:.2f} nT")
+
+    lines = []
+    if sw_parts:
+        lines.append(f"<div>Solar Wind: {escape(' | '.join(sw_parts))}</div>")
+    if imf_parts:
+        lines.append(f"<div>IMF: {escape(' | '.join(imf_parts))}</div>")
+    return "".join(lines)
+
+
+def render_kp_forecast_dialog(job: dict) -> None:
+    """Kp on the Analytics page isn't predicted hourly like every other
+    variable — it follows NOAA's real 3-hour publishing cadence, runs as
+    one continuous session for the whole current interval, and reports a
+    Final vs. Average prediction (only the final one is the operational
+    forecast; the average is a stability indicator). That's different
+    enough from the generic dialog to warrant its own layout entirely.
+    """
+    decimals = 2
+    ticks = job["ticks"]
+    metrics = job.get("metrics", {})
+
+    start_hour = pd.Timestamp(job["start_hour"])
+    target_hour = pd.Timestamp(job["target_hour"])
+    created_at = pd.Timestamp(job["created_at"])
+    current_interval_start = start_hour.floor("3h")
+    current_interval_end = current_interval_start + pd.Timedelta(hours=3)
+    target_interval_end = target_hour + pd.Timedelta(hours=3)
+
+    st.subheader("Kp Forecast")
+    st.markdown(
+        f"**Current Interval:** {current_interval_start.strftime('%H:%M')}–{current_interval_end.strftime('%H:%M UTC')}  \n"
+        f"**Forecast Target:** {target_hour.strftime('%H:%M')}–{target_interval_end.strftime('%H:%M UTC')}  \n"
+        f"**Prediction Started:** {created_at.strftime('%H:%M:%S UTC')}"
+    )
+    st.markdown(status_badge_html(job["status"]), unsafe_allow_html=True)
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+
+    st.markdown(
+        f"""
+        <style>
+        .job-terminal {{
+            background: #050505;
+            border: 2px solid #ffffff;
+            box-shadow: 3px 3px 0px #808080;
+            padding: 12px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.78rem;
+            color: #00ff88;
+        }}
+        </style>
+        <div class="job-terminal">
+            <div>MODEL: {escape(job['model_name'])}</div>
+            <div>R&sup2;: {metrics.get('r2', float('nan')):.4f} &nbsp;|&nbsp; MAE: {metrics.get('mae', float('nan')):.3f}
+            &nbsp;|&nbsp; RMSE: {metrics.get('rmse', float('nan')):.3f}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Live Forecast Console")
+
+    def _fmt(value, dp):
+        return "N/A" if value is None else f"{value:.{dp}f}"
+
+    if ticks:
+        forecast_col = f"Forecast ({target_hour.strftime('%H:%M')}–{target_interval_end.strftime('%H:%M UTC')})"
+        columns = [
+            "Time UTC",
+            "Speed (km/s)",
+            "Density (p/cm3)",
+            "Temperature (K)",
+            "Bt (nT)",
+            "Bx (nT)",
+            "By (nT)",
+            "Bz (nT)",
+            "Latest Dst (nT)",
+            "Latest Official Kp",
+            forecast_col,
+        ]
+
+        row_html = []
+        for t in ticks:  # chronological — new rows append at the bottom, like a real console
+            inputs = t.get("inputs") or {}
+            minute_at = t["minute_at"]
+            cells = [
+                pd.Timestamp(minute_at).strftime("%H:%M:%S") if minute_at else "N/A",
+                _fmt(inputs.get("speed"), 1),
+                _fmt(inputs.get("density"), 2),
+                _fmt(inputs.get("temperature"), 0),
+                _fmt(inputs.get("bt"), 2),
+                _fmt(inputs.get("bx_gsm"), 2),
+                _fmt(inputs.get("by_gsm"), 2),
+                _fmt(inputs.get("bz_gsm"), 2),
+                _fmt(inputs.get("dst"), 1),
+                _fmt(inputs.get("kp"), 2),
+                f"{t['predicted_value']:.2f}",
+            ]
+            row_html.append("<tr>" + "".join(f"<td>{escape(c)}</td>" for c in cells) + "</tr>")
+
+        header_html = "<tr>" + "".join(f"<th>{escape(c)}</th>" for c in columns) + "</tr>"
+
+        st.markdown(
+            f"""
+            <style>
+            .kp-console {{
+                background: #050505;
+                border: 2px solid #ffffff;
+                box-shadow: 3px 3px 0px #808080;
+                padding: 10px;
+                max-height: 380px;
+                overflow: auto;
+            }}
+            table.kp-console-table {{
+                border-collapse: collapse;
+                font-family: 'Courier New', monospace;
+                font-size: 0.72rem;
+                white-space: nowrap;
+            }}
+            table.kp-console-table th, table.kp-console-table td {{
+                border: 1px solid #1a3a2a;
+                padding: 3px 8px;
+                text-align: right;
+                color: #d8ffe8;
+            }}
+            table.kp-console-table th {{
+                color: #00ff88;
+                font-weight: 700;
+                position: sticky;
+                top: 0;
+                background: #0a0a0a;
+            }}
+            table.kp-console-table td:first-child, table.kp-console-table th:first-child {{
+                text-align: left;
+            }}
+            </style>
+            <div class="kp-console">
+                <table class="kp-console-table">
+                    <thead>{header_html}</thead>
+                    <tbody>{''.join(row_html)}</tbody>
+                </table>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("Waiting for the first NOAA reading...")
+
+    plotted = [t for t in ticks if t["minute_at"] is not None]
+    if plotted:
+        chart_times = [pd.Timestamp(t["minute_at"]) for t in plotted]
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=chart_times,
+                y=[t["predicted_value"] for t in plotted],
+                mode="lines+markers",
+                name="Predicted Kp",
+            )
+        )
+        fig.update_layout(
+            title="Kp Forecast Drift Toward Next Interval",
+            height=360,
+            legend_title_text="",
+            yaxis_title="Predicted Kp",
+        )
+        plot_retro(fig)
+
+    if job["status"] in ("completed", "stopped"):
+        st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+        st.markdown("##### Forecast Summary")
+
+        final_pred = ticks[-1]["predicted_value"] if ticks else None
+        avg_pred = average_prediction(job)
+        actual = job["actual_value"]
+        final_error = None if (final_pred is None or actual is None) else abs(final_pred - actual)
+        avg_error = None if (avg_pred is None or actual is None) else abs(avg_pred - actual)
+        drift = forecast_drift(job)
+        prev_kp = (ticks[0].get("inputs") or {}).get("kp") if ticks else None
+
+        s1, s2, s3, s4 = st.columns(4)
+        with s1:
+            metric_card(
+                "Current Interval",
+                f"{current_interval_start.strftime('%H:%M')}–{current_interval_end.strftime('%H:%M')}",
+                "",
+            )
+        with s2:
+            metric_card(
+                "Forecast Target", f"{target_hour.strftime('%H:%M')}–{target_interval_end.strftime('%H:%M')}", ""
+            )
+        with s3:
+            metric_card("Latest Official Kp", "N/A" if prev_kp is None else f"{prev_kp:.2f}", "")
+        with s4:
+            metric_card(
+                "Final Prediction",
+                "N/A" if final_pred is None else f"{final_pred:.2f}",
+                "Last forecast before the interval ended — the operational forecast",
+            )
+
+        s5, s6, s7, s8 = st.columns(4)
+        with s5:
+            metric_card(
+                "Average Prediction",
+                "N/A" if avg_pred is None else f"{avg_pred:.2f}",
+                "Stability indicator, not the operational forecast",
+                tooltip="Mean of every prediction generated during the session.",
+            )
+        with s6:
+            metric_card(
+                "Actual Kp",
+                "Pending" if actual is None else f"{actual:.2f}",
+                "" if job["status"] == "completed" else "Stopped before the interval closed",
+            )
+        with s7:
+            metric_card(
+                "Final Prediction Error",
+                "N/A" if final_error is None else f"{final_error:.2f}",
+                "Primary operational accuracy metric",
+            )
+        with s8:
+            metric_card(
+                "Average Prediction Error",
+                "N/A" if avg_error is None else f"{avg_error:.2f}",
+                "Secondary stability metric",
+            )
+
+        s9, s10, s11, s12 = st.columns(4)
+        with s9:
+            if drift is None:
+                metric_card("Forecast Drift", "N/A", "")
+            else:
+                sign = "+" if drift >= 0 else ""
+                metric_card(
+                    "Forecast Drift",
+                    f"{sign}{drift:.2f}",
+                    "Final minus initial prediction",
+                    tooltip="How much the forecast moved from the first tick to the last.",
+                )
+        with s10:
+            r2 = metrics.get("r2")
+            metric_card("Model Quality", model_quality_label(r2), "N/A" if r2 is None else f"R² = {r2:.4f}")
+        with s11:
+            metric_card("MAE", f"{metrics.get('mae', float('nan')):.3f}", "Model's typical training error")
+        with s12:
+            metric_card("RMSE", f"{metrics.get('rmse', float('nan')):.3f}", "")
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    if job["status"] in ("in_progress", "evaluating"):
+        if st.button("⏹ Stop Prediction", key=f"stop_{job['job_id']}", use_container_width=True):
+            stop_job(job["job_id"])
+            st.toast("Prediction stopped.")
+            st.rerun()
+    else:
+        already_saved = job.get("saved", False)
+        save_col, delete_col = st.columns(2)
+        with save_col:
+            if st.button(
+                "💾 Saved" if already_saved else "💾 Save",
+                key=f"save_{job['job_id']}",
+                use_container_width=True,
+                disabled=already_saved,
+            ):
+                save_job(job["job_id"])
+                st.toast("Prediction saved.")
+                st.rerun()
+        with delete_col:
+            if st.button("🗑️ Delete", key=f"delete_{job['job_id']}", use_container_width=True):
+                delete_job(job["job_id"])
+                close_active_dialog()
+
+
+def render_dst_forecast_dialog(job: dict) -> None:
+    """Dst on the Analytics page is still horizon-based (1h/3h/6h/12h/24h,
+    not NOAA's fixed publishing cadence like Kp), but otherwise gets the
+    exact same live console + completion summary architecture as Kp's
+    dedicated dialog, since both are driven by the same combined Solar
+    Wind + IMF + geomagnetic feature set.
+    """
+    ticks = job["ticks"]
+    metrics = job.get("metrics", {})
+    horizon = job["horizon"]
+
+    target_hour = pd.Timestamp(job["target_hour"])
+    created_at = pd.Timestamp(job["created_at"])
+
+    st.subheader("Dst Forecast")
+    st.markdown(
+        f"**Started:** {created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}  \n"
+        f"**Target:** {target_hour.strftime('%Y-%m-%d %H:%M UTC')}  \n"
+        f"**Horizon:** {horizon}h"
+    )
+    st.markdown(status_badge_html(job["status"]), unsafe_allow_html=True)
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+
+    st.markdown(
+        f"""
+        <style>
+        .job-terminal {{
+            background: #050505;
+            border: 2px solid #ffffff;
+            box-shadow: 3px 3px 0px #808080;
+            padding: 12px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.78rem;
+            color: #00ff88;
+        }}
+        </style>
+        <div class="job-terminal">
+            <div>MODEL: {escape(job['model_name'])}</div>
+            <div>R&sup2;: {metrics.get('r2', float('nan')):.4f} &nbsp;|&nbsp; MAE: {metrics.get('mae', float('nan')):.3f} nT
+            &nbsp;|&nbsp; RMSE: {metrics.get('rmse', float('nan')):.3f} nT</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Live Forecast Console")
+
+    def _fmt(value, dp):
+        return "N/A" if value is None else f"{value:.{dp}f}"
+
+    if ticks:
+        forecast_col = f"Forecast ({target_hour.strftime('%H:%M UTC')})"
+        columns = [
+            "Time UTC",
+            "Speed (km/s)",
+            "Density (p/cm3)",
+            "Temperature (K)",
+            "Bt (nT)",
+            "Bx (nT)",
+            "By (nT)",
+            "Bz (nT)",
+            "Latest Dst (nT)",
+            "Latest Official Kp",
+            forecast_col,
+        ]
+
+        row_html = []
+        for t in ticks:  # chronological — new rows append at the bottom, like a real console
+            inputs = t.get("inputs") or {}
+            minute_at = t["minute_at"]
+            cells = [
+                pd.Timestamp(minute_at).strftime("%H:%M:%S") if minute_at else "N/A",
+                _fmt(inputs.get("speed"), 1),
+                _fmt(inputs.get("density"), 2),
+                _fmt(inputs.get("temperature"), 0),
+                _fmt(inputs.get("bt"), 2),
+                _fmt(inputs.get("bx_gsm"), 2),
+                _fmt(inputs.get("by_gsm"), 2),
+                _fmt(inputs.get("bz_gsm"), 2),
+                _fmt(inputs.get("dst"), 1),
+                _fmt(inputs.get("kp"), 2),
+                f"{t['predicted_value']:.2f}",
+            ]
+            row_html.append("<tr>" + "".join(f"<td>{escape(c)}</td>" for c in cells) + "</tr>")
+
+        header_html = "<tr>" + "".join(f"<th>{escape(c)}</th>" for c in columns) + "</tr>"
+
+        st.markdown(
+            f"""
+            <style>
+            .kp-console {{
+                background: #050505;
+                border: 2px solid #ffffff;
+                box-shadow: 3px 3px 0px #808080;
+                padding: 10px;
+                max-height: 380px;
+                overflow: auto;
+            }}
+            table.kp-console-table {{
+                border-collapse: collapse;
+                font-family: 'Courier New', monospace;
+                font-size: 0.72rem;
+                white-space: nowrap;
+            }}
+            table.kp-console-table th, table.kp-console-table td {{
+                border: 1px solid #1a3a2a;
+                padding: 3px 8px;
+                text-align: right;
+                color: #d8ffe8;
+            }}
+            table.kp-console-table th {{
+                color: #00ff88;
+                font-weight: 700;
+                position: sticky;
+                top: 0;
+                background: #0a0a0a;
+            }}
+            table.kp-console-table td:first-child, table.kp-console-table th:first-child {{
+                text-align: left;
+            }}
+            </style>
+            <div class="kp-console">
+                <table class="kp-console-table">
+                    <thead>{header_html}</thead>
+                    <tbody>{''.join(row_html)}</tbody>
+                </table>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("Waiting for the first NOAA reading...")
+
+    plotted = [t for t in ticks if t["minute_at"] is not None]
+    if plotted:
+        chart_times = [pd.Timestamp(t["minute_at"]) for t in plotted]
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=chart_times,
+                y=[t["predicted_value"] for t in plotted],
+                mode="lines+markers",
+                name="Predicted Dst",
+            )
+        )
+        fig.update_layout(
+            title="Dst Forecast Drift Toward Target",
+            height=360,
+            legend_title_text="",
+            yaxis_title="Predicted Dst (nT)",
+        )
+        plot_retro(fig)
+
+    if job["status"] in ("completed", "stopped"):
+        st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+        st.markdown("##### Forecast Summary")
+
+        final_pred = ticks[-1]["predicted_value"] if ticks else None
+        avg_pred = average_prediction(job)
+        actual = job["actual_value"]
+        final_error = None if (final_pred is None or actual is None) else abs(final_pred - actual)
+        avg_error = None if (avg_pred is None or actual is None) else abs(avg_pred - actual)
+        drift = forecast_drift(job)
+
+        s1, s2, s3, s4 = st.columns(4)
+        with s1:
+            metric_card("Started", created_at.strftime("%H:%M:%S UTC"), "")
+        with s2:
+            metric_card("Target", target_hour.strftime("%H:%M UTC"), "")
+        with s3:
+            metric_card("Horizon", f"{horizon}h", "")
+        with s4:
+            metric_card(
+                "Final Prediction",
+                "N/A" if final_pred is None else f"{final_pred:.2f} nT",
+                "Last forecast before the target arrived — the operational forecast",
+            )
+
+        s5, s6, s7, s8 = st.columns(4)
+        with s5:
+            metric_card(
+                "Average Prediction",
+                "N/A" if avg_pred is None else f"{avg_pred:.2f} nT",
+                "Stability indicator, not the operational forecast",
+                tooltip="Mean of every prediction generated during the session.",
+            )
+        with s6:
+            metric_card(
+                "Actual Dst",
+                "Pending" if actual is None else f"{actual:.2f} nT",
+                "" if job["status"] == "completed" else "Stopped before the target arrived",
+            )
+        with s7:
+            metric_card(
+                "Final Prediction Error",
+                "N/A" if final_error is None else f"{final_error:.2f} nT",
+                "Primary operational accuracy metric",
+            )
+        with s8:
+            metric_card(
+                "Average Prediction Error",
+                "N/A" if avg_error is None else f"{avg_error:.2f} nT",
+                "Secondary stability metric",
+            )
+
+        s9, s10, s11, s12 = st.columns(4)
+        with s9:
+            if drift is None:
+                metric_card("Forecast Drift", "N/A", "")
+            else:
+                sign = "+" if drift >= 0 else ""
+                metric_card(
+                    "Forecast Drift",
+                    f"{sign}{drift:.2f} nT",
+                    "Final minus initial prediction",
+                    tooltip="How much the forecast moved from the first tick to the last.",
+                )
+        with s10:
+            r2 = metrics.get("r2")
+            metric_card("Model Quality", model_quality_label(r2), "N/A" if r2 is None else f"R² = {r2:.4f}")
+        with s11:
+            metric_card("MAE", f"{metrics.get('mae', float('nan')):.3f} nT", "Model's typical training error")
+        with s12:
+            metric_card("RMSE", f"{metrics.get('rmse', float('nan')):.3f} nT", "")
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    if job["status"] in ("in_progress", "evaluating"):
+        if st.button("⏹ Stop Prediction", key=f"stop_{job['job_id']}", use_container_width=True):
+            stop_job(job["job_id"])
+            st.toast("Prediction stopped.")
+            st.rerun()
+    else:
+        already_saved = job.get("saved", False)
+        save_col, delete_col = st.columns(2)
+        with save_col:
+            if st.button(
+                "💾 Saved" if already_saved else "💾 Save",
+                key=f"save_{job['job_id']}",
+                use_container_width=True,
+                disabled=already_saved,
+            ):
+                save_job(job["job_id"])
+                st.toast("Prediction saved.")
+                st.rerun()
+        with delete_col:
+            if st.button("🗑️ Delete", key=f"delete_{job['job_id']}", use_container_width=True):
+                delete_job(job["job_id"])
+                close_active_dialog()
 
 
 @st.dialog("Prediction Job", width="large", dismissible=False)
@@ -1543,6 +2137,14 @@ def show_prediction_job(job_id: str) -> None:
 
     dataset = job["dataset"]
     variable = job["variable"]
+
+    if dataset == "analytics" and variable == "kp":
+        render_kp_forecast_dialog(job)
+        return
+    if dataset == "analytics" and variable == "dst":
+        render_dst_forecast_dialog(job)
+        return
+
     horizon = job["horizon"]
     label = VARIABLE_LABELS.get(variable, variable)
     unit = VARIABLE_UNITS.get(variable, "")
@@ -1550,14 +2152,22 @@ def show_prediction_job(job_id: str) -> None:
 
     start_hour = pd.Timestamp(job["start_hour"])
     target_hour = pd.Timestamp(job["target_hour"])
-    status_text = "In Progress" if job["status"] == "in_progress" else "Completed"
     ticks = job["ticks"]
+    metrics = job.get("metrics", {})
+    is_kp_interval = dataset == "analytics" and variable == "kp"
+    horizon_display = "Next NOAA Interval" if is_kp_interval else f"{horizon}h"
 
-    st.subheader(f"{label} — {horizon}h Forecast")
-    st.caption(
-        f"Status: {status_text} | Started {start_hour.strftime('%Y-%m-%d %H:%M UTC')} | "
-        f"Target: {target_hour.strftime('%Y-%m-%d %H:%M UTC')}"
-    )
+    st.subheader(f"{label} — {horizon_display} Forecast")
+    badge_col, caption_col = st.columns([0.15, 0.85])
+    with badge_col:
+        st.markdown(status_badge_html(job["status"]), unsafe_allow_html=True)
+    with caption_col:
+        st.caption(
+            f"Started {start_hour.strftime('%Y-%m-%d %H:%M UTC')} | "
+            f"Target: {target_hour.strftime('%Y-%m-%d %H:%M UTC')}"
+        )
+
+    st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
 
     live_ts, live_val = latest_minute_observation(dataset, variable)
     latest_predicted = ticks[-1]["predicted_value"] if ticks else None
@@ -1567,50 +2177,89 @@ def show_prediction_job(job_id: str) -> None:
         metric_card(
             "Current NOAA",
             format_value(live_val, f" {unit}", decimals),
-            "N/A" if live_ts is None else live_ts.strftime("%H:%M:%S UTC"),
+            "N/A" if live_ts is None else f"As of {live_ts.strftime('%H:%M:%S UTC')}",
         )
     with c2:
-        conf = confidence_pct(job)
+        r2 = metrics.get("r2")
+        quality = model_quality_label(r2)
         metric_card(
-            "Confidence",
-            "N/A" if conf is None else f"{conf:.0f}%",
-            "Derived from model R²",
+            "Model Quality",
+            quality,
+            "N/A" if r2 is None else f"R² = {r2:.4f}",
+            tooltip="How well this model performed on held-out training data, categorized from its R² score.",
         )
     with c3:
         if latest_predicted is not None and live_val is not None:
             change = latest_predicted - live_val
-            trend = "Stable" if abs(change) < 1e-9 else ("Increasing" if change > 0 else "Decreasing")
+            if abs(change) < 1e-9:
+                trend, color = "No Change", "#404040"
+            elif change > 0:
+                trend, color = "Increase", "#1f7a3a"
+            else:
+                trend, color = "Decrease", "#a31f1f"
             sign = "+" if change >= 0 else ""
-            metric_card("Expected Change", f"{sign}{format_value(change, f' {unit}', decimals)}", f"Trend: {trend}")
+            metric_card(
+                "Expected Change",
+                f"{sign}{format_value(change, f' {unit}', decimals)}",
+                f"Trend: {trend}",
+                tooltip="Difference between the latest forecast and the current live NOAA reading.",
+                value_color=color,
+            )
         else:
-            metric_card("Expected Change", "N/A", "")
+            metric_card("Expected Change", "N/A", "", tooltip="Difference between the latest forecast and the current live NOAA reading.")
     with c4:
         stability_label, stability_delta = stability_metric(job)
-        metric_card(
-            "Stability",
-            "N/A" if stability_label is None else stability_label,
-            "N/A" if stability_delta is None else f"Δ = {stability_delta:.2f} {unit}",
-        )
+        if stability_label is None:
+            metric_card(
+                "Stability",
+                "N/A",
+                "Not enough updates to evaluate stability",
+                tooltip="How much the prediction has varied across the most recent updates in this session.",
+            )
+        else:
+            metric_card(
+                "Stability",
+                stability_label,
+                f"Δ Prediction = {stability_delta:.2f} {unit}",
+                tooltip="How much the prediction has varied across the most recent updates in this session.",
+            )
 
     st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
 
     if job["status"] == "completed" and job["actual_value"] is not None:
         final_pred = ticks[-1]["predicted_value"] if ticks else None
         error = None if final_pred is None else abs(final_pred - job["actual_value"])
-        error_pct = None if error is None or job["actual_value"] == 0 else error / abs(job["actual_value"]) * 100
+        model_mae = metrics.get("mae")
         a1, a2, a3, a4 = st.columns(4)
         with a1:
-            metric_card("Final Prediction", format_value(final_pred, f" {unit}", decimals), "")
+            metric_card(
+                "Final Prediction",
+                format_value(final_pred, f" {unit}", decimals),
+                f"Target {target_hour.strftime('%H:%M UTC')}",
+            )
         with a2:
-            metric_card("Actual NOAA", format_value(job["actual_value"], f" {unit}", decimals), "")
+            metric_card(
+                "Actual NOAA",
+                format_value(job["actual_value"], f" {unit}", decimals),
+                f"At {target_hour.strftime('%H:%M UTC')}",
+            )
         with a3:
-            metric_card("Absolute Error", "N/A" if error is None else format_value(error, f" {unit}", decimals), "")
+            metric_card(
+                "Absolute Error",
+                "N/A" if error is None else format_value(error, f" {unit}", decimals),
+                "",
+                tooltip="Difference between the final prediction and the actual NOAA observation, in native units.",
+            )
         with a4:
-            acc_label = "N/A" if error_pct is None else accuracy_label(error_pct)
-            metric_card("Accuracy", acc_label, "" if error_pct is None else f"{error_pct:.1f}% error")
+            eval_label = forecast_evaluation_label(error, model_mae)
+            metric_card(
+                "Forecast Evaluation",
+                eval_label,
+                "" if model_mae is None else f"Model's typical error: {model_mae:.{decimals}f} {unit}",
+                tooltip="How this forecast's error compares to the model's typical error (MAE) from training.",
+            )
         st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
 
-    metrics = job.get("metrics", {})
     st.markdown(
         f"""
         <style>
@@ -1646,16 +2295,27 @@ def show_prediction_job(job_id: str) -> None:
     for i, tick in enumerate(reversed(ticks)):
         minute_at = tick["minute_at"]
         minute_label = "N/A" if minute_at is None else pd.Timestamp(minute_at).strftime("%H:%M:%S UTC")
-        noaa_text = "N/A" if tick["noaa_value"] is None else f"{tick['noaa_value']:.{decimals}f} {unit}"
         pred_text = f"{tick['predicted_value']:.{decimals}f} {unit}"
         used_horizon = tick.get("used_horizon", horizon)
+        used_horizon_text = "Next Interval" if used_horizon == "interval" else f"{used_horizon}h"
         next_step = "Waiting For Next NOAA Update..." if i == 0 and job["status"] == "in_progress" else "Superseded"
+
+        if dataset == "analytics" and tick.get("inputs"):
+            header = f"<div>[{escape(minute_label)}] Multi-Source Update</div>" + format_analytics_inputs(
+                tick["inputs"]
+            )
+            features_step = "Features Generated (Solar Wind + IMF + Geomagnetic Lags)"
+        else:
+            noaa_text = "N/A" if tick["noaa_value"] is None else f"{tick['noaa_value']:.{decimals}f} {unit}"
+            header = f"<div>[{escape(minute_label)}] NOAA {escape(label)}: {escape(noaa_text)}</div>"
+            features_step = "Features Generated"
+
         blocks.append(
-            f"<div>[{escape(minute_label)}] NOAA {escape(label)}: {escape(noaa_text)}</div>"
-            f"<div class='pipeline-step'>&rarr; Features Generated</div>"
-            f"<div class='pipeline-step'>&rarr; Model Loaded (Horizon: {used_horizon}h)</div>"
-            f"<div class='pipeline-step'>&rarr; Prediction (Target {target_hour.strftime('%H:%M UTC')}): {escape(pred_text)}</div>"
-            f"<div class='pipeline-step'>&rarr; {next_step}</div>"
+            header
+            + f"<div class='pipeline-step'>&rarr; {features_step}</div>"
+            + f"<div class='pipeline-step'>&rarr; Model Loaded (Horizon: {used_horizon_text})</div>"
+            + f"<div class='pipeline-step'>&rarr; Prediction (Target {target_hour.strftime('%H:%M UTC')}): {escape(pred_text)}</div>"
+            + f"<div class='pipeline-step'>&rarr; {next_step}</div>"
         )
 
     st.markdown(
@@ -1686,6 +2346,35 @@ def show_prediction_job(job_id: str) -> None:
         )
         plot_retro(fig)
 
+    if job["status"] == "evaluating" and dataset == "analytics":
+        st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+        st.info(f"Waiting for NOAA to publish the official {label} value for this target. The job will complete automatically once it's available.")
+    elif job["status"] == "evaluating":
+        st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+        st.markdown("##### Evaluation In Progress — Target Hour Filling")
+        st.caption(
+            f"Collecting NOAA minute readings for {target_hour.strftime('%H:%M')}–"
+            f"{(target_hour + pd.Timedelta(hours=1)).strftime('%H:%M UTC')}. Once the hour closes, "
+            "this collapses into the final Job Summary below."
+        )
+        eval_ticks = job.get("eval_ticks", [])
+        if eval_ticks:
+            eval_df = pd.DataFrame(
+                [
+                    {
+                        "Minute": pd.Timestamp(t["minute_at"]).strftime("%H:%M:%S UTC") if t["minute_at"] else "N/A",
+                        f"NOAA Value ({unit})": "N/A" if t["noaa_value"] is None else round(t["noaa_value"], decimals),
+                        f"Running Average ({unit})": (
+                            "N/A" if t["running_avg"] is None else round(t["running_avg"], decimals)
+                        ),
+                    }
+                    for t in reversed(eval_ticks)
+                ]
+            )
+            st.dataframe(eval_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("Waiting for the first NOAA reading in this hour...")
+
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
     st.markdown("##### Job Summary")
 
@@ -1694,7 +2383,7 @@ def show_prediction_job(job_id: str) -> None:
         [
             {
                 "Variable": label,
-                "Horizon": f"{horizon}h",
+                "Horizon": horizon_display,
                 "Started": start_hour.strftime("%Y-%m-%d %H:%M UTC"),
                 "Target": target_hour.strftime("%Y-%m-%d %H:%M UTC"),
                 f"Initial Prediction ({unit})": round(ticks[0]["predicted_value"], decimals),
@@ -1708,8 +2397,13 @@ def show_prediction_job(job_id: str) -> None:
     )
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
-    if job["status"] == "completed":
-        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    if job["status"] in ("in_progress", "evaluating"):
+        if st.button("⏹ Stop Prediction", key=f"stop_{job['job_id']}", use_container_width=True):
+            stop_job(job["job_id"])
+            st.toast("Prediction stopped.")
+            st.rerun()
+    else:
         already_saved = job.get("saved", False)
         save_col, delete_col = st.columns(2)
         with save_col:
@@ -1741,32 +2435,128 @@ def prediction_panel(dataset: str, variables: list[str]) -> None:
         format_func=lambda v: VARIABLE_LABELS[v],
         key=f"{dataset}_pred_var",
     )
-    horizon = col2.selectbox(
-        "Forecast Horizon",
-        HORIZONS,
-        format_func=lambda h: f"{h} Hour" + ("s" if h != 1 else ""),
-        key=f"{dataset}_pred_horizon",
-    )
 
-    if st.button("Start Prediction", key=f"{dataset}_pred_btn"):
-        try:
-            job, created = start_job(dataset, variable, horizon)
-        except Exception as exc:
-            st.error(f"Could not start prediction: {exc}")
-            return
-        label = VARIABLE_LABELS.get(variable, variable)
-        if created:
-            st.toast(f"Started {label} {horizon}h prediction.")
-        else:
-            start_hour = pd.Timestamp(job["start_hour"])
-            st.warning(
-                f"A {label} {horizon}h prediction is already in progress "
-                f"(started {start_hour.strftime('%H:%M UTC')}). Open its card below to view live drift."
-            )
+    is_kp_interval = dataset == "analytics" and variable == "kp"
+    if is_kp_interval:
+        with col2:
+            st.markdown("**Forecast Horizon**")
+            st.caption("Next official NOAA Kp interval (published every 3h: 00, 03, 06... UTC)")
+        horizon = 1  # placeholder only — predict_kp_interval ignores it and always targets the next interval
+    else:
+        horizon = col2.selectbox(
+            "Forecast Horizon",
+            HORIZONS,
+            format_func=lambda h: f"{h} Hour" + ("s" if h != 1 else ""),
+            key=f"{dataset}_pred_horizon",
+        )
+
+    btn_col, saved_col = st.columns(2)
+    with btn_col:
+        if st.button("Start Prediction", key=f"{dataset}_pred_btn", use_container_width=True):
+            try:
+                job, created = start_job(dataset, variable, horizon)
+            except Exception as exc:
+                st.error(f"Could not start prediction: {exc}")
+                return
+            label = VARIABLE_LABELS.get(variable, variable)
+            horizon_text = "next NOAA interval" if is_kp_interval else f"{horizon}h"
+            if created:
+                st.toast(f"Started {label} {horizon_text} prediction.")
+            else:
+                start_hour = pd.Timestamp(job["start_hour"])
+                st.warning(
+                    f"A {label} {horizon_text} prediction is already in progress "
+                    f"(started {start_hour.strftime('%H:%M UTC')}). Open its card below to view live drift."
+                )
+    with saved_col:
+        if st.button("📁 Saved Predictions", key=f"{dataset}_saved_btn", use_container_width=True):
+            open_dialog("saved_predictions", dataset)
 
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
-    st.markdown("#### Active & Recent Predictions")
-    render_prediction_job_tiles(dataset)
+    st.markdown("#### Running Predictions")
+    render_prediction_job_tiles(
+        get_running_jobs(dataset),
+        "No predictions running. Pick a variable and horizon, then click Start Prediction.",
+    )
+
+
+def prediction_statistics_panel(dataset: str) -> None:
+    """Analyzes the forecasting SYSTEM itself — aggregated across every
+    completed, evaluated job for this dataset — rather than any single
+    forecast. That's covered by the Predictions tab.
+    """
+    stats = get_prediction_statistics(dataset)
+
+    if stats["count"] == 0:
+        st.info("No completed, evaluated forecasts yet. Statistics will appear here once predictions finish.")
+        return
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        metric_card("Forecast Count", str(stats["count"]), "Completed & evaluated forecasts")
+    with c2:
+        rate = stats["success_rate"]
+        metric_card(
+            "Success Rate",
+            "N/A" if rate is None else f"{rate:.0f}%",
+            "Within 1.5x the model's typical error",
+            tooltip="Percentage of forecasts whose final error came in at or below 1.5x the model's own typical training error (MAE).",
+        )
+    with c3:
+        best_model = stats["best_model"]
+        best_mae = stats["mae_by_model"].get(best_model) if best_model else None
+        metric_card(
+            "Best-Performing Model",
+            best_model or "N/A",
+            "" if best_mae is None else f"Avg error: {best_mae:.3f}",
+            tooltip="The algorithm with the lowest average absolute error across all completed forecasts that used it.",
+        )
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+
+    col_var, col_horizon = st.columns(2)
+    with col_var:
+        st.markdown("##### Mean Absolute Error by Variable")
+        var_df = pd.DataFrame(
+            [
+                {"Variable": VARIABLE_LABELS.get(v, v), "MAE": round(mae, 3)}
+                for v, mae in sorted(stats["mae_by_variable"].items(), key=lambda kv: kv[1])
+            ]
+        )
+        st.dataframe(var_df, use_container_width=True, hide_index=True)
+    with col_horizon:
+        st.markdown("##### Mean Absolute Error by Forecast Horizon")
+        horizon_df = pd.DataFrame(
+            [
+                {"Horizon": f"{h}h", "MAE": round(mae, 3)}
+                for h, mae in sorted(stats["mae_by_horizon"].items())
+            ]
+        )
+        st.dataframe(horizon_df, use_container_width=True, hide_index=True)
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Historical Forecast Error Trend")
+    trend = stats["trend"]
+    if len(trend) >= 2:
+        trend_df = pd.DataFrame(trend, columns=["completed_at", "abs_error"])
+        trend_df["completed_at"] = pd.to_datetime(trend_df["completed_at"])
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=trend_df["completed_at"],
+                y=trend_df["abs_error"],
+                mode="lines+markers",
+                name="Absolute Error",
+            )
+        )
+        fig.update_layout(
+            title="Forecast Error Over Time (Lower Is Better)",
+            height=360,
+            legend_title_text="",
+        )
+        plot_retro(fig)
+    else:
+        st.info("Need at least 2 completed forecasts to plot a trend.")
 
 
 def current_analysis_solar_wind(df: pd.DataFrame) -> None:
@@ -1957,8 +2747,6 @@ def current_analysis_dst(df: pd.DataFrame) -> None:
 
 
 def earth_analysis(df: pd.DataFrame) -> None:
-    st.subheader("Combined Earth Analysis")
-
     bz_row = row_at_extreme_from_source("imf", "bz", "min")
     kp_row = row_at_extreme(df, "kp", "max")
     dst_row = row_at_extreme(df, "dst", "min")
@@ -2104,18 +2892,22 @@ def heliosphere_page(df: pd.DataFrame) -> None:
     tabs = st.tabs(["Solar Wind", "IMF", "Derived Parameters", "Dynamic Pressure", "Travel Time"])
 
     with tabs[0]:
-        inner = st.tabs(["Current Analysis", "Predictions"])
+        inner = st.tabs(["Current Analysis", "Predictions", "Prediction Statistics"])
         with inner[0]:
             current_analysis_solar_wind(df)
         with inner[1]:
             prediction_panel("solar_wind", SOLAR_WIND_VARIABLES)
+        with inner[2]:
+            prediction_statistics_panel("solar_wind")
 
     with tabs[1]:
-        inner = st.tabs(["Current Analysis", "Predictions"])
+        inner = st.tabs(["Current Analysis", "Predictions", "Prediction Statistics"])
         with inner[0]:
             current_analysis_imf(df)
         with inner[1]:
             prediction_panel("imf", IMF_VARIABLES)
+        with inner[2]:
+            prediction_statistics_panel("imf")
 
     with tabs[2]:
         st.subheader("Derived Parameters")
@@ -2140,18 +2932,10 @@ def geospace_page(df: pd.DataFrame) -> None:
     tabs = st.tabs(["Kp", "Dst"])
 
     with tabs[0]:
-        inner = st.tabs(["Current Analysis", "Predictions"])
-        with inner[0]:
-            current_analysis_kp(df)
-        with inner[1]:
-            st.info("Prediction module will be added later.")
+        current_analysis_kp(df)
 
     with tabs[1]:
-        inner = st.tabs(["Current Analysis", "Predictions"])
-        with inner[0]:
-            current_analysis_dst(df)
-        with inner[1]:
-            st.info("Prediction module will be added later.")
+        current_analysis_dst(df)
 
 
 def recent_window(df: pd.DataFrame, days: int) -> pd.DataFrame:
@@ -3928,7 +4712,12 @@ def photosphere_page(df: pd.DataFrame) -> None:
 
 def analytics_page(df: pd.DataFrame) -> None:
     st.title("Analytics")
-    earth_analysis(df)
+    st.subheader("Combined Earth Analysis")
+    inner = st.tabs(["Current Analysis", "Prediction"])
+    with inner[0]:
+        earth_analysis(df)
+    with inner[1]:
+        prediction_panel("analytics", ANALYTICS_VARIABLES)
 
 
 apply_retro_windows_style()
@@ -4043,6 +4832,8 @@ if active_dialog is not None:
         show_space_weather_library()
     elif kind == "prediction_job":
         show_prediction_job(payload)
+    elif kind == "saved_predictions":
+        show_saved_predictions(payload)
 
 if page == "Home Page":
     home_page(df_7d)

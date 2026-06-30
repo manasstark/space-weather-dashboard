@@ -1,0 +1,112 @@
+{
+  "kp_1h": {
+    "variable": "kp",
+    "horizon": 1,
+    "algorithm": "LinearRegression",
+    "r2": 0.8746704989854752,
+    "mae": 0.2697001020664073,
+    "rmse": 0.4914732343882691,
+    "feature_columns": [
+      "kp",
+      "kp_lag1h",
+      "kp_lag3h",
+      "kp_lag6h",
+      "kp_lag12h",
+      "kp_lag24h",
+      "kp_24h",
+      "kp_24h_std",
+      "kp_change"
+    ],
+    "model_path": "/Users/manasstark/Desktop/PROJECTS/Space Weather Dashboard V2/models/kp/kp_1h.joblib",
+    "trained_at": "2026-06-30T09:26:27.037711+00:00",
+    "n_samples": 26255
+  },
+  "kp_3h": {
+    "variable": "kp",
+    "horizon": 3,
+    "algorithm": "LinearRegression",
+    "r2": 0.6483537304422573,
+    "mae": 0.6274086066698936,
+    "rmse": 0.823239543462249,
+    "feature_columns": [
+      "kp",
+      "kp_lag1h",
+      "kp_lag3h",
+      "kp_lag6h",
+      "kp_lag12h",
+      "kp_lag24h",
+      "kp_24h",
+      "kp_24h_std",
+      "kp_change"
+    ],
+    "model_path": "/Users/manasstark/Desktop/PROJECTS/Space Weather Dashboard V2/models/kp/kp_3h.joblib",
+    "trained_at": "2026-06-30T09:26:28.990352+00:00",
+    "n_samples": 26253
+  },
+  "kp_6h": {
+    "variable": "kp",
+    "horizon": 6,
+    "algorithm": "LinearRegression",
+    "r2": 0.45901479202791096,
+    "mae": 0.7674347661012006,
+    "rmse": 1.0211792287890225,
+    "feature_columns": [
+      "kp",
+      "kp_lag1h",
+      "kp_lag3h",
+      "kp_lag6h",
+      "kp_lag12h",
+      "kp_lag24h",
+      "kp_24h",
+      "kp_24h_std",
+      "kp_change"
+    ],
+    "model_path": "/Users/manasstark/Desktop/PROJECTS/Space Weather Dashboard V2/models/kp/kp_6h.joblib",
+    "trained_at": "2026-06-30T09:26:31.563450+00:00",
+    "n_samples": 26250
+  },
+  "kp_12h": {
+    "variable": "kp",
+    "horizon": 12,
+    "algorithm": "LinearRegression",
+    "r2": 0.258425369430331,
+    "mae": 0.898327968266989,
+    "rmse": 1.1955836936901911,
+    "feature_columns": [
+      "kp",
+      "kp_lag1h",
+      "kp_lag3h",
+      "kp_lag6h",
+      "kp_lag12h",
+      "kp_lag24h",
+      "kp_24h",
+      "kp_24h_std",
+      "kp_change"
+    ],
+    "model_path": "/Users/manasstark/Desktop/PROJECTS/Space Weather Dashboard V2/models/kp/kp_12h.joblib",
+    "trained_at": "2026-06-30T09:26:34.528654+00:00",
+    "n_samples": 26244
+  },
+  "kp_24h": {
+    "variable": "kp",
+    "horizon": 24,
+    "algorithm": "LinearRegression",
+    "r2": 0.0793904876876047,
+    "mae": 1.0180127033135846,
+    "rmse": 1.3320691318663223,
+    "feature_columns": [
+      "kp",
+      "kp_lag1h",
+      "kp_lag3h",
+      "kp_lag6h",
+      "kp_lag12h",
+      "kp_lag24h",
+      "kp_24h",
+      "kp_24h_std",
+      "kp_change"
+    ],
+    "model_path": "/Users/manasstark/Desktop/PROJECTS/Space Weather Dashboard V2/models/kp/kp_24h.joblib",
+    "trained_at": "2026-06-30T09:26:37.532864+00:00",
+    "n_samples": 26232
+  }
+}
