@@ -43,6 +43,7 @@ from swdss.models.hypothesis import (
 from swdss.models.physics_interpretation import physics_interpretation
 from swdss.models.jobs import (
     average_prediction,
+    classify_quicklook_error,
     delete_job,
     final_percentage_error,
     find_matching_job,
@@ -57,6 +58,8 @@ from swdss.models.jobs import (
     model_quality_label,
     poll_jobs,
     quicklook_error,
+    quicklook_label,
+    quicklook_relative_error,
     refresh_quicklook_estimate,
     save_job,
     stability_metric,
@@ -403,6 +406,14 @@ def format_value(value, suffix: str = "", decimals: int = 2) -> str:
 
 
 def metric_card(label: str, value: str, caption: str = "", tooltip: str = "", value_color: str = "#000000") -> None:
+    """Fixed-height card so a row of cards always lines up evenly, even when
+    one value wraps to two lines (e.g. a date + time) or one caption is
+    longer than its neighbors. The value area reserves space for two lines
+    and vertically centers its content, so short and long values still
+    start their caption at the same point; nothing is clamped or hidden,
+    so a card with unusually long text simply grows past the fixed height
+    rather than losing content.
+    """
     title_attr = f' title="{escape(tooltip)}"' if tooltip else ""
     info_icon = " ⓘ" if tooltip else ""
     st.markdown(
@@ -412,15 +423,28 @@ def metric_card(label: str, value: str, caption: str = "", tooltip: str = "", va
             border-left: 2px solid #ffffff;
             border-right: 2px solid #808080;
             border-bottom: 2px solid #808080;
-            padding: 16px;
-            min-height: 118px;
+            padding: 14px 16px;
+            height: 158px;
+            box-sizing: border-box;
             background: #dcdcdc;
             color: #000000;
             font-family: 'MS Sans Serif', Tahoma, sans-serif;
+            display: flex;
+            flex-direction: column;
         ">
-            <div style="font-size: 0.85rem; color: #000080;">{label}{info_icon}</div>
-            <div style="font-size: 1.8rem; font-weight: 700; margin-top: 6px; color: {value_color};">{value}</div>
-            <div style="font-size: 0.8rem; color: #404040; margin-top: 8px;">{caption}</div>
+            <div style="font-size: 0.85rem; color: #000080; line-height: 1.2;">{label}{info_icon}</div>
+            <div style="
+                font-size: 1.6rem;
+                font-weight: 700;
+                color: {value_color};
+                line-height: 1.15;
+                min-height: 2.3em;
+                display: flex;
+                align-items: center;
+                overflow-wrap: break-word;
+                word-break: break-word;
+            ">{value}</div>
+            <div style="font-size: 0.72rem; color: #404040; line-height: 1.25; flex-grow: 1;">{caption}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -444,7 +468,13 @@ STATUS_BADGE_STYLES = {
     "pending": ("Pending Official Kyoto Data", "#7a5a1f", "#fff3cd"),
     "verified": ("Verified", "#1f5a2e", "#d4f4dd"),
     "quicklook_pending": ("Awaiting Quicklook Estimate", "#5a1f8a", "#f2e8ff"),
-    "quicklook_verified": ("Quicklook Verified", "#5a1f8a", "#f2e8ff"),
+    "quicklook_verified": ("Quicklook Estimate Available", "#5a1f8a", "#f2e8ff"),
+}
+
+QUICKLOOK_CONFIDENCE_COLORS = {
+    "high": "#1f5a2e",
+    "moderate": "#7a5a1f",
+    "low": "#7a1f1f",
 }
 
 
@@ -3140,6 +3170,15 @@ def show_prediction_job(job_id: str) -> None:
 def prediction_panel(dataset: str, variables: list[str]) -> None:
     poll_jobs(dataset)
 
+    if dataset == "ae":
+        st.caption(
+            "This forecast estimates the auroral electrojet activity expected during the next hour "
+            "based on the upstream solar wind and interplanetary magnetic field conditions available "
+            "at the time the forecast is issued. Differences from subsequent observations may reflect "
+            "evolving solar wind conditions, the nonlinear response of Earth's magnetosphere, or model "
+            "limitations."
+        )
+
     render_prediction_queue_stats(dataset)
     st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
 
@@ -3928,6 +3967,19 @@ def style_retro_dialog() -> None:
         div[data-testid="stDialog"] span,
         div[data-testid="stDialog"] label {
             color: #f2f2f2 !important;
+        }
+
+        /* st.info/warning/success/error render on a light background (see
+        the div[data-testid="stAlert"] rule in apply_retro_windows_style).
+        That rule alone loses here: div[data-testid="stDialog"] p above has
+        higher CSS specificity than div[data-testid="stAlert"] *, so inside
+        a dialog it was winning and forcing near-white text onto the
+        alert's light background — unreadable. This selector matches both
+        attributes, giving it higher specificity than either rule alone,
+        so alert text stays dark inside dialogs too. */
+        div[data-testid="stDialog"] div[data-testid="stAlert"],
+        div[data-testid="stDialog"] div[data-testid="stAlert"] * {
+            color: #000000 !important;
         }
         </style>
         """,
@@ -5462,6 +5514,17 @@ def render_quicklook_verification_tab() -> None:
     final_pred = job["ticks"][-1]["predicted_value"]
     quicklook_ae = job.get("quicklook_ae")
     approx_error = quicklook_error(job)
+    relative_error = quicklook_relative_error(job)
+    error_label = classify_quicklook_error(approx_error)
+    confidence = job.get("quicklook_confidence")
+    range_low = job.get("quicklook_range_low")
+    range_high = job.get("quicklook_range_high")
+    hour_coverage = job.get("quicklook_hour_coverage")
+    estimate_label = quicklook_label(job)
+
+    range_caption = "Estimated from Kyoto Quicklook graph. Not Official."
+    if range_low is not None and range_high is not None:
+        range_caption = f"Range {range_low:.0f}–{range_high:.0f} nT · " + range_caption
 
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
@@ -5472,15 +5535,68 @@ def render_quicklook_verification_tab() -> None:
         metric_card("Predicted AE", f"{final_pred:.2f} nT", "")
     with c4:
         metric_card(
-            "Quicklook Estimated AE",
+            estimate_label,
             "N/A" if quicklook_ae is None else f"{quicklook_ae:.2f} nT",
-            "Estimated from Kyoto Quicklook graph. Not Official.",
+            range_caption,
         )
     with c5:
         metric_card(
-            "Approximate Error",
+            "Absolute Error",
             "N/A" if approx_error is None else f"{approx_error:.2f} nT",
             "Predicted vs. Quicklook estimate — not the official error",
+        )
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+
+    d1, d2, d3, d4, d5 = st.columns(5)
+    with d1:
+        metric_card(
+            "Graph Coverage",
+            "N/A" if hour_coverage is None else f"{hour_coverage * 100:.0f}%",
+            "% of the forecast hour with a curve drawn in Kyoto's graph",
+            value_color=QUICKLOOK_CONFIDENCE_COLORS.get(confidence, "#000000"),
+        )
+    with d2:
+        metric_card(
+            "Quicklook Confidence",
+            "N/A" if confidence is None else confidence.title(),
+            "<40% Low · 40–80% Moderate · >80% High coverage",
+            value_color=QUICKLOOK_CONFIDENCE_COLORS.get(confidence, "#000000"),
+        )
+    with d3:
+        metric_card(
+            "Estimated Range",
+            "N/A" if range_low is None or range_high is None else f"{range_low:.0f}–{range_high:.0f} nT",
+            "Uncertainty band from graph extraction",
+        )
+    with d4:
+        metric_card(
+            "Error Classification",
+            error_label or "N/A",
+            "Predicted vs. Quicklook estimate, coarse band",
+        )
+    with d5:
+        metric_card(
+            "Relative Error",
+            "N/A" if relative_error is None else f"{relative_error:.1f}%",
+            "Absolute error as a % of the Quicklook estimate",
+        )
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+
+    if estimate_label == "Partial Quicklook Estimate":
+        coverage_pct = 0 if hour_coverage is None else round(hour_coverage * 100)
+        st.warning(
+            f"⚠️ Only the first {coverage_pct}% of the forecast hour is currently available in the "
+            "Kyoto Quicklook graph. This estimate should not be interpreted as the final hourly AE. "
+            "It will keep updating automatically (and can be refreshed manually) as Kyoto draws more "
+            "of the hour."
+        )
+    elif estimate_label == "Complete Quicklook Estimate":
+        st.success(
+            "✅ The forecast hour is now fully drawn in Kyoto's Quicklook graph — this estimate "
+            "reflects the complete hour, though it remains an approximate visual read, not the "
+            "official Kyoto digital AE value."
         )
 
     status_col, refresh_col = st.columns([0.7, 0.3])
@@ -5493,6 +5609,37 @@ def render_quicklook_verification_tab() -> None:
             st.toast("Quicklook estimate refreshed.")
             st.rerun()
 
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Graph Metadata")
+    checked_at = job.get("quicklook_checked_at")
+    graph_created = job.get("quicklook_graph_created")
+    age_source_ts = graph_created or checked_at
+    if age_source_ts is not None:
+        age_minutes = int((pd.Timestamp.now(tz="UTC") - pd.Timestamp(age_source_ts)).total_seconds() / 60)
+        image_age = f"{age_minutes} min"
+        if graph_created is None:
+            image_age += " (since last check)"
+    else:
+        image_age = "N/A"
+
+    g1, g2, g3, g4 = st.columns(4)
+    with g1:
+        metric_card(
+            "Graph Created",
+            "N/A" if graph_created is None else pd.Timestamp(graph_created).strftime("%H:%M UTC"),
+            "When Kyoto last regenerated this day's graph image",
+        )
+    with g2:
+        metric_card(
+            "Quicklook Timestamp",
+            "N/A" if checked_at is None else pd.Timestamp(checked_at).strftime("%H:%M:%S UTC"),
+            "When this estimate was last read from the graph",
+        )
+    with g3:
+        metric_card("Forecast Target", pd.Timestamp(job["target_hour"]).strftime("%H:%M UTC"), "")
+    with g4:
+        metric_card("Image Age", image_age, "Time since the graph image was generated")
+
     st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
     st.markdown("##### Kyoto Quicklook Graph")
     day = pd.Timestamp(job["target_hour"]).normalize()
@@ -5502,13 +5649,44 @@ def render_quicklook_verification_tab() -> None:
         st.image(annotated)
         st.caption(
             f"Source: {job.get('quicklook_image_url') or quicklook_image_url(day)} — blue dashed line: "
-            "forecast target time. Blue horizontal line: predicted AE. Red circle: AE value estimated "
+            "**Target Time**. Blue horizontal line: **Prediction**. Red circle: **Estimated AE** read "
             "from the curve at that time. **Estimated from Kyoto Quicklook graph. Not Official.**"
         )
     except Exception as exc:
         st.warning(f"Could not load the Kyoto Quicklook graph right now: {exc}")
 
+    with st.expander("How was the Quicklook Estimate obtained?"):
+        st.markdown(
+            "```\n"
+            "Kyoto Quicklook image\n"
+            "        ↓\n"
+            "  Image Processing\n"
+            "        ↓\n"
+            "   Axis Detection\n"
+            "        ↓\n"
+            "   Curve Detection\n"
+            "        ↓\n"
+            "   Interpolation\n"
+            "        ↓\n"
+            "   Estimated AE\n"
+            "```"
+        )
+        st.markdown(
+            "Kyoto WDC's real-time graph is fetched as an image, and the AE/AO curve's pixel height is "
+            "located within the target hour's column range using fixed axis calibration, then converted "
+            "back to nT. **This is an approximation of a chart reading, not an official Kyoto value** — "
+            "it exists only to give an immediate, rough sense of comparison. Confidence and Estimated "
+            "Range above reflect how much of the hour had a clearly detectable curve and how consistent "
+            "the detected height was, not a statistical error bound."
+        )
+
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.info(
+        "This comparison uses the Kyoto Quicklook graph, an approximate read of Kyoto's real-time "
+        "image. The official digital AE values are published later by Kyoto WDC (typically ~10-20 "
+        "days). When available, this prediction will automatically receive an official verification "
+        "below, independent of the Quicklook estimate above."
+    )
     st.markdown("##### Official Verification (separate, delayed workflow)")
     verification_status = job.get("verification_status")
     actual = job["actual_value"]

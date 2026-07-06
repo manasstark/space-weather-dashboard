@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 
 from swdss.ingest.kyoto_ae import fetch_kyoto_ae_hour
-from swdss.ingest.kyoto_ae_quicklook import estimate_kyoto_quicklook_ae
+from swdss.ingest.kyoto_ae_quicklook import estimate_kyoto_quicklook_ae_full
 from swdss.models.predict import latest_minute_observation, load_live_features, resolve_static_actual
 from swdss.models.predict import predict as predict_live
 from swdss.models.registry import DATASETS, HORIZONS, IMF_VARIABLES, SOLAR_WIND_VARIABLES
@@ -46,6 +46,22 @@ DB_PATH = DATA_DIR / "predictions" / "predictions.db"
 # against an upstream service that hasn't changed.
 KYOTO_VERIFICATION_INTERVAL = pd.Timedelta(days=1)
 
+# How often the Quicklook estimate is automatically re-captured for a
+# completed AE job while its target hour's graph coverage isn't ~complete
+# yet — independent of the manual "Refresh Quicklook Estimate" button, so
+# the estimate keeps catching up as Kyoto draws more of the hour even if
+# the user never clicks refresh. Much shorter than
+# KYOTO_VERIFICATION_INTERVAL since this hits Kyoto's continuously-updating
+# real-time graph, not the slow-to-publish official digital data.
+QUICKLOOK_RECHECK_INTERVAL = pd.Timedelta(minutes=5)
+
+# Below this fraction of the hour drawn, the estimate is not presented as
+# representative of the target hour at all (see quicklook_label). Above
+# roughly 1.0 (allowing a little slack for pixel-column rounding at the
+# hour boundary), the hour is treated as fully drawn.
+QUICKLOOK_PARTIAL_COVERAGE = 0.6
+QUICKLOOK_COMPLETE_COVERAGE = 0.97
+
 JOB_HISTORY_LIMIT = 20
 
 # AE predictions are precious, low-frequency research artifacts, not
@@ -53,6 +69,13 @@ JOB_HISTORY_LIMIT = 20
 # stay visible until the user explicitly deletes it, never silently
 # capped out of the "Running Predictions" view.
 UNCAPPED_HISTORY_DATASETS = {"ae"}
+
+# Kp and Dst are published by NOAA as a single, already-final value per
+# native interval (confirmed against NOAA's own kyoto-dst.json: exactly
+# one row per hour, never sub-hourly) — unlike Solar Wind/IMF, which are
+# genuinely minute-resolution and need a real hourly average computed
+# from live ticks. See _advance_evaluating.
+INSTANT_FINALIZE_VARIABLES = ("kp", "dst")
 
 STABILITY_WINDOW = 10
 
@@ -168,6 +191,21 @@ def _init_db() -> None:
         _ensure_column(conn, "jobs", "quicklook_ae", "REAL")
         _ensure_column(conn, "jobs", "quicklook_image_url", "TEXT")
         _ensure_column(conn, "jobs", "quicklook_checked_at", "TEXT")
+        # Image-processing diagnostics captured alongside quicklook_ae:
+        # confidence label + estimated range (uncertainty from graph
+        # extraction), and when Kyoto's server last regenerated the graph
+        # image itself (distinct from quicklook_checked_at, which is when
+        # *we* last read it).
+        _ensure_column(conn, "jobs", "quicklook_confidence", "TEXT")
+        _ensure_column(conn, "jobs", "quicklook_range_low", "REAL")
+        _ensure_column(conn, "jobs", "quicklook_range_high", "REAL")
+        _ensure_column(conn, "jobs", "quicklook_graph_created", "TEXT")
+        # Fraction (0-1) of the target hour's 60 minutes that had a drawn
+        # curve at capture time. Distinct from quicklook_confidence (which
+        # also factors in curve-height noise) — this is reported directly
+        # so the UI can warn plainly when an estimate is really just a
+        # partial-hour average, not the eventual full-hour figure.
+        _ensure_column(conn, "jobs", "quicklook_hour_coverage", "REAL")
 
 
 def _ensure_column(conn, table: str, column: str, decl: str) -> None:
@@ -405,20 +443,52 @@ def _finalize_job(conn, job_row: sqlite3.Row, actual_value: float) -> None:
 def _capture_quicklook_estimate(conn, job_id: str, target_hour) -> None:
     """Quicklook Verification (AE only): an approximate, image-based
     estimate read off Kyoto WDC's continuously-updating real-time graph,
-    captured once immediately on completion. This is explicitly NOT the
-    official verification source — a network hiccup or a not-yet-drawn
-    column here just leaves quicklook_ae NULL, retried later via
-    refresh_quicklook_estimate; it never blocks or affects prediction
+    captured immediately on completion and re-triable later via
+    refresh_quicklook_estimate. This is explicitly NOT the official
+    verification source — it never blocks or affects prediction
     completion (already finished by the time this runs) or the separate,
     official verification engine.
+
+    A None result (network hiccup, or the target hour's column genuinely
+    not drawn yet) is deliberately NEVER written over an already-captured
+    real estimate — the marker Kyoto uses for its most-recent, still-
+    provisional minutes is only a few pixels wide, so re-fetching the
+    same moment can flip between finding it and not; once a real estimate
+    is captured, a later flaky/failed attempt must not erase it. The
+    checked_at timestamp still updates either way, so "last checked"
+    stays accurate.
     """
     try:
-        estimate, image_url = estimate_kyoto_quicklook_ae(target_hour)
+        result = estimate_kyoto_quicklook_ae_full(target_hour)
     except Exception:
         return
+
+    checked_at = _to_utc_iso(pd.Timestamp.now(tz="UTC"))
+    graph_created = _to_utc_iso(result["graph_created"]) if result.get("graph_created") is not None else None
+
+    if result["estimate"] is None:
+        conn.execute(
+            "UPDATE jobs SET quicklook_image_url=?, quicklook_checked_at=?, quicklook_graph_created=? "
+            "WHERE job_id=?",
+            (result["image_url"], checked_at, graph_created, job_id),
+        )
+        return
+
     conn.execute(
-        "UPDATE jobs SET quicklook_ae=?, quicklook_image_url=?, quicklook_checked_at=? WHERE job_id=?",
-        (estimate, image_url, _to_utc_iso(pd.Timestamp.now(tz="UTC")), job_id),
+        "UPDATE jobs SET quicklook_ae=?, quicklook_image_url=?, quicklook_checked_at=?, "
+        "quicklook_confidence=?, quicklook_range_low=?, quicklook_range_high=?, quicklook_graph_created=?, "
+        "quicklook_hour_coverage=? WHERE job_id=?",
+        (
+            result["estimate"],
+            result["image_url"],
+            checked_at,
+            result["confidence"],
+            result["range_low"],
+            result["range_high"],
+            graph_created,
+            result["hour_coverage"],
+            job_id,
+        ),
     )
 
 
@@ -451,10 +521,16 @@ def _advance_predicting(conn, job_row: sqlite3.Row) -> None:
     if NOAA stops publishing.
 
     Variables with NO live feed at all (config.static_variables, e.g. AE)
-    can never satisfy "data_has_reached_target" — there is no NOAA feed to
-    reach it. For those, completion must depend ONLY on wall-clock time
-    reaching the target, never on an observation that will never arrive
-    through this phase. Verification (whether the historical source has
+    can never satisfy this the same way — there is no NOAA feed for the
+    *predicted* variable itself to reach the target hour. But their
+    reference/input variable (_tick_reference_variable, e.g. "speed" for
+    AE) DOES keep updating live, so the same "wait for real data, not just
+    wall clock" principle still applies to it: keep ticking on every new
+    reference-variable minute, and only complete once that reference data
+    itself reaches the target hour (or the same stall timeout elapses) —
+    never purely on wall-clock time, which would silently skip whatever
+    reference minutes hadn't landed yet at the exact instant poll_jobs
+    happened to run. Verification (whether the historical AE source has
     since been refreshed to cover the target hour) is a fully separate,
     ongoing check — see _verify_static_jobs — decoupled from prediction
     completion entirely.
@@ -467,14 +543,37 @@ def _advance_predicting(conn, job_row: sqlite3.Row) -> None:
     is_static_target = variable in (DATASETS[dataset].static_variables or [])
 
     if is_static_target:
-        if now >= target_hour:
+        ref_minute_ts, ref_minute_val = latest_minute_observation(dataset, _tick_reference_variable(dataset, variable))
+        data_has_reached_target = ref_minute_ts is not None and pd.Timestamp(ref_minute_ts) >= target_hour
+        stalled_past_target = now >= target_hour + pd.Timedelta(minutes=10)
+
+        # Always a single horizon=1 model for the variable's whole life —
+        # no discrete-horizon checkpoint switching applies here (that's
+        # what the shared tick logic below is for), so log every new
+        # reference minute directly, right up through the one that first
+        # reaches the target hour.
+        if ref_minute_ts is not None:
+            minute_iso = _to_utc_iso(ref_minute_ts)
+            if minute_iso != job_row["last_minute_seen"]:
+                try:
+                    result = predict_live(dataset, variable, 1)
+                    _append_tick(
+                        conn, job_row["job_id"], ref_minute_ts, ref_minute_val, result["predicted_value"], 1,
+                        _capture_live_inputs(dataset),
+                    )
+                except Exception:
+                    conn.execute(
+                        "UPDATE jobs SET last_minute_seen=? WHERE job_id=?", (minute_iso, job_row["job_id"])
+                    )
+
+        if data_has_reached_target or stalled_past_target:
             conn.execute(
                 "UPDATE jobs SET status='completed', verification_status='pending', completed_at=? WHERE job_id=?",
                 (_to_utc_iso(now), job_row["job_id"]),
             )
             if variable == "ae":
                 _capture_quicklook_estimate(conn, job_row["job_id"], target_hour)
-            return
+        return
     else:
         # Has the TARGET variable's own data started arriving for the new
         # interval? Checked against the predicted variable itself (e.g. Kp),
@@ -541,17 +640,42 @@ def _advance_predicting(conn, job_row: sqlite3.Row) -> None:
 
 
 def _advance_evaluating(conn, job_row: sqlite3.Row) -> None:
-    """Phase 2 (status='evaluating'): the target hour has started. Log
-    every new NOAA minute that lands inside it, plus the running average
-    of everything collected so far — this is the "watch the actual average
-    converge" view. Once the target hour fully closes, finalize with the
-    real hourly-resampled mean (falling back to the collected running
-    average if live data hasn't caught up to a full resample yet).
+    """Phase 2 (status='evaluating'): the target hour has started.
+
+    Kp and Dst are published by NOAA as a single, already-final value for
+    their own native interval — hourly for Dst, every 3 hours for Kp —
+    confirmed directly against NOAA's own kyoto-dst.json: exactly one row
+    per hour, never sub-hourly. There is no raw minute-level series to
+    average for these two; the moment that published value is available,
+    it already IS the ground truth the model was trained to predict, so
+    the job finalizes immediately instead of waiting out an extra hour.
+
+    Solar Wind and IMF are genuinely different: NOAA publishes them at
+    true minute resolution, and the model was trained against the
+    *hourly mean* of those minutes — so for those, this function logs
+    every new NOAA minute landing inside the target hour (the running
+    average "watch it converge" view) and only finalizes once the target
+    hour fully closes, using the real hourly-resampled mean.
     """
     dataset = job_row["dataset"]
     variable = job_row["variable"]
     target_hour = pd.Timestamp(job_row["target_hour"])
     now = pd.Timestamp.now(tz="UTC")
+
+    if variable in INSTANT_FINALIZE_VARIABLES:
+        # Deliberately resolve_static_actual here, NOT resolve_actual_value:
+        # the latter reads load_live_features' hourly-resampled +
+        # time-interpolated frame, which was empirically confirmed to
+        # silently extrapolate the last published value forward into
+        # hours that haven't actually been published yet (e.g. holding
+        # Kp's 15:00 reading through 18:00 before NOAA's next official
+        # value exists). resolve_static_actual reads the raw source
+        # directly with no interpolation and correctly returns None until
+        # that exact hour has a genuine published reading.
+        actual = resolve_static_actual(dataset, variable, target_hour)
+        if actual is not None:
+            _finalize_job(conn, job_row, actual)
+        return
 
     if now >= target_hour + pd.Timedelta(hours=1):
         actual = resolve_actual_value(dataset, variable, target_hour)
@@ -627,11 +751,46 @@ def _verify_static_jobs(conn, dataset: str) -> None:
             )
 
 
+def _auto_refresh_quicklook_jobs(conn, dataset: str) -> None:
+    """Keeps completed AE jobs' Quicklook estimates catching up on their
+    own, without the user needing to click "Refresh Quicklook Estimate":
+    Kyoto's real-time graph keeps being redrawn throughout the target
+    hour, so a job captured early (low hour coverage) should get a fresh,
+    more-complete read automatically as the dashboard is left open.
+
+    Stops re-checking once a job's coverage has reached
+    QUICKLOOK_COMPLETE_COVERAGE — the hour is fully drawn and won't change
+    further. Throttled to QUICKLOOK_RECHECK_INTERVAL per job so a fast
+    dashboard auto-refresh doesn't hammer Kyoto's real-time image on every
+    rerun.
+    """
+    if dataset != "ae":
+        return
+
+    now = pd.Timestamp.now(tz="UTC")
+    rows = conn.execute(
+        "SELECT * FROM jobs WHERE dataset=? AND variable='ae' AND status='completed'",
+        (dataset,),
+    ).fetchall()
+    for row in rows:
+        coverage = row["quicklook_hour_coverage"]
+        if coverage is not None and coverage >= QUICKLOOK_COMPLETE_COVERAGE:
+            continue
+
+        last_checked = row["quicklook_checked_at"]
+        if last_checked is not None and (now - pd.Timestamp(last_checked)) < QUICKLOOK_RECHECK_INTERVAL:
+            continue
+
+        _capture_quicklook_estimate(conn, row["job_id"], pd.Timestamp(row["target_hour"]))
+
+
 def poll_jobs(dataset: str) -> None:
     """Advances every active job for this dataset (predicting or
     evaluating), then separately checks any completed-but-unverified
-    static-target jobs (see _verify_static_jobs). Call this on every page
-    render so jobs keep advancing as long as the dashboard is open.
+    static-target jobs (see _verify_static_jobs) and refreshes any
+    not-yet-complete Quicklook estimates (see _auto_refresh_quicklook_jobs).
+    Call this on every page render so jobs keep advancing as long as the
+    dashboard is open.
     """
     with _connect() as conn:
         rows = conn.execute(
@@ -644,6 +803,7 @@ def poll_jobs(dataset: str) -> None:
             else:
                 _advance_evaluating(conn, row)
         _verify_static_jobs(conn, dataset)
+        _auto_refresh_quicklook_jobs(conn, dataset)
 
 
 def get_running_jobs(dataset: str, limit: int = JOB_HISTORY_LIMIT) -> list[dict]:
@@ -780,6 +940,65 @@ def quicklook_error(job: dict) -> float:
         return None
     final_pred = job["ticks"][-1]["predicted_value"]
     return abs(final_pred - quicklook_ae)
+
+
+def quicklook_relative_error(job: dict) -> float:
+    """quicklook_error expressed as a percentage of the Quicklook estimate,
+    for context alongside the raw nT figure. None under the same
+    conditions as quicklook_error, plus when the estimate is exactly zero.
+    """
+    quicklook_ae = job.get("quicklook_ae")
+    error = quicklook_error(job)
+    if error is None or not quicklook_ae:
+        return None
+    return error / abs(quicklook_ae) * 100
+
+
+# Configurable thresholds (nT) for labeling how close a prediction landed
+# to the Quicklook estimate. Approximate by construction — the Quicklook
+# estimate itself carries several nT of extraction uncertainty — so these
+# bands are deliberately coarse rather than precise error bars.
+QUICKLOOK_ERROR_BANDS = (
+    (25.0, "Excellent"),
+    (75.0, "Good"),
+    (150.0, "Moderate"),
+)
+QUICKLOOK_ERROR_FALLBACK_LABEL = "Large"
+
+
+def classify_quicklook_error(error: float | None) -> str:
+    """Maps a quicklook_error value to a coarse label via
+    QUICKLOOK_ERROR_BANDS. None if no error is available yet."""
+    if error is None:
+        return None
+    for threshold, label in QUICKLOOK_ERROR_BANDS:
+        if error <= threshold:
+            return label
+    return QUICKLOOK_ERROR_FALLBACK_LABEL
+
+
+def quicklook_label(job: dict) -> str:
+    """Titles the Quicklook estimate card based on how much of the target
+    hour Kyoto's graph had actually drawn at capture time — never presents
+    a low-coverage reading under the same label as a fully-drawn one:
+
+    - No estimate captured yet: "Quicklook Estimated AE" (the neutral
+      default, paired with an N/A value).
+    - coverage < QUICKLOOK_PARTIAL_COVERAGE: "Partial Quicklook Estimate" —
+      explicitly not representative of the eventual full-hour value.
+    - coverage >= QUICKLOOK_COMPLETE_COVERAGE: "Complete Quicklook
+      Estimate" — the hour is (essentially) fully drawn.
+    - Otherwise: "Quicklook Estimated AE" — meaningful coverage, but not
+      quite complete.
+    """
+    coverage = job.get("quicklook_hour_coverage")
+    if job.get("quicklook_ae") is None or coverage is None:
+        return "Quicklook Estimated AE"
+    if coverage < QUICKLOOK_PARTIAL_COVERAGE:
+        return "Partial Quicklook Estimate"
+    if coverage >= QUICKLOOK_COMPLETE_COVERAGE:
+        return "Complete Quicklook Estimate"
+    return "Quicklook Estimated AE"
 
 
 def average_prediction(job: dict) -> float:
