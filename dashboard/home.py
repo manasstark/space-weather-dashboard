@@ -25,9 +25,27 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from swdss.ingest.kyoto_ae_quicklook import annotate_quicklook_image, fetch_quicklook_image, quicklook_image_url
+from swdss.models.explainability import explain_prediction
+from swdss.models.hypothesis import (
+    archive_hypothesis,
+    create_hypothesis,
+    delete_hypothesis,
+    duplicate_hypothesis,
+    evaluate_hypothesis,
+    get_hypothesis,
+    list_hypotheses,
+    reactivate_hypothesis,
+    update_hypothesis,
+    update_manual_conclusion,
+    update_notes,
+)
+from swdss.models.physics_interpretation import physics_interpretation
 from swdss.models.jobs import (
     average_prediction,
     delete_job,
+    final_percentage_error,
+    find_matching_job,
     forecast_drift,
     forecast_evaluation_label,
     get_job,
@@ -38,6 +56,8 @@ from swdss.models.jobs import (
     job_mae,
     model_quality_label,
     poll_jobs,
+    quicklook_error,
+    refresh_quicklook_estimate,
     save_job,
     stability_metric,
     start_job,
@@ -45,7 +65,9 @@ from swdss.models.jobs import (
 )
 from swdss.models.predict import latest_minute_observation
 from swdss.models.registry import (
+    AE_VARIABLES,
     ANALYTICS_VARIABLES,
+    EXPERIMENTAL_VARIABLES,
     HORIZONS,
     IMF_VARIABLES,
     SOLAR_WIND_VARIABLES,
@@ -419,6 +441,10 @@ STATUS_BADGE_STYLES = {
     "completed": ("Completed", "#1f5a2e", "#d4f4dd"),
     "stopped": ("Stopped", "#4a4a4a", "#e2e2e2"),
     "failed": ("Failed", "#7a1f1f", "#fddede"),
+    "pending": ("Pending Official Kyoto Data", "#7a5a1f", "#fff3cd"),
+    "verified": ("Verified", "#1f5a2e", "#d4f4dd"),
+    "quicklook_pending": ("Awaiting Quicklook Estimate", "#5a1f8a", "#f2e8ff"),
+    "quicklook_verified": ("Quicklook Verified", "#5a1f8a", "#f2e8ff"),
 }
 
 
@@ -1530,7 +1556,7 @@ def render_prediction_job_tiles(jobs: list[dict], empty_message: str) -> None:
                     job["status"], "#3a3a3a"
                 )
                 start_hour = pd.Timestamp(job["start_hour"])
-                is_kp_interval = job["dataset"] == "analytics" and job["variable"] == "kp"
+                is_kp_interval = job["dataset"] in ("analytics", "experimental") and job["variable"] == "kp"
                 horizon_label = "Next Interval" if is_kp_interval else f"{job['horizon']}h"
 
                 st.markdown(
@@ -1609,6 +1635,56 @@ def format_analytics_inputs(inputs: dict) -> str:
     return "".join(lines)
 
 
+def render_explainability_section(dataset: str, variable: str, horizon) -> None:
+    """"Why did the model predict this value?" — shared across every job
+    dialog (production and Research Lab alike). Purely diagnostic: reads
+    the model and the most recently available live feature row, never
+    retrains anything or affects the live prediction itself.
+    """
+    with st.expander("🔍 Why did the model predict this? (Feature Importance)"):
+        try:
+            result = explain_prediction(dataset, variable, horizon)
+        except Exception as exc:
+            st.warning(f"Could not compute explainability right now: {exc}")
+            return
+
+        if result["method"] == "unavailable" or not result["contributions"]:
+            st.info("Not enough live feature history yet to explain this model's current prediction.")
+            return
+
+        method_label = "SHAP (exact Shapley values)" if result["method"] == "shap" else "Permutation sensitivity (SHAP unavailable for this model type)"
+        st.caption(f"Method: {method_label} — Model: {result['model_name']}. Based on the most recently available live feature row.")
+
+        contrib_df = pd.DataFrame(
+            [
+                {"Feature": feat, "Current Value": round(val, 3), "Contribution": round(contrib, 4)}
+                for feat, val, contrib in result["contributions"]
+            ]
+        )
+        fig = go.Figure()
+        colors = ["#1f7a3a" if c >= 0 else "#7a1f1f" for c in contrib_df["Contribution"]]
+        fig.add_trace(
+            go.Bar(
+                x=contrib_df["Contribution"],
+                y=contrib_df["Feature"],
+                orientation="h",
+                marker_color=colors,
+            )
+        )
+        fig.update_layout(
+            title="Top Contributing Variables",
+            height=320,
+            xaxis_title="Contribution to prediction",
+            yaxis=dict(autorange="reversed"),
+        )
+        plot_retro(fig)
+        st.dataframe(contrib_df, use_container_width=True, hide_index=True)
+        st.caption(
+            "Positive contribution pushes the prediction up; negative pushes it down. "
+            f"Predicted value: {result['predicted_value']:.2f}." if result["predicted_value"] is not None else ""
+        )
+
+
 def render_kp_forecast_dialog(job: dict) -> None:
     """Kp on the Analytics page isn't predicted hourly like every other
     variable — it follows NOAA's real 3-hour publishing cadence, runs as
@@ -1678,6 +1754,7 @@ def render_kp_forecast_dialog(job: dict) -> None:
             "Bz (nT)",
             "Latest Dst (nT)",
             "Latest Official Kp",
+            "Latest AE (nT)",
             forecast_col,
         ]
 
@@ -1696,6 +1773,7 @@ def render_kp_forecast_dialog(job: dict) -> None:
                 _fmt(inputs.get("bz_gsm"), 2),
                 _fmt(inputs.get("dst"), 1),
                 _fmt(inputs.get("kp"), 2),
+                _fmt(inputs.get("ae"), 1),
                 f"{t['predicted_value']:.2f}",
             ]
             row_html.append("<tr>" + "".join(f"<td>{escape(c)}</td>" for c in cells) + "</tr>")
@@ -1848,6 +1926,7 @@ def render_kp_forecast_dialog(job: dict) -> None:
             metric_card("RMSE", f"{metrics.get('rmse', float('nan')):.3f}", "")
 
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    render_explainability_section(job["dataset"], "kp", "interval")
     if job["status"] in ("in_progress", "evaluating"):
         if st.button("⏹ Stop Prediction", key=f"stop_{job['job_id']}", use_container_width=True):
             stop_job(job["job_id"])
@@ -1936,6 +2015,7 @@ def render_dst_forecast_dialog(job: dict) -> None:
             "Bz (nT)",
             "Latest Dst (nT)",
             "Latest Official Kp",
+            "Latest AE (nT)",
             forecast_col,
         ]
 
@@ -1954,6 +2034,7 @@ def render_dst_forecast_dialog(job: dict) -> None:
                 _fmt(inputs.get("bz_gsm"), 2),
                 _fmt(inputs.get("dst"), 1),
                 _fmt(inputs.get("kp"), 2),
+                _fmt(inputs.get("ae"), 1),
                 f"{t['predicted_value']:.2f}",
             ]
             row_html.append("<tr>" + "".join(f"<td>{escape(c)}</td>" for c in cells) + "</tr>")
@@ -2099,6 +2180,634 @@ def render_dst_forecast_dialog(job: dict) -> None:
             metric_card("RMSE", f"{metrics.get('rmse', float('nan')):.3f} nT", "")
 
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    render_explainability_section(job["dataset"], "dst", job["horizon"])
+    if job["status"] in ("in_progress", "evaluating"):
+        if st.button("⏹ Stop Prediction", key=f"stop_{job['job_id']}", use_container_width=True):
+            stop_job(job["job_id"])
+            st.toast("Prediction stopped.")
+            st.rerun()
+    else:
+        already_saved = job.get("saved", False)
+        save_col, delete_col = st.columns(2)
+        with save_col:
+            if st.button(
+                "💾 Saved" if already_saved else "💾 Save",
+                key=f"save_{job['job_id']}",
+                use_container_width=True,
+                disabled=already_saved,
+            ):
+                save_job(job["job_id"])
+                st.toast("Prediction saved.")
+                st.rerun()
+        with delete_col:
+            if st.button("🗑️ Delete", key=f"delete_{job['job_id']}", use_container_width=True):
+                delete_job(job["job_id"])
+                close_active_dialog()
+
+
+def render_ae_forecast_dialog(job: dict) -> None:
+    """AE V1: independent target driven by Solar Wind + IMF + derived
+    physics only (no Kp/Dst inputs, no chained predictions — see README's
+    staged AE plan). Otherwise the same live console + completion summary
+    architecture as Dst's dedicated dialog.
+
+    AE has no live NOAA/DONKI feed (only a historical file), so "Latest
+    AE" below is the last known value, not a per-minute live reading.
+
+    Prediction and verification are two separate, independent phases (see
+    swdss.models.jobs._advance_predicting / _verify_static_jobs):
+    completion (status='completed') happens purely because the target
+    hour arrived — it never waits on an AE observation that may never
+    come. Verification (verification_status) is a separate, ongoing check
+    against Kyoto WDC's published real-time AE digital data (never NOAA,
+    which has no AE product) of whether that source has since been
+    published to cover
+    that hour; until then it stays 'pending', shown as "Awaiting Official
+    AE Verification" rather than blocking the job from completing.
+    """
+    ticks = job["ticks"]
+    metrics = job.get("metrics", {})
+    horizon = job["horizon"]
+
+    target_hour = pd.Timestamp(job["target_hour"])
+    created_at = pd.Timestamp(job["created_at"])
+    r2 = metrics.get("r2")
+    verification_status = job.get("verification_status")
+
+    st.subheader("AE Forecast")
+    st.markdown(
+        f"**Started:** {created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}  \n"
+        f"**Target:** {target_hour.strftime('%Y-%m-%d %H:%M UTC')}  \n"
+        f"**Horizon:** {horizon}h  \n"
+        f"**Model Quality:** {model_quality_label(r2)}"
+    )
+    badge_col, verify_col = st.columns([0.3, 0.7])
+    with badge_col:
+        st.markdown(status_badge_html(job["status"]), unsafe_allow_html=True)
+    with verify_col:
+        if job["status"] == "completed" and verification_status:
+            st.markdown(status_badge_html(verification_status), unsafe_allow_html=True)
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+
+    st.markdown(
+        f"""
+        <style>
+        .job-terminal {{
+            background: #050505;
+            border: 2px solid #ffffff;
+            box-shadow: 3px 3px 0px #808080;
+            padding: 12px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.78rem;
+            color: #00ff88;
+        }}
+        </style>
+        <div class="job-terminal">
+            <div>MODEL: {escape(job['model_name'])}</div>
+            <div>R&sup2;: {metrics.get('r2', float('nan')):.4f} &nbsp;|&nbsp; MAE: {metrics.get('mae', float('nan')):.3f} nT
+            &nbsp;|&nbsp; RMSE: {metrics.get('rmse', float('nan')):.3f} nT</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Live Forecast Console")
+
+    def _fmt(value, dp):
+        return "N/A" if value is None else f"{value:.{dp}f}"
+
+    if ticks:
+        forecast_col = f"Forecast ({target_hour.strftime('%H:%M UTC')})"
+        columns = [
+            "Time UTC",
+            "Speed (km/s)",
+            "Density (p/cm3)",
+            "Temperature (K)",
+            "Bt (nT)",
+            "Bx (nT)",
+            "By (nT)",
+            "Bz (nT)",
+            "Ey (mV/m)",
+            "VBz",
+            "Dynamic Pressure (nPa)",
+            "Latest AE (nT)",
+            forecast_col,
+        ]
+
+        row_html = []
+        for t in ticks:  # chronological — new rows append at the bottom, like a real console
+            inputs = t.get("inputs") or {}
+            minute_at = t["minute_at"]
+            cells = [
+                pd.Timestamp(minute_at).strftime("%H:%M:%S") if minute_at else "N/A",
+                _fmt(inputs.get("speed"), 1),
+                _fmt(inputs.get("density"), 2),
+                _fmt(inputs.get("temperature"), 0),
+                _fmt(inputs.get("bt"), 2),
+                _fmt(inputs.get("bx_gsm"), 2),
+                _fmt(inputs.get("by_gsm"), 2),
+                _fmt(inputs.get("bz_gsm"), 2),
+                _fmt(inputs.get("ey"), 3),
+                _fmt(inputs.get("vbz"), 1),
+                _fmt(inputs.get("dynamic_pressure"), 3),
+                _fmt(inputs.get("ae"), 1),
+                f"{t['predicted_value']:.2f}",
+            ]
+            row_html.append("<tr>" + "".join(f"<td>{escape(c)}</td>" for c in cells) + "</tr>")
+
+        header_html = "<tr>" + "".join(f"<th>{escape(c)}</th>" for c in columns) + "</tr>"
+
+        st.markdown(
+            f"""
+            <style>
+            .kp-console {{
+                background: #050505;
+                border: 2px solid #ffffff;
+                box-shadow: 3px 3px 0px #808080;
+                padding: 10px;
+                max-height: 380px;
+                overflow: auto;
+            }}
+            table.kp-console-table {{
+                border-collapse: collapse;
+                font-family: 'Courier New', monospace;
+                font-size: 0.72rem;
+                white-space: nowrap;
+            }}
+            table.kp-console-table th, table.kp-console-table td {{
+                border: 1px solid #1a3a2a;
+                padding: 3px 8px;
+                text-align: right;
+                color: #d8ffe8;
+            }}
+            table.kp-console-table th {{
+                color: #00ff88;
+                font-weight: 700;
+                position: sticky;
+                top: 0;
+                background: #0a0a0a;
+            }}
+            table.kp-console-table td:first-child, table.kp-console-table th:first-child {{
+                text-align: left;
+            }}
+            </style>
+            <div class="kp-console">
+                <table class="kp-console-table">
+                    <thead>{header_html}</thead>
+                    <tbody>{''.join(row_html)}</tbody>
+                </table>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("Waiting for the first NOAA reading...")
+
+    plotted = [t for t in ticks if t["minute_at"] is not None]
+    if plotted:
+        chart_times = [pd.Timestamp(t["minute_at"]) for t in plotted]
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=chart_times,
+                y=[t["predicted_value"] for t in plotted],
+                mode="lines+markers",
+                name="Predicted AE",
+            )
+        )
+        fig.update_layout(
+            title="AE Forecast Drift Toward Target",
+            height=360,
+            legend_title_text="",
+            yaxis_title="Predicted AE (nT)",
+        )
+        plot_retro(fig)
+
+    if job["status"] == "completed" and verification_status == "pending":
+        st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+        checked_at = job.get("verification_checked_at")
+        checked_caption = (
+            f" Last checked {pd.Timestamp(checked_at).strftime('%Y-%m-%d %H:%M:%S UTC')}." if checked_at else ""
+        )
+        st.markdown("**Prediction Complete — Verification Pending**")
+        st.info(
+            "Official Kyoto AE data has not yet been published. "
+            "Estimated publication delay: approximately 10-20 days.\n\n"
+            "The target hour has arrived and the forecast is frozen below. NOAA/DONKI publish no AE "
+            "product, so **verification** (confirming the official AE value) is a completely separate, "
+            "ongoing check against **Kyoto World Data Center**'s published digital AE data — once per "
+            "day is sufficient, since Kyoto WDC only publishes in batches." + checked_caption
+        )
+
+    if job["status"] in ("completed", "stopped"):
+        st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+        st.markdown("##### Forecast Summary")
+
+        final_pred = ticks[-1]["predicted_value"] if ticks else None
+        avg_pred = average_prediction(job)
+        actual = job["actual_value"]
+        final_error = None if (final_pred is None or actual is None) else abs(final_pred - actual)
+        avg_error = None if (avg_pred is None or actual is None) else abs(avg_pred - actual)
+        drift = forecast_drift(job)
+
+        s1, s2, s3, s4 = st.columns(4)
+        with s1:
+            metric_card("Started", created_at.strftime("%H:%M:%S UTC"), "")
+        with s2:
+            metric_card("Target", target_hour.strftime("%H:%M UTC"), "")
+        with s3:
+            metric_card("Horizon", f"{horizon}h", "")
+        with s4:
+            metric_card(
+                "Final Prediction",
+                "N/A" if final_pred is None else f"{final_pred:.2f} nT",
+                "Last forecast before the target arrived — the operational forecast",
+            )
+
+        s5, s6, s7, s8 = st.columns(4)
+        with s5:
+            metric_card(
+                "Average Prediction",
+                "N/A" if avg_pred is None else f"{avg_pred:.2f} nT",
+                "Stability indicator, not the operational forecast",
+                tooltip="Mean of every prediction generated during the session.",
+            )
+        with s6:
+            if job["status"] == "stopped":
+                actual_caption = "Stopped before the target arrived"
+            elif verification_status == "verified":
+                actual_caption = "Verified against Kyoto WDC's published AE digital data"
+            else:
+                actual_caption = "Awaiting Official AE (Kyoto WDC checked automatically)"
+            metric_card(
+                "Actual AE",
+                "Pending" if actual is None else f"{actual:.2f} nT",
+                actual_caption,
+            )
+        with s7:
+            metric_card(
+                "Final Prediction Error",
+                "N/A" if final_error is None else f"{final_error:.2f} nT",
+                "Primary operational accuracy metric",
+            )
+        with s8:
+            metric_card(
+                "Average Prediction Error",
+                "N/A" if avg_error is None else f"{avg_error:.2f} nT",
+                "Secondary stability metric",
+            )
+
+        s9, s10, s11, s12 = st.columns(4)
+        with s9:
+            if drift is None:
+                metric_card("Forecast Drift", "N/A", "")
+            else:
+                sign = "+" if drift >= 0 else ""
+                metric_card(
+                    "Forecast Drift",
+                    f"{sign}{drift:.2f} nT",
+                    "Final minus initial prediction",
+                    tooltip="How much the forecast moved from the first tick to the last.",
+                )
+        with s10:
+            metric_card("Model Quality", model_quality_label(r2), "N/A" if r2 is None else f"R² = {r2:.4f}")
+        with s11:
+            metric_card("MAE", f"{metrics.get('mae', float('nan')):.3f} nT", "Model's typical training error")
+        with s12:
+            metric_card("RMSE", f"{metrics.get('rmse', float('nan')):.3f} nT", "")
+
+        s13, s14, s15, s16 = st.columns(4)
+        with s13:
+            pct_error = final_percentage_error(job)
+            metric_card(
+                "Percentage Error",
+                "N/A" if pct_error is None else f"{pct_error:.1f}%",
+                "Final prediction error as % of the official AE value",
+            )
+        with s14:
+            verified_at = job.get("verified_at")
+            metric_card(
+                "Verification Date",
+                "N/A" if verified_at is None else pd.Timestamp(verified_at).strftime("%Y-%m-%d %H:%M UTC"),
+                "When Kyoto WDC's data first covered this target hour",
+            )
+        with s15:
+            metric_card(
+                "Verification Status",
+                "Verified" if verification_status == "verified" else "Pending Official Kyoto Data",
+                "Kyoto WDC digital AE" if verification_status == "verified" else "Checked ~daily",
+            )
+        with s16:
+            st.empty()
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    render_explainability_section("ae", "ae", job["horizon"])
+    if job["status"] in ("in_progress", "evaluating"):
+        if st.button("⏹ Stop Prediction", key=f"stop_{job['job_id']}", use_container_width=True):
+            stop_job(job["job_id"])
+            st.toast("Prediction stopped.")
+            st.rerun()
+    else:
+        already_saved = job.get("saved", False)
+        save_col, delete_col = st.columns(2)
+        with save_col:
+            if st.button(
+                "💾 Saved" if already_saved else "💾 Save",
+                key=f"save_{job['job_id']}",
+                use_container_width=True,
+                disabled=already_saved,
+            ):
+                save_job(job["job_id"])
+                st.toast("Prediction saved.")
+                st.rerun()
+        with delete_col:
+            if st.button("🗑️ Delete", key=f"delete_{job['job_id']}", use_container_width=True):
+                delete_job(job["job_id"])
+                close_active_dialog()
+
+
+def _experimental_badge_html() -> str:
+    return (
+        "<div style=\"display:inline-block;background:#5a1f8a;color:#f2e8ff;"
+        "border:2px solid #d8b8ff;border-radius:4px;padding:2px 10px;"
+        "font-weight:700;font-size:0.78rem;letter-spacing:0.03em;\">"
+        "🧪 EXPERIMENTAL — RESEARCH ONLY, NOT PRODUCTION</div>"
+    )
+
+
+def render_experimental_forecast_dialog(job: dict) -> None:
+    """AE V3 (research/experimental — see README's staged AE plan): the
+    cascaded pipeline that feeds Predicted AE (never observed AE) into
+    Kp/Dst as an extra feature. Completely separate models/training data
+    from the production "analytics" pipeline — this dialog only ever
+    reads production jobs (via find_matching_job) for side-by-side
+    comparison, it never influences them.
+    """
+    variable = job["variable"]
+    horizon = job["horizon"]
+    ticks = job["ticks"]
+    metrics = job.get("metrics", {})
+    label = VARIABLE_LABELS.get(variable, variable)
+    unit = VARIABLE_UNITS.get(variable, "")
+    decimals = 2 if variable == "kp" else 1
+
+    target_hour = pd.Timestamp(job["target_hour"])
+    created_at = pd.Timestamp(job["created_at"])
+    is_kp_interval = variable == "kp"
+
+    st.markdown(_experimental_badge_html(), unsafe_allow_html=True)
+    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+    st.subheader(f"Experimental {label} Forecast — Cascaded via Predicted AE")
+    st.markdown(
+        f"**Started:** {created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}  \n"
+        f"**Target:** {target_hour.strftime('%Y-%m-%d %H:%M UTC')}  \n"
+        f"**Horizon:** {'Next official NOAA interval' if is_kp_interval else f'{horizon}h'}  \n"
+        f"**Model Quality:** {model_quality_label(metrics.get('r2'))}"
+    )
+    st.markdown(status_badge_html(job["status"]), unsafe_allow_html=True)
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+
+    st.markdown(
+        f"""
+        <style>
+        .job-terminal {{
+            background: #050505;
+            border: 2px solid #d8b8ff;
+            box-shadow: 3px 3px 0px #5a1f8a;
+            padding: 12px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.78rem;
+            color: #e8caff;
+        }}
+        </style>
+        <div class="job-terminal">
+            <div>EXPERIMENTAL MODEL: {escape(job['model_name'])}</div>
+            <div>R&sup2;: {metrics.get('r2', float('nan')):.4f} &nbsp;|&nbsp; MAE: {metrics.get('mae', float('nan')):.3f} {escape(unit)}
+            &nbsp;|&nbsp; RMSE: {metrics.get('rmse', float('nan')):.3f} {escape(unit)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Live Forecast Console (Experimental — Cascaded)")
+
+    def _fmt(value, dp):
+        return "N/A" if value is None else f"{value:.{dp}f}"
+
+    if ticks:
+        forecast_col = f"Experimental Forecast ({target_hour.strftime('%H:%M UTC')})"
+        columns = [
+            "Time UTC",
+            "Speed (km/s)",
+            "Density (p/cm3)",
+            "Temperature (K)",
+            "Bt (nT)",
+            "Bx (nT)",
+            "By (nT)",
+            "Bz (nT)",
+            "Previous Kp",
+            "Previous Dst (nT)",
+            "Predicted AE (nT)",
+            forecast_col,
+        ]
+
+        row_html = []
+        for t in ticks:  # chronological — new rows append at the bottom, like a real console
+            inputs = t.get("inputs") or {}
+            minute_at = t["minute_at"]
+            cells = [
+                pd.Timestamp(minute_at).strftime("%H:%M:%S") if minute_at else "N/A",
+                _fmt(inputs.get("speed"), 1),
+                _fmt(inputs.get("density"), 2),
+                _fmt(inputs.get("temperature"), 0),
+                _fmt(inputs.get("bt"), 2),
+                _fmt(inputs.get("bx_gsm"), 2),
+                _fmt(inputs.get("by_gsm"), 2),
+                _fmt(inputs.get("bz_gsm"), 2),
+                _fmt(inputs.get("kp"), 2),
+                _fmt(inputs.get("dst"), 1),
+                _fmt(inputs.get("predicted_ae"), 1),
+                f"{t['predicted_value']:.2f}",
+            ]
+            row_html.append("<tr>" + "".join(f"<td>{escape(c)}</td>" for c in cells) + "</tr>")
+
+        header_html = "<tr>" + "".join(f"<th>{escape(c)}</th>" for c in columns) + "</tr>"
+
+        st.markdown(
+            f"""
+            <style>
+            .exp-console {{
+                background: #050505;
+                border: 2px solid #d8b8ff;
+                box-shadow: 3px 3px 0px #5a1f8a;
+                padding: 10px;
+                max-height: 380px;
+                overflow: auto;
+            }}
+            table.exp-console-table {{
+                border-collapse: collapse;
+                font-family: 'Courier New', monospace;
+                font-size: 0.72rem;
+                white-space: nowrap;
+            }}
+            table.exp-console-table th, table.exp-console-table td {{
+                border: 1px solid #3a1a4a;
+                padding: 3px 8px;
+                text-align: right;
+                color: #f0e0ff;
+            }}
+            table.exp-console-table th {{
+                color: #e8caff;
+                font-weight: 700;
+                position: sticky;
+                top: 0;
+                background: #0a0a0a;
+            }}
+            table.exp-console-table td:first-child, table.exp-console-table th:first-child {{
+                text-align: left;
+            }}
+            </style>
+            <div class="exp-console">
+                <table class="exp-console-table">
+                    <thead>{header_html}</thead>
+                    <tbody>{''.join(row_html)}</tbody>
+                </table>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("Waiting for the first NOAA reading...")
+
+    # Look up a comparable production job — same variable, same exact
+    # target hour — "whenever possible", per the research spec. Only ever
+    # reads production's job table; never writes to or influences it.
+    production_job = find_matching_job("analytics", variable, target_hour)
+
+    plotted = [t for t in ticks if t["minute_at"] is not None]
+    if plotted:
+        chart_times = [pd.Timestamp(t["minute_at"]) for t in plotted]
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=chart_times,
+                y=[t["predicted_value"] for t in plotted],
+                mode="lines+markers",
+                name=f"Experimental {label}",
+            )
+        )
+        if production_job and production_job["ticks"]:
+            prod_plotted = [t for t in production_job["ticks"] if t["minute_at"] is not None]
+            if prod_plotted:
+                fig.add_trace(
+                    go.Scatter(
+                        x=[pd.Timestamp(t["minute_at"]) for t in prod_plotted],
+                        y=[t["predicted_value"] for t in prod_plotted],
+                        mode="lines+markers",
+                        name=f"Production {label}",
+                    )
+                )
+        fig.update_layout(
+            title=f"{label} Forecast Drift — Production vs. Experimental",
+            height=360,
+            legend_title_text="",
+        )
+        plot_retro(fig)
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Production vs. Experimental — Side by Side")
+    if production_job is None:
+        st.info(
+            f"No Production {label} job found targeting {target_hour.strftime('%Y-%m-%d %H:%M UTC')}. "
+            "Start one from the Prediction tab (same horizon, similar start time) to compare live."
+        )
+    else:
+        prod_final = production_job["ticks"][-1]["predicted_value"] if production_job["ticks"] else None
+        exp_final = ticks[-1]["predicted_value"] if ticks else None
+        actual = job["actual_value"] if job["actual_value"] is not None else production_job["actual_value"]
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            metric_card(
+                "Production (latest)",
+                "N/A" if prod_final is None else f"{prod_final:.2f} {unit}",
+                f"Model: {production_job['model_name']}",
+            )
+        with c2:
+            metric_card(
+                "Experimental (latest)",
+                "N/A" if exp_final is None else f"{exp_final:.2f} {unit}",
+                f"Model: {job['model_name']}",
+            )
+        with c3:
+            metric_card(
+                "Actual",
+                "Pending" if actual is None else f"{actual:.2f} {unit}",
+                "Shared ground truth for both pipelines",
+            )
+
+    if job["status"] in ("completed", "stopped"):
+        st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+        st.markdown("##### Evaluation")
+
+        exp_final = ticks[-1]["predicted_value"] if ticks else None
+        actual = job["actual_value"]
+        if production_job is not None and actual is None:
+            actual = production_job["actual_value"]
+        exp_error = None if (exp_final is None or actual is None) else abs(exp_final - actual)
+
+        prod_final = None
+        prod_error = None
+        prod_mae = None
+        prod_r2 = None
+        if production_job is not None:
+            prod_final = production_job["ticks"][-1]["predicted_value"] if production_job["ticks"] else None
+            prod_error = None if (prod_final is None or actual is None) else abs(prod_final - actual)
+            prod_mae = production_job.get("metrics", {}).get("mae")
+            prod_r2 = production_job.get("metrics", {}).get("r2")
+
+        comparison_df = pd.DataFrame(
+            [
+                {
+                    "Pipeline": "Production",
+                    f"Final Prediction ({unit})": "N/A" if prod_final is None else round(prod_final, decimals),
+                    f"Absolute Error ({unit})": "N/A" if prod_error is None else round(prod_error, decimals),
+                    "Model MAE (offline, training)": "N/A" if prod_mae is None else round(prod_mae, 3),
+                    "Model R² (offline, training)": "N/A" if prod_r2 is None else round(prod_r2, 4),
+                },
+                {
+                    "Pipeline": "Experimental",
+                    f"Final Prediction ({unit})": "N/A" if exp_final is None else round(exp_final, decimals),
+                    f"Absolute Error ({unit})": "N/A" if exp_error is None else round(exp_error, decimals),
+                    "Model MAE (offline, training)": round(metrics.get("mae", float("nan")), 3),
+                    "Model R² (offline, training)": round(metrics.get("r2", float("nan")), 4),
+                },
+            ]
+        )
+        st.dataframe(comparison_df, use_container_width=True, hide_index=True)
+
+        if actual is None:
+            st.caption("Actual observation still Pending — errors above will populate once it's available.")
+        elif prod_error is not None and exp_error is not None:
+            if exp_error < prod_error:
+                st.success(
+                    f"For this target, the experimental cascade performed better "
+                    f"({exp_error:.{decimals}f} {unit} vs {prod_error:.{decimals}f} {unit} absolute error)."
+                )
+            elif exp_error > prod_error:
+                st.warning(
+                    f"For this target, the production pipeline performed better "
+                    f"({prod_error:.{decimals}f} {unit} vs {exp_error:.{decimals}f} {unit} absolute error)."
+                )
+            else:
+                st.info("Both pipelines produced the same absolute error for this target.")
+        else:
+            st.caption("No matching Production job to compare error against for this target.")
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    render_explainability_section("experimental", job["variable"], "interval" if job["variable"] == "kp" else job["horizon"])
     if job["status"] in ("in_progress", "evaluating"):
         if st.button("⏹ Stop Prediction", key=f"stop_{job['job_id']}", use_container_width=True):
             stop_job(job["job_id"])
@@ -2143,6 +2852,12 @@ def show_prediction_job(job_id: str) -> None:
         return
     if dataset == "analytics" and variable == "dst":
         render_dst_forecast_dialog(job)
+        return
+    if dataset == "ae":
+        render_ae_forecast_dialog(job)
+        return
+    if dataset == "experimental":
+        render_experimental_forecast_dialog(job)
         return
 
     horizon = job["horizon"]
@@ -2436,7 +3151,7 @@ def prediction_panel(dataset: str, variables: list[str]) -> None:
         key=f"{dataset}_pred_var",
     )
 
-    is_kp_interval = dataset == "analytics" and variable == "kp"
+    is_kp_interval = dataset in ("analytics", "experimental") and variable == "kp"
     if is_kp_interval:
         with col2:
             st.markdown("**Forecast Horizon**")
@@ -2451,8 +3166,9 @@ def prediction_panel(dataset: str, variables: list[str]) -> None:
         )
 
     btn_col, saved_col = st.columns(2)
+    button_label = "Start Experimental Prediction" if dataset == "experimental" else "Start Prediction"
     with btn_col:
-        if st.button("Start Prediction", key=f"{dataset}_pred_btn", use_container_width=True):
+        if st.button(button_label, key=f"{dataset}_pred_btn", use_container_width=True):
             try:
                 job, created = start_job(dataset, variable, horizon)
             except Exception as exc:
@@ -2460,12 +3176,13 @@ def prediction_panel(dataset: str, variables: list[str]) -> None:
                 return
             label = VARIABLE_LABELS.get(variable, variable)
             horizon_text = "next NOAA interval" if is_kp_interval else f"{horizon}h"
+            prefix = "experimental " if dataset == "experimental" else ""
             if created:
-                st.toast(f"Started {label} {horizon_text} prediction.")
+                st.toast(f"Started {prefix}{label} {horizon_text} prediction.")
             else:
                 start_hour = pd.Timestamp(job["start_hour"])
                 st.warning(
-                    f"A {label} {horizon_text} prediction is already in progress "
+                    f"A {prefix}{label} {horizon_text} prediction is already in progress "
                     f"(started {start_hour.strftime('%H:%M UTC')}). Open its card below to view live drift."
                 )
     with saved_col:
@@ -4710,14 +5427,741 @@ def photosphere_page(df: pd.DataFrame) -> None:
             f107_predictions()
 
 
+def render_quicklook_verification_tab() -> None:
+    """Immediate, approximate visual comparison against Kyoto WDC's
+    continuously-updating real-time (quicklook) AE graph — NOT the
+    official verification system. That remains the separate, delayed
+    workflow driven by Kyoto's official digital AE data (Production
+    Prediction tab), which stays the sole authoritative source; this tab
+    exists only so a user doesn't have to wait the ~10-20 days that takes.
+    """
+    st.warning(
+        "Quicklook values are estimated from the Kyoto real-time graph and may differ from the "
+        "official digital AE values published later. This is **NOT** the official verification "
+        "system — the official Kyoto digital AE data (Production Prediction tab) remains the "
+        "authoritative source."
+    )
+
+    poll_jobs("ae")
+    jobs = get_running_jobs("ae") + get_saved_jobs("ae")
+    completed_jobs = [j for j in jobs if j["status"] == "completed" and j["ticks"]]
+
+    if not completed_jobs:
+        st.info("No completed AE predictions yet. Start one from the Production Prediction tab.")
+        return
+
+    completed_jobs.sort(key=lambda j: j["created_at"], reverse=True)
+    labels = [
+        f"Target {pd.Timestamp(j['target_hour']).strftime('%Y-%m-%d %H:%M UTC')} "
+        f"(started {pd.Timestamp(j['created_at']).strftime('%H:%M UTC')})"
+        for j in completed_jobs
+    ]
+    selected = st.selectbox("Prediction to compare", labels, key="quicklook_job_select")
+    job = completed_jobs[labels.index(selected)]
+
+    final_pred = job["ticks"][-1]["predicted_value"]
+    quicklook_ae = job.get("quicklook_ae")
+    approx_error = quicklook_error(job)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        metric_card("Prediction Time", pd.Timestamp(job["created_at"]).strftime("%H:%M:%S UTC"), "")
+    with c2:
+        metric_card("Forecast Target", pd.Timestamp(job["target_hour"]).strftime("%Y-%m-%d %H:%M UTC"), "")
+    with c3:
+        metric_card("Predicted AE", f"{final_pred:.2f} nT", "")
+    with c4:
+        metric_card(
+            "Quicklook Estimated AE",
+            "N/A" if quicklook_ae is None else f"{quicklook_ae:.2f} nT",
+            "Estimated from Kyoto Quicklook graph. Not Official.",
+        )
+    with c5:
+        metric_card(
+            "Approximate Error",
+            "N/A" if approx_error is None else f"{approx_error:.2f} nT",
+            "Predicted vs. Quicklook estimate — not the official error",
+        )
+
+    status_col, refresh_col = st.columns([0.7, 0.3])
+    with status_col:
+        badge_key = "quicklook_verified" if quicklook_ae is not None else "quicklook_pending"
+        st.markdown(status_badge_html(badge_key), unsafe_allow_html=True)
+    with refresh_col:
+        if st.button("🔄 Refresh Quicklook Estimate", key=f"refresh_quicklook_{job['job_id']}"):
+            refresh_quicklook_estimate(job["job_id"])
+            st.toast("Quicklook estimate refreshed.")
+            st.rerun()
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Kyoto Quicklook Graph")
+    day = pd.Timestamp(job["target_hour"]).normalize()
+    try:
+        image = fetch_quicklook_image(day)
+        annotated = annotate_quicklook_image(image, job["target_hour"], final_pred, quicklook_ae)
+        st.image(annotated)
+        st.caption(
+            f"Source: {job.get('quicklook_image_url') or quicklook_image_url(day)} — blue dashed line: "
+            "forecast target time. Blue horizontal line: predicted AE. Red circle: AE value estimated "
+            "from the curve at that time. **Estimated from Kyoto Quicklook graph. Not Official.**"
+        )
+    except Exception as exc:
+        st.warning(f"Could not load the Kyoto Quicklook graph right now: {exc}")
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Official Verification (separate, delayed workflow)")
+    verification_status = job.get("verification_status")
+    actual = job["actual_value"]
+    o1, o2, o3 = st.columns(3)
+    with o1:
+        metric_card(
+            "Official Verification Status",
+            "Verified" if verification_status == "verified" else "Pending Official Kyoto Data",
+            "Kyoto WDC digital AE — the authoritative source",
+        )
+    with o2:
+        metric_card("Official AE", "Pending" if actual is None else f"{actual:.2f} nT", "")
+    with o3:
+        official_error = None if actual is None else abs(final_pred - actual)
+        metric_card("Official Error", "N/A" if official_error is None else f"{official_error:.2f} nT", "")
+
+
 def analytics_page(df: pd.DataFrame) -> None:
     st.title("Analytics")
     st.subheader("Combined Earth Analysis")
-    inner = st.tabs(["Current Analysis", "Prediction"])
+    inner = st.tabs(["Current Analysis", "Prediction", "AE Predictions", "Experimental Predictions"])
     with inner[0]:
         earth_analysis(df)
     with inner[1]:
         prediction_panel("analytics", ANALYTICS_VARIABLES)
+    with inner[2]:
+        ae_inner = st.tabs(["Production Prediction", "Quicklook Verification"])
+        with ae_inner[0]:
+            prediction_panel("ae", AE_VARIABLES)
+        with ae_inner[1]:
+            render_quicklook_verification_tab()
+    with inner[3]:
+        st.markdown(_experimental_badge_html(), unsafe_allow_html=True)
+        st.caption(
+            "Research feature: cascades Predicted AE (from the frozen AE model) into the Kp/Dst "
+            "models as an extra feature, instead of the production pipeline's observed AE. "
+            "Completely separate models and training data from the Prediction tab — for "
+            "comparison purposes only, not a replacement for it."
+        )
+        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+        prediction_panel("experimental", EXPERIMENTAL_VARIABLES)
+
+
+def render_independent_models_tab() -> None:
+    """Reproduces the production architecture: each variable predicted
+    independently from observed history, never from another model's
+    prediction. Reuses the exact same panels as the Analytics page — same
+    jobs, same models, same data — just surfaced here for architecture
+    comparison purposes.
+    """
+    st.markdown(
+        "**Architecture:** Live NOAA &rarr; Feature Engineering &rarr; AE Model &rarr; Kp Model &rarr; "
+        "Dst Model. None of the models use another model's prediction — only observed historical "
+        "values are used.",
+        unsafe_allow_html=True,
+    )
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### AE (independent)")
+    prediction_panel("ae", AE_VARIABLES)
+    st.divider()
+    st.markdown("##### Kp / Dst (independent — combined Sun-Earth model, observed AE)")
+    prediction_panel("analytics", ANALYTICS_VARIABLES)
+
+
+def render_physics_cascaded_tab() -> None:
+    """The experimental cascade: Predicted AE (never observed AE) feeds
+    forward into the experimental Kp/Dst models as an extra feature.
+    Reuses the same "experimental" dataset already built for the
+    Analytics page's Experimental Predictions tab.
+    """
+    st.markdown(_experimental_badge_html(), unsafe_allow_html=True)
+    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        "**Architecture:** Live NOAA &rarr; Solar Wind &rarr; IMF &rarr; Derived Physics &rarr; AE "
+        "Prediction Model &rarr; Predicted AE &rarr; Experimental Kp Model &rarr; Experimental Dst "
+        "Model. Predicted AE is the only intermediate predicted variable — observed AE is never used, "
+        "and predicted Kp is never fed into the Dst model.",
+        unsafe_allow_html=True,
+    )
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    prediction_panel("experimental", EXPERIMENTAL_VARIABLES)
+
+
+def render_model_comparison_tab() -> None:
+    """Aggregated, historical comparison across every completed &
+    evaluated job for each architecture — not a single-forecast
+    comparison (that's already on each dataset's own Prediction tab), but
+    the system-level question: which architecture performs better overall.
+    """
+    st.caption(
+        "Aggregated across every completed forecast for each architecture — a system-level "
+        "comparison, not a single prediction. AE has one shared model (Predicted AE feeds both "
+        "architectures identically), so it has no Production/Experimental split of its own."
+    )
+
+    ae_stats = get_prediction_statistics("ae")
+    prod_stats = get_prediction_statistics("analytics")
+    exp_stats = get_prediction_statistics("experimental")
+
+    st.markdown("##### AE (shared model)")
+    a1, a2, a3 = st.columns(3)
+    with a1:
+        metric_card("Verified Forecasts", str(ae_stats["count"]), "")
+    with a2:
+        rate = ae_stats["success_rate"]
+        metric_card("Success Rate", "N/A" if rate is None else f"{rate:.0f}%", "Within 1.5x model's typical error")
+    with a3:
+        metric_card("Best-Performing Model", ae_stats.get("best_model") or "N/A", "")
+
+    st.markdown("<div style='height: 16px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Kp & Dst — Production vs. Experimental")
+
+    for variable in ["kp", "dst"]:
+        label = VARIABLE_LABELS[variable]
+        prod_mae = prod_stats["mae_by_variable"].get(variable)
+        exp_mae = exp_stats["mae_by_variable"].get(variable)
+
+        st.markdown(f"**{label}**")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            metric_card(
+                "Production MAE",
+                "N/A" if prod_mae is None else f"{prod_mae:.3f}",
+                f"n={prod_stats['count']} verified forecasts (all variables)" if prod_stats["count"] else "",
+            )
+        with c2:
+            metric_card("Experimental MAE", "N/A" if exp_mae is None else f"{exp_mae:.3f}", "")
+        with c3:
+            if prod_mae is not None and exp_mae is not None and prod_mae:
+                diff_pct = (prod_mae - exp_mae) / prod_mae * 100
+                metric_card(
+                    "Prediction Difference",
+                    f"{diff_pct:+.1f}%",
+                    "Positive = experimental has lower MAE",
+                )
+            else:
+                metric_card("Prediction Difference", "N/A", "Need completed & verified jobs from both")
+        with c4:
+            if prod_mae is not None and exp_mae is not None:
+                if abs(prod_mae - exp_mae) < 1e-9:
+                    verdict, color = "Tie", "#404040"
+                elif exp_mae < prod_mae:
+                    verdict, color = "Experimental Better", "#1f7a3a"
+                else:
+                    verdict, color = "Production Better", "#7a1f1f"
+                metric_card("Verdict", verdict, "Lower MAE wins", value_color=color)
+            else:
+                metric_card("Verdict", "Not enough data", "")
+
+    st.markdown("<div style='height: 16px;'></div>", unsafe_allow_html=True)
+    comp_col1, comp_col2 = st.columns(2)
+    with comp_col1:
+        st.markdown("###### Production — Forecast Error Trend")
+        prediction_statistics_panel("analytics")
+    with comp_col2:
+        st.markdown("###### Experimental — Forecast Error Trend")
+        prediction_statistics_panel("experimental")
+
+
+def _pipeline_node_html(label: str, active: bool, sublabel: str = "") -> str:
+    bg = "#1f5a2e" if active else "#2a2a32"
+    border = "#4ade80" if active else "#808080"
+    text_color = "#d4f4dd" if active else "#e8e8e8"
+    sub_html = (
+        f"<div style='font-size:0.66rem;color:#b8b8c0;margin-top:2px;'>{escape(sublabel)}</div>"
+        if sublabel
+        else ""
+    )
+    return (
+        f"<div style='display:inline-block;background:{bg};border:2px solid {border};"
+        f"border-radius:4px;padding:10px 16px;text-align:center;color:{text_color};"
+        f"font-family:&quot;Courier New&quot;,monospace;font-weight:700;min-width:110px;'>"
+        f"{escape(label)}{sub_html}</div>"
+    )
+
+
+def _pipeline_arrow_html(vertical: bool = True) -> str:
+    symbol = "&darr;" if vertical else "&rarr;"
+    return f"<span style='font-size:1.3rem;color:#808080;padding:0 8px;'>{symbol}</span>"
+
+
+def render_prediction_pipeline_tab() -> None:
+    """A visual side-by-side of the two architectures. Nodes highlight
+    green while a matching job is actively running/evaluating for that
+    variable+architecture — a lightweight, always-correct way to satisfy
+    "highlight each node as predictions progress" without a separate
+    animation/state system.
+    """
+    st.caption(
+        "Visual comparison of the two forecasting architectures. A node highlights green while a "
+        "matching prediction job is actively running."
+    )
+
+    poll_jobs("ae")
+    poll_jobs("analytics")
+    poll_jobs("experimental")
+
+    def _is_running(dataset: str, variable: str) -> bool:
+        return any(
+            j["variable"] == variable and j["status"] in ("in_progress", "evaluating")
+            for j in get_running_jobs(dataset) + get_saved_jobs(dataset)
+        )
+
+    running_ae = _is_running("ae", "ae")
+    running_kp_prod = _is_running("analytics", "kp")
+    running_dst_prod = _is_running("analytics", "dst")
+    running_kp_exp = _is_running("experimental", "kp")
+    running_dst_exp = _is_running("experimental", "dst")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("###### Independent")
+        top_row = (
+            _pipeline_node_html("Live NOAA", True)
+            + _pipeline_arrow_html(False)
+            + _pipeline_node_html("Feature Engineering", True)
+        )
+        st.markdown(f"<div style='text-align:center'>{top_row}</div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div style='text-align:center;font-size:1.3rem;color:#808080;'>&darr;</div>",
+            unsafe_allow_html=True,
+        )
+        bottom_row = (
+            _pipeline_node_html("AE", running_ae)
+            + "&nbsp;&nbsp;"
+            + _pipeline_node_html("Kp", running_kp_prod)
+            + "&nbsp;&nbsp;"
+            + _pipeline_node_html("Dst", running_dst_prod)
+        )
+        st.markdown(f"<div style='text-align:center'>{bottom_row}</div>", unsafe_allow_html=True)
+        st.caption("AE, Kp, and Dst predict independently, in parallel — none feed into another.")
+
+    with col2:
+        st.markdown("###### Physics Cascaded")
+        chain = (
+            _pipeline_node_html("Live NOAA", True)
+            + _pipeline_arrow_html(False)
+            + _pipeline_node_html("Feature Engineering", True)
+            + _pipeline_arrow_html(False)
+            + _pipeline_node_html("AE", running_ae, "Predicted AE")
+            + _pipeline_arrow_html(False)
+            + _pipeline_node_html("Kp", running_kp_exp)
+            + _pipeline_arrow_html(False)
+            + _pipeline_node_html("Dst", running_dst_exp)
+        )
+        st.markdown(f"<div style='text-align:center'>{chain}</div>", unsafe_allow_html=True)
+        st.caption("Predicted AE feeds forward into both Kp and Dst as an extra feature — never observed AE, never predicted Kp into Dst.")
+
+
+def render_physics_interpretation_panel(df: pd.DataFrame) -> None:
+    """Rule-based (no LLM) physics narrative of current Sun-Earth
+    coupling conditions — see swdss.models.physics_interpretation for the
+    underlying, fully reproducible threshold logic.
+    """
+    st.caption(
+        "Rule-based physics interpretation of current conditions — no LLM, no black box. Every "
+        "statement below is a direct, reproducible function of the live Solar Wind, IMF, and "
+        "geomagnetic readings using established space-weather physics (Burton et al. 1975 coupling, "
+        "IMF clock angle, standard Kp/Dst storm thresholds)."
+    )
+
+    def _latest_scalar(column: str):
+        value, _ = latest_value(df, column)
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return None
+        return float(value)
+
+    speed = _latest_scalar("solar_wind_speed")
+    density = _latest_scalar("proton_density")
+    temperature = _latest_scalar("temperature")
+    bt = _latest_scalar("bt")
+    bx = _latest_scalar("bx")
+    by = _latest_scalar("by")
+    bz = _latest_scalar("bz")
+    kp = _latest_scalar("kp")
+    dst = _latest_scalar("dst")
+    _, ae_raw = latest_minute_observation("ae", "ae")
+    ae = float(ae_raw) if ae_raw is not None else None
+
+    sections = physics_interpretation(speed, density, temperature, bt, bx, by, bz, kp, dst, ae)
+
+    st.markdown("##### Current Solar Wind State")
+    st.info(sections["solar_wind_state"])
+    st.markdown("##### Current IMF Orientation")
+    st.info(sections["imf_orientation"])
+    st.markdown("##### Expected Magnetic Coupling")
+    st.info(sections["magnetic_coupling"])
+    st.markdown("##### Expected Auroral Activity")
+    st.info(sections["auroral_activity"])
+    st.markdown("##### Expected Ring Current Response")
+    st.info(sections["ring_current"])
+    st.markdown("##### Expected Geomagnetic Activity")
+    st.info(sections["geomagnetic_activity"])
+
+
+CONCLUSION_COLORS = {"Supported": "#1f7a3a", "Not Supported": "#7a1f1f", "Inconclusive": "#7a5a1f"}
+
+_HYPOTHESIS_DATASET_OPTIONS = ["analytics", "ae", "experimental"]
+_HYPOTHESIS_VARIABLE_OPTIONS = ["kp", "dst", "ae"]
+
+
+def _hypothesis_architecture_form(prefix: str, defaults: dict = None) -> dict:
+    """Shared baseline/experimental dataset+variable picker, used by both
+    the create form and the edit form.
+    """
+    defaults = defaults or {}
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**Baseline Architecture**")
+        baseline_dataset = st.selectbox(
+            "Baseline Dataset",
+            _HYPOTHESIS_DATASET_OPTIONS,
+            index=_HYPOTHESIS_DATASET_OPTIONS.index(defaults.get("baseline_dataset", "analytics")),
+            key=f"{prefix}_baseline_ds",
+        )
+        baseline_variable = st.selectbox(
+            "Baseline Variable",
+            _HYPOTHESIS_VARIABLE_OPTIONS,
+            index=_HYPOTHESIS_VARIABLE_OPTIONS.index(defaults.get("baseline_variable", "kp")),
+            key=f"{prefix}_baseline_var",
+        )
+    with col2:
+        st.markdown("**Experimental Architecture**")
+        experimental_dataset = st.selectbox(
+            "Experimental Dataset",
+            _HYPOTHESIS_DATASET_OPTIONS,
+            index=_HYPOTHESIS_DATASET_OPTIONS.index(defaults.get("experimental_dataset", "experimental")),
+            key=f"{prefix}_exp_ds",
+        )
+        experimental_variable = st.selectbox(
+            "Experimental Variable",
+            _HYPOTHESIS_VARIABLE_OPTIONS,
+            index=_HYPOTHESIS_VARIABLE_OPTIONS.index(defaults.get("experimental_variable", "kp")),
+            key=f"{prefix}_exp_var",
+        )
+    return {
+        "baseline_dataset": baseline_dataset,
+        "baseline_variable": baseline_variable,
+        "experimental_dataset": experimental_dataset,
+        "experimental_variable": experimental_variable,
+    }
+
+
+def render_hypothesis_testing_tab() -> None:
+    """Experiment management and evaluation system — not a prediction
+    page. Every hypothesis pairs a baseline (dataset, variable) against
+    an experimental one; conclusions and confidence come entirely from
+    swdss.models.hypothesis's fixed statistical rules over measured,
+    verified predictions — never an LLM, never a claim of "true."
+    """
+    st.caption(
+        "Experiment management and evaluation system — not a prediction page. Every hypothesis "
+        "compares a baseline architecture against an experimental one, using only measured, "
+        "verified prediction results. Conclusions are **Supported / Not Supported / Inconclusive** "
+        "— never claimed as \"true\" — generated entirely from fixed statistical rules. No LLM."
+    )
+
+    with st.expander("➕ Create New Hypothesis"):
+        with st.form("new_hypothesis_form", clear_on_submit=True):
+            title = st.text_input("Title")
+            description = st.text_area("Description", height=70)
+            motivation = st.text_area("Scientific Motivation", height=70)
+            physics_bg = st.text_area("Physics Background", height=70)
+            expected = st.text_input("Expected Improvement")
+            arch = _hypothesis_architecture_form("new_hyp")
+            notes = st.text_area("Initial Notes (markdown supported)", height=90)
+
+            if st.form_submit_button("Create Hypothesis"):
+                if not title:
+                    st.error("Title is required.")
+                else:
+                    created = create_hypothesis(
+                        title=title,
+                        description=description,
+                        scientific_motivation=motivation,
+                        physics_background=physics_bg,
+                        expected_improvement=expected,
+                        notes=notes,
+                        **arch,
+                    )
+                    st.toast(f"Created hypothesis: {created['title']}")
+                    st.rerun()
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    show_archived = st.checkbox("Show archived hypotheses", key="hyp_show_archived")
+    hyps = list_hypotheses() if show_archived else list_hypotheses(status="active")
+
+    st.markdown("##### Hypotheses")
+    if not hyps:
+        st.info("No hypotheses yet. Create one above.")
+        return
+
+    for h in hyps:
+        result = evaluate_hypothesis(h)
+        with st.container(border=True):
+            c1, c2, c3, c4 = st.columns([0.45, 0.18, 0.22, 0.15])
+            with c1:
+                number_text = f"#{h['number']} — " if h["number"] else ""
+                archived_tag = " *(archived)*" if h["status"] == "archived" else ""
+                st.markdown(f"**{number_text}{h['title']}**{archived_tag}")
+                st.caption(h["description"] or "No description.")
+                st.caption(
+                    f"Baseline: `{h['baseline_dataset']}/{h['baseline_variable']}` vs. "
+                    f"Experimental: `{h['experimental_dataset']}/{h['experimental_variable']}` — "
+                    f"created {pd.Timestamp(h['created_at']).strftime('%Y-%m-%d')}"
+                )
+            with c2:
+                metric_card("Verified", str(result["n"]), f"of {result['baseline']['count'] + result['experimental']['count']} total")
+            with c3:
+                metric_card(
+                    "Conclusion",
+                    result["conclusion"],
+                    f"Confidence: {result['confidence']}",
+                    value_color=CONCLUSION_COLORS.get(result["conclusion"], "#404040"),
+                )
+            with c4:
+                st.markdown("<div style='height: 22px;'></div>", unsafe_allow_html=True)
+                if st.button("View", key=f"view_hyp_{h['hypothesis_id']}", use_container_width=True):
+                    open_dialog("hypothesis_detail", h["hypothesis_id"])
+
+
+@st.dialog("Hypothesis Detail", width="large", dismissible=False)
+def show_hypothesis_detail(hypothesis_id: str) -> None:
+    render_dialog_close_button("close_hypothesis_detail")
+
+    h = get_hypothesis(hypothesis_id)
+    if h is None:
+        st.error("This hypothesis could not be found.")
+        return
+
+    result = evaluate_hypothesis(h)
+    baseline, experimental = result["baseline"], result["experimental"]
+
+    number_text = f"Hypothesis {h['number']} — " if h["number"] else ""
+    st.subheader(f"{number_text}{h['title']}")
+    st.caption(
+        f"Created {pd.Timestamp(h['created_at']).strftime('%Y-%m-%d %H:%M UTC')} | "
+        f"Status: {h['status'].title()}"
+    )
+
+    with st.expander("✏️ Edit Hypothesis Structure"):
+        with st.form(f"edit_hyp_{hypothesis_id}"):
+            edit_title = st.text_input("Title", value=h["title"])
+            edit_description = st.text_area("Description", value=h["description"] or "", height=70)
+            edit_motivation = st.text_area("Scientific Motivation", value=h["scientific_motivation"] or "", height=70)
+            edit_physics_bg = st.text_area("Physics Background", value=h["physics_background"] or "", height=70)
+            edit_expected = st.text_input("Expected Improvement", value=h["expected_improvement"] or "")
+            edit_arch = _hypothesis_architecture_form(f"edit_hyp_{hypothesis_id}", defaults=h)
+            if st.form_submit_button("Save Changes"):
+                update_hypothesis(
+                    hypothesis_id,
+                    title=edit_title,
+                    description=edit_description,
+                    scientific_motivation=edit_motivation,
+                    physics_background=edit_physics_bg,
+                    expected_improvement=edit_expected,
+                    **edit_arch,
+                )
+                st.toast("Hypothesis updated.")
+                st.rerun()
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Hypothesis Structure")
+    st.markdown(f"**Description:** {h['description'] or 'N/A'}")
+    st.markdown(f"**Scientific Motivation:** {h['scientific_motivation'] or 'N/A'}")
+    st.markdown(f"**Physics Background:** {h['physics_background'] or 'N/A'}")
+    st.markdown(f"**Expected Improvement:** {h['expected_improvement'] or 'N/A'}")
+    st.markdown(f"**Baseline Architecture:** `{h['baseline_dataset']}` / `{h['baseline_variable']}`")
+    st.markdown(f"**Experimental Architecture:** `{h['experimental_dataset']}` / `{h['experimental_variable']}`")
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Automatic Conclusion")
+    c1, c2 = st.columns(2)
+    with c1:
+        metric_card("Conclusion", result["conclusion"], "", value_color=CONCLUSION_COLORS.get(result["conclusion"], "#404040"))
+    with c2:
+        metric_card("Confidence", result["confidence"], f"{result['n']} verified predictions")
+    st.info(result["summary"])
+    if h["manual_conclusion"]:
+        st.markdown("**Researcher's Manual Conclusion / Addendum:**")
+        st.markdown(h["manual_conclusion"])
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Comparison Table")
+
+    def _fmt(v, dp=3):
+        return "N/A" if v is None else f"{v:.{dp}f}"
+
+    def _improvement(b, e, higher_is_better=False):
+        if b is None or e is None:
+            return "N/A"
+        if higher_is_better:
+            return f"{e - b:+.3f}"
+        if b == 0:
+            return "N/A"
+        return f"{(b - e) / abs(b) * 100:+.1f}%"
+
+    comparison_rows = [
+        {"Metric": "MAE", "Baseline": _fmt(baseline["mae"]), "Experimental": _fmt(experimental["mae"]), "Improvement": _improvement(baseline["mae"], experimental["mae"])},
+        {"Metric": "RMSE", "Baseline": _fmt(baseline["rmse"]), "Experimental": _fmt(experimental["rmse"]), "Improvement": _improvement(baseline["rmse"], experimental["rmse"])},
+        {"Metric": "R²", "Baseline": _fmt(baseline["r2"], 3), "Experimental": _fmt(experimental["r2"], 3), "Improvement": _improvement(baseline["r2"], experimental["r2"], higher_is_better=True)},
+        {"Metric": "MAPE (%)", "Baseline": _fmt(baseline["mape"], 1), "Experimental": _fmt(experimental["mape"], 1), "Improvement": _improvement(baseline["mape"], experimental["mape"])},
+        {"Metric": "Bias", "Baseline": _fmt(baseline["bias"]), "Experimental": _fmt(experimental["bias"]), "Improvement": "N/A"},
+        {"Metric": "Max Error", "Baseline": _fmt(baseline["max_error"]), "Experimental": _fmt(experimental["max_error"]), "Improvement": _improvement(baseline["max_error"], experimental["max_error"])},
+        {"Metric": "Median Error", "Baseline": _fmt(baseline["median_error"]), "Experimental": _fmt(experimental["median_error"]), "Improvement": _improvement(baseline["median_error"], experimental["median_error"])},
+        {"Metric": "Average Drift", "Baseline": _fmt(baseline["avg_drift"]), "Experimental": _fmt(experimental["avg_drift"]), "Improvement": "N/A"},
+        {"Metric": "Forecast Stability (std)", "Baseline": _fmt(baseline["stability"]), "Experimental": _fmt(experimental["stability"]), "Improvement": "N/A"},
+        {
+            "Metric": "Storm-Time MAE",
+            "Baseline": f"{_fmt(baseline['storm_mae'])} (n={baseline['storm_count']})",
+            "Experimental": f"{_fmt(experimental['storm_mae'])} (n={experimental['storm_count']})",
+            "Improvement": _improvement(baseline["storm_mae"], experimental["storm_mae"]),
+        },
+        {
+            "Metric": "Quiet-Time MAE",
+            "Baseline": f"{_fmt(baseline['quiet_mae'])} (n={baseline['quiet_count']})",
+            "Experimental": f"{_fmt(experimental['quiet_mae'])} (n={experimental['quiet_count']})",
+            "Improvement": _improvement(baseline["quiet_mae"], experimental["quiet_mae"]),
+        },
+    ]
+    st.dataframe(pd.DataFrame(comparison_rows), use_container_width=True, hide_index=True)
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Visualizations")
+
+    if baseline["errors"] or experimental["errors"]:
+        v1, v2 = st.columns(2)
+        with v1:
+            fig = go.Figure()
+            if baseline["errors"]:
+                fig.add_trace(go.Histogram(x=baseline["errors"], name="Baseline", opacity=0.6))
+            if experimental["errors"]:
+                fig.add_trace(go.Histogram(x=experimental["errors"], name="Experimental", opacity=0.6))
+            fig.update_layout(title="Prediction Error Histogram", barmode="overlay", height=320)
+            plot_retro(fig)
+        with v2:
+            fig2 = go.Figure()
+            if baseline["predicted_vs_actual"]:
+                bp, ba = zip(*baseline["predicted_vs_actual"])
+                fig2.add_trace(go.Scatter(x=ba, y=bp, mode="markers", name="Baseline"))
+            if experimental["predicted_vs_actual"]:
+                ep, ea = zip(*experimental["predicted_vs_actual"])
+                fig2.add_trace(go.Scatter(x=ea, y=ep, mode="markers", name="Experimental"))
+            fig2.update_layout(title="Predicted vs. Official", height=320, xaxis_title="Official", yaxis_title="Predicted")
+            plot_retro(fig2)
+
+        v3, v4 = st.columns(2)
+        with v3:
+            fig3 = go.Figure()
+            if baseline["predicted_vs_actual"]:
+                bp, ba = zip(*baseline["predicted_vs_actual"])
+                fig3.add_trace(go.Scatter(x=list(ba), y=[p - a for p, a in zip(bp, ba)], mode="markers", name="Baseline"))
+            if experimental["predicted_vs_actual"]:
+                ep, ea = zip(*experimental["predicted_vs_actual"])
+                fig3.add_trace(go.Scatter(x=list(ea), y=[p - a for p, a in zip(ep, ea)], mode="markers", name="Experimental"))
+            fig3.update_layout(title="Residual Plot", height=320, xaxis_title="Official", yaxis_title="Residual (Predicted - Official)")
+            plot_retro(fig3)
+        with v4:
+            fig4 = go.Figure()
+            if baseline["trend"]:
+                times, errs = zip(*baseline["trend"])
+                fig4.add_trace(go.Scatter(x=[pd.Timestamp(t) for t in times], y=errs, mode="lines+markers", name="Baseline"))
+            if experimental["trend"]:
+                times_e, errs_e = zip(*experimental["trend"])
+                fig4.add_trace(go.Scatter(x=[pd.Timestamp(t) for t in times_e], y=errs_e, mode="lines+markers", name="Experimental"))
+            fig4.update_layout(title="Performance Timeline (Absolute Error)", height=320)
+            plot_retro(fig4)
+
+        st.markdown("###### Storm vs. Quiet Performance (MAE)")
+        fig5 = go.Figure()
+        fig5.add_trace(go.Bar(x=["Storm", "Quiet"], y=[baseline["storm_mae"], baseline["quiet_mae"]], name="Baseline"))
+        fig5.add_trace(go.Bar(x=["Storm", "Quiet"], y=[experimental["storm_mae"], experimental["quiet_mae"]], name="Experimental"))
+        fig5.update_layout(height=320, barmode="group", yaxis_title="MAE")
+        plot_retro(fig5)
+    else:
+        st.info("No verified predictions yet for either architecture — visualizations will appear once forecasts complete and are verified.")
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Experiment Timeline")
+    t1, t2, t3 = st.columns(3)
+    with t1:
+        metric_card("Experiment Started", pd.Timestamp(h["created_at"]).strftime("%Y-%m-%d %H:%M UTC"), "")
+    with t2:
+        metric_card("Predictions Generated", str(baseline["count"] + experimental["count"]), "Baseline + Experimental")
+    with t3:
+        metric_card("Current Status", h["status"].title(), "")
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Research Notes")
+    notes_text = st.text_area("Notes (markdown supported)", value=h["notes"] or "", height=150, key=f"notes_{hypothesis_id}")
+    manual_conclusion_text = st.text_area(
+        "Manual Conclusion / Addendum (optional)", value=h["manual_conclusion"] or "", height=70, key=f"manual_{hypothesis_id}"
+    )
+    if st.button("💾 Save Notes", key=f"save_notes_{hypothesis_id}", use_container_width=True):
+        update_notes(hypothesis_id, notes_text)
+        update_manual_conclusion(hypothesis_id, manual_conclusion_text)
+        st.toast("Notes saved.")
+        st.rerun()
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    dup_col, archive_col, delete_col = st.columns(3)
+    with dup_col:
+        if st.button("📋 Duplicate Experiment", key=f"dup_{hypothesis_id}", use_container_width=True):
+            new_h = duplicate_hypothesis(hypothesis_id)
+            st.toast(f"Duplicated as: {new_h['title']}")
+            close_active_dialog()
+    with archive_col:
+        if h["status"] == "active":
+            if st.button("🗄️ Archive", key=f"archive_{hypothesis_id}", use_container_width=True):
+                archive_hypothesis(hypothesis_id)
+                st.toast("Archived.")
+                st.rerun()
+        else:
+            if st.button("♻️ Reactivate", key=f"reactivate_{hypothesis_id}", use_container_width=True):
+                reactivate_hypothesis(hypothesis_id)
+                st.toast("Reactivated.")
+                st.rerun()
+    with delete_col:
+        if st.button("🗑️ Delete", key=f"delete_hyp_{hypothesis_id}", use_container_width=True):
+            delete_hypothesis(hypothesis_id)
+            close_active_dialog()
+
+
+def research_lab_page(df: pd.DataFrame) -> None:
+    st.title("Space Weather Research Lab")
+    st.caption(
+        "Experimental environment for researchers, students, and developers to evaluate different "
+        "space weather forecasting architectures. Nothing here affects the Production Prediction "
+        "models — every experiment is isolated from the production pipeline."
+    )
+
+    tabs = st.tabs(["Forecasting Architectures", "Physics Interpretation", "Hypothesis Testing"])
+    with tabs[0]:
+        st.caption(
+            "Compare **Independent Models** (each variable predicted separately from observed "
+            "history) against **Physics Cascaded Models** (Predicted AE fed forward into Kp/Dst), "
+            "using identical live NOAA observations."
+        )
+        inner = st.tabs(
+            ["Independent Models", "Physics Cascaded Models", "Model Comparison", "Prediction Pipeline"]
+        )
+        with inner[0]:
+            render_independent_models_tab()
+        with inner[1]:
+            render_physics_cascaded_tab()
+        with inner[2]:
+            render_model_comparison_tab()
+        with inner[3]:
+            render_prediction_pipeline_tab()
+    with tabs[1]:
+        render_physics_interpretation_panel(df)
+    with tabs[2]:
+        render_hypothesis_testing_tab()
 
 
 apply_retro_windows_style()
@@ -4737,7 +6181,7 @@ with nav_col:
     st.markdown("### Navigation")
     page = st.radio(
         "Main sections",
-        ["Home Page", "Photosphere", "Heliosphere", "Geospace", "Analytics"],
+        ["Home Page", "Photosphere", "Heliosphere", "Geospace", "Analytics", "Research Lab"],
         horizontal=True,
         label_visibility="collapsed",
     )
@@ -4834,6 +6278,8 @@ if active_dialog is not None:
         show_prediction_job(payload)
     elif kind == "saved_predictions":
         show_saved_predictions(payload)
+    elif kind == "hypothesis_detail":
+        show_hypothesis_detail(payload)
 
 if page == "Home Page":
     home_page(df_7d)
@@ -4843,5 +6289,7 @@ elif page == "Heliosphere":
     heliosphere_page(df_7d)
 elif page == "Geospace":
     geospace_page(df_7d)
-else:
+elif page == "Analytics":
     analytics_page(df_7d)
+else:
+    research_lab_page(df_7d)

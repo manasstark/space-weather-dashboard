@@ -22,7 +22,7 @@ Built as a portfolio project to practice professional software development, data
 * [Research & Exploratory Analysis](#research--exploratory-analysis)
 * [Known Limitations](#known-limitations)
 * [Development Roadmap](#development-roadmap)
-  * [AE Index — Planned Integration](#ae-index--planned-integration)
+  * [AE Index Integration](#ae-index-integration)
 * [Concepts & Skills Demonstrated](#concepts--skills-demonstrated)
 * [Author](#author)
 
@@ -120,7 +120,8 @@ Space Weather Dashboard V2/
 │   │       ├── imf_features.csv
 │   │       ├── kp_features.csv
 │   │       ├── dst_features.csv
-│   │       └── analytics_features.csv   # Combined Solar Wind + IMF + Kp + Dst, for the Analytics page's models
+│   │       ├── analytics_features.csv   # Combined Solar Wind + IMF + Kp + Dst, for the Analytics page's models
+│   │       └── ae_analytics_features.csv   # Combined Solar Wind + IMF + AE (no Kp/Dst), for the AE V1 model
 │   ├── predictions/
 │   │   └── predictions.db         # SQLite store for live forecast jobs + tick history
 │   └── saved_events.json / library_index.json
@@ -150,8 +151,9 @@ Space Weather Dashboard V2/
 │   ├── imf/
 │   ├── kp/                        # Standalone (self-referential) Kp model — trained, not exposed in the UI
 │   ├── dst/                       # Standalone (self-referential) Dst model — trained, not exposed in the UI
-│   └── analytics/                 # Combined Sun-Earth models actually used by the Analytics page
-│       └── kp_interval.joblib     # Single model targeting NOAA's next official 3h Kp interval
+│   ├── analytics/                 # Combined Sun-Earth models actually used by the Analytics page
+│   │   └── kp_interval.joblib     # Single model targeting NOAA's next official 3h Kp interval
+│   └── ae/                        # AE V1 models (Solar Wind + IMF + derived physics only), 5 horizons
 │
 ├── notebooks/                     # Original exploratory research notebooks
 ├── docs/                          # Day-by-day research notes
@@ -233,7 +235,8 @@ Both share a dedicated dialog UI distinct from the standalone engine's pipeline-
 * **Photosphere** — Solar Events / CME / F10.7 tabs, each with Current Analysis + Predictions sub-tabs, an Event Animations grid, and its own reference panel.
 * **Heliosphere** — Solar Wind and IMF Current Analysis (true-extreme cards) and the **Live Prediction Engine**, plus Dynamic Pressure and a Speed/Density/Temperature/Bz reference panel.
 * **Geospace** — Kp and Dst Current Analysis with their own reference panel. (Prediction lives exclusively on the Analytics page now — see below — since the combined model strictly outperforms each variable's standalone, self-referential version.)
-* **Analytics** — Combined Earth Analysis, with **Current Analysis** (correlation explorer across Solar Wind, IMF, Kp, and Dst) and **Prediction** (the combined Sun-Earth forecasting engine for Kp and Dst — see [Combined Sun-Earth Forecasting](#combined-sun-earth-forecasting-analytics-page)) as two sub-tabs.
+* **Analytics** — Combined Earth Analysis, with **Current Analysis** (correlation explorer across Solar Wind, IMF, Kp, and Dst), **Prediction** (the combined Sun-Earth forecasting engine for Kp and Dst — see [Combined Sun-Earth Forecasting](#combined-sun-earth-forecasting-analytics-page)), **AE Predictions** (the independent AE V1 forecasting engine), and **Experimental Predictions** (the AE V3 cascaded research pipeline, with a live Production-vs-Experimental comparison) — see [AE Index Integration](#ae-index-integration) — as four sub-tabs.
+* **Research Lab** — an experimental environment, fully isolated from the production pipeline, for comparing forecasting architectures. **Forecasting Architectures** reuses the existing AE/Kp/Dst and Experimental prediction infrastructure across four sub-tabs: **Independent Models**, **Physics Cascaded Models**, **Model Comparison** (aggregated MAE/success-rate comparison with a per-variable verdict), and **Prediction Pipeline** (a live diagram of both architectures, nodes highlighting green while a matching job runs). **Physics Interpretation** is a rule-based (no LLM) narrative of current Sun-Earth coupling — Solar Wind state, IMF orientation, magnetic coupling, auroral activity, ring current response, geomagnetic activity — each a reproducible function of live readings (`swdss.models.physics_interpretation`). **Hypothesis Testing** is a full experiment-management system: researchers create hypotheses pairing a baseline architecture against an experimental one; the dashboard automatically computes MAE/RMSE/R²/MAPE/Bias/Max Error/Median Error/Drift/Stability/Storm-vs-Quiet performance from every verified prediction and reports **Supported / Not Supported / Inconclusive** with a confidence level that scales with sample size — never a claim of "true," and never an LLM (`swdss.models.hypothesis`). Every prediction job dialog (production and Research Lab alike) also has a **"Why did the model predict this?"** explainability section — SHAP (TreeExplainer/LinearExplainer, covering every algorithm this project trains) with a permutation-sensitivity fallback (`swdss.models.explainability`).
 
 ### Key dashboard features
 
@@ -366,16 +369,22 @@ Kp responds most strongly ~1 hour after a Bz change; Dst responds most strongly 
 * Standalone Kp and Dst forecasting models trained (kept as a self-referential baseline, not exposed in the UI)
 * **Cross-dataset (integrated Sun-to-Earth) forecasting** for Kp and Dst — combined Solar Wind + IMF + geomagnetic history + derived coupling features (VBz, Ey, Dynamic Pressure), with Kp following NOAA's real 3-hour publishing cadence instead of an arbitrary hourly horizon
 * Manual job control (Stop) and a dedicated live-console dialog UI for the combined forecasting engine
+* **AE index forecasting, Version 1** — AE trained and predicted as its own independent target (Solar Wind + IMF + VBz/Ey/Dynamic Pressure only, no Kp/Dst inputs), with a dedicated **AE Predictions** tab on the Analytics page — see [AE Index Integration](#ae-index-integration) below
+* **AE index forecasting, Version 2** — observed AE added to the production Kp/Dst combined model's own feature pool (`ANALYTICS_FEATURE_VARIABLES`), same lag/rolling/rate-of-change mechanism already used for Kp/Dst cross-feeding — only historical/observed AE, never predicted AE
+* **AE index forecasting, Version 3 (research/experimental)** — a cascaded pipeline (Solar Wind + IMF + Derived Physics → frozen AE model → Predicted AE → Kp/Dst) in its own **Experimental Predictions** tab, completely separate models/training data from production, with a live Production-vs-Experimental side-by-side comparison — see [AE Index Integration](#ae-index-integration) below
 
 ### In Progress / Next
 
-* AE index forecasting — see [AE Index — Planned Integration](#ae-index--planned-integration) below for the agreed staged approach
+* Cross-validation of dashboard-reported extremes and event chains against independent data
+* Multi-day continuous live-updater stress testing
+* Additional derived parameters (IMF clock angle, storm-sudden-commencement flags)
+* Public deployment
 * Cross-validation of dashboard-reported extremes and event chains against independent data
 * Multi-day continuous live-updater stress testing
 * Additional derived parameters (IMF clock angle, storm-sudden-commencement flags)
 * Public deployment
 
-### AE Index — Planned Integration
+### AE Index Integration
 
 AE (Auroral Electrojet index) is the next variable going into the Analytics combined model. Before writing any code, the architecture was deliberately planned out, because AE sits in a physically different — and earlier — part of the Sun-Earth chain than Kp or Dst:
 
@@ -387,11 +396,17 @@ AE reacts to solar wind driving almost immediately (minutes), versus Kp's 3-hour
 
 **Decision: build it in three deliberate stages, each one earning its way into the architecture by measured improvement, not assumption.**
 
-1. **Version 1 (build first, this is the current plan)** — AE trained and predicted as its own independent target, **parallel** to Kp and Dst, from the same Solar Wind + IMF + derived-physics feature set. No cross-feeding yet. Simple, safe, easy to validate in isolation — exactly how Kp and Dst were each first introduced.
+1. **Version 1 (built)** — AE trained and predicted as its own independent target, **parallel** to Kp and Dst, from the same Solar Wind + IMF + derived-physics feature set (VBz, Ey, Dynamic Pressure) — deliberately excluding Kp/Dst as inputs. Lives in its own **AE Predictions** tab on the Analytics page, with a dedicated live-console dialog (Speed/Density/Temperature/Bt/Bx/By/Bz/Ey/VBz/Dynamic Pressure/Latest AE columns, forecast drift chart, Job Summary), reusing the same SQLite-backed job lifecycle as Kp/Dst. Best model at 1h horizon is XGBoost (R² ≈ 0.74); accuracy drops off quickly at longer horizons (R² ≈ 0.08 at 24h), consistent with AE being a much faster/noisier index than Kp/Dst.
 
-2. **Version 2 (natural next step, low risk)** — feed **observed** (historical/lagged) AE into Kp's and Dst's own feature sets, the same way Kp and Dst already cross-feed each other today via lag/rolling-mean/rolling-std/rate-of-change features. This requires no new architecture — `ANALYTICS_FEATURE_VARIABLES` already works as one shared pool that every combined-model target draws from, so adding `ae` to that pool is the same mechanism already used for Kp/Dst, not a redesign. Observed AE carries zero model error (it's ground truth, just like observed Kp/Dst lags), so this is expected to be a safe, likely-positive change.
+   **Known limitation:** NOAA/DONKI publish no real-time AE feed (unlike Kp/Dst, which do have live NOAA products) — only a historical, periodically-refreshable dataset (`data/processed/ae/ae_processed.parquet`). "Latest AE" in the live console is therefore the last known historical value, forward-filled, not a per-minute live reading.
 
-3. **Version 3 (research / experimental, only after 1 and 2 are validated)** — test whether a **predicted** next-AE value, fed forward as an input feature into Kp/Dst ("Solar Wind → Predicted AE → Predicted Kp/Dst"), measurably improves Kp/Dst accuracy. This is a real, named ML technique (stacking / cascaded prediction), and operational forecasting centers do use it — but it carries a real risk: every prediction has error, and chaining a noisy predicted value into a downstream model propagates that error forward instead of adding clean information. The rule for this stage: only keep it if it produces a *measured* R² improvement on held-out data, not because it's architecturally elegant — and evaluate the comparison segmented by geomagnetic activity level (quiet vs. storm-time), not just one aggregate R², since a stacked feature could help disproportionately during the disturbed periods that actually matter operationally while looking flat or worse on an aggregate dominated by quiet-time data.
+   **Prediction and verification are two fully independent engines**, precisely because of that missing live feed. The prediction engine completes a job the moment its target hour arrives — never by waiting for an AE observation that may never come through it — freezing the final prediction, tick history, and NOAA input history, and marking the job **Completed / Pending Official Kyoto Data**. A separate verification engine (`swdss.models.jobs._verify_static_jobs`) checks once per day (Kyoto WDC only publishes in batches, so more frequent checks would have no value) whether **Kyoto World Data Center**'s published official digital AE data (`swdss.ingest.kyoto_ae`) now covers that target hour — never NOAA, which publishes no AE product at all. Once it does, the job flips to **Verified**, permanently recording Official AE, Absolute Error, Percentage Error, and a Verification Date. Kyoto WDC's real-time *graph* updates continuously, but the official *downloadable digital values* publish with a real lag — observed on the order of 10-20 days — so a completed job can stay "Pending Official Kyoto Data" for a while; that's expected, not stuck. AE predictions are never capped out of view or auto-deleted — every one persists (and survives a dashboard restart) until explicitly deleted.
+
+   **Quicklook Verification** (its own sub-tab, alongside Production Prediction) offers an immediate, approximate cross-check while waiting on the above: right after a prediction completes, `swdss.ingest.kyoto_ae_quicklook` fetches Kyoto's continuously-updating real-time graph image for that day and estimates the AE value at the target hour directly from the plotted curve's pixels (calibrated against the fixed 700×450 template and cross-validated against two days of official digital data — MAE ~3-5 nT). The graph is displayed with the target time, predicted value, and estimated point overlaid for visual comparison. This is explicitly **not** official — it's stored in separate fields and never overwrites the Kyoto digital verification above, which remains the sole authoritative source.
+
+2. **Version 2 (built)** — feeds **observed** (historical/lagged) AE into Kp's and Dst's own feature sets, the same way Kp and Dst already cross-feed each other today via lag/rolling-mean/rolling-std/rate-of-change features. No new architecture — `ANALYTICS_FEATURE_VARIABLES` already worked as one shared pool that every combined-model target draws from, so `ae` was added to that pool the same way Kp/Dst already were. Same `static_variables`/forward-fill mechanism as the standalone AE tab supplies the "previous AE" value (NOAA has no live AE feed), and only the historical/observed value is ever used — the AE tab's own predicted output never feeds in here. Retrained results: Dst R² = 0.969 (1h) down to 0.331 (24h); Kp next-interval R² = 0.681.
+
+3. **Version 3 (built, research/experimental)** — tests whether a **predicted** next-AE value, fed forward as an input feature into Kp/Dst ("Solar Wind → Predicted AE → Predicted Kp/Dst"), measurably improves Kp/Dst accuracy. This is a real, named ML technique (stacking / cascaded prediction), and operational forecasting centers do use it — but it carries a real risk: every prediction has error, and chaining a noisy predicted value into a downstream model propagates that error forward instead of adding clean information. Lives in its own **Experimental Predictions** tab, with completely separate training data (`experimental_features.csv`, built by freezing the trained AE 1h model and running it across history to generate a `predicted_ae` column — never observed AE) and its own models under `models/experimental/`, never touching the production `analytics` models. The dialog shows Production vs. Experimental side by side (matched by identical target hour) plus each pipeline's offline R²/MAE, so the comparison is visible per-forecast, not just in aggregate. First trained comparison: Dst R² 0.966 (experimental) vs. 0.969 (production) at 1h; Kp R² 0.688 (experimental) vs. 0.681 (production) — close enough that no clear winner has emerged yet; the rule remains: only keep the cascade if it produces a *measured* R² improvement on held-out data, not because it's architecturally elegant — and evaluate the comparison segmented by geomagnetic activity level (quiet vs. storm-time), not just one aggregate R², since a stacked feature could help disproportionately during the disturbed periods that actually matter operationally while looking flat or worse on an aggregate dominated by quiet-time data.
 
 This staged approach also explains a deliberate non-decision already reflected elsewhere in this README: the Analytics page's existing VBz/Ey/Dynamic Pressure features were added because they're *exact, error-free* derived math (Speed × Bz, no uncertainty), which is a fundamentally different (and safer) kind of feature than a model's *predicted* output — that distinction is exactly why Version 3 is gated behind 1 and 2, not done first.
 

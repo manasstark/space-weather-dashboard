@@ -65,6 +65,50 @@ def _load_multi_source_raw(config) -> pd.DataFrame:
     return pd.concat(frames, axis=1)
 
 
+def generate_predicted_ae(feature_frame: pd.DataFrame) -> pd.Series:
+    """Runs the frozen, already-trained AE 1h model (models/ae/ae_1h.joblib
+    — read-only, never retrained here) across every row of `feature_frame`
+    that has its full set of required feature columns, producing one
+    Predicted AE value per timestamp.
+
+    This is the SAME function used both to build the one-time historical
+    "predicted_ae" training column (see swdss.models.experimental) and to
+    generate the live cascade's Predicted AE step (see the "experimental"
+    branch in load_live_features below) — training and live inference can
+    never see different generation logic this way.
+    """
+    meta = _load_metrics("ae")["ae_1h"]
+    feature_columns = meta["feature_columns"]
+    model = _load_model("ae", "ae", 1)
+
+    predicted = pd.Series(index=feature_frame.index, dtype=float)
+    usable = feature_frame.dropna(subset=feature_columns)
+    if not usable.empty:
+        predicted.loc[usable.index] = model.predict(usable[feature_columns])
+    return predicted
+
+
+def _load_experimental_hourly() -> pd.DataFrame:
+    """The experimental cascade's own Solar Wind + IMF + Kp + Dst hourly
+    frame, with a "predicted_ae" column merged in — generated fresh from
+    the frozen AE model rather than read from any stored source, since
+    there's nothing to read: predicted_ae only exists as a model output.
+    """
+    config = DATASETS["experimental"]
+    raw = _load_multi_source_raw(config)
+    base_vars = [v for v in config.feature_variables if v != "predicted_ae"]
+
+    hourly = raw[base_vars].resample("1h").mean()
+    hourly.index = hourly.index.tz_localize(None)
+    hourly = hourly.interpolate(method="time")
+
+    ae_frame = load_live_features("ae")
+    predicted_ae = generate_predicted_ae(ae_frame)
+    hourly["predicted_ae"] = predicted_ae.reindex(hourly.index)
+
+    return hourly
+
+
 def load_live_features(dataset: str) -> pd.DataFrame:
     """Resamples live processed data to hourly means, interpolates gaps the
     same way training did, and applies the identical lag/rolling/change
@@ -74,14 +118,27 @@ def load_live_features(dataset: str) -> pd.DataFrame:
     config = DATASETS[dataset]
     feature_vars = config.feature_variables or config.variables
 
-    if config.source_datasets:
-        raw = _load_multi_source_raw(config)
+    if dataset == "experimental":
+        hourly = _load_experimental_hourly()
     else:
-        raw = _load_single_source_raw(config)
+        if config.source_datasets:
+            raw = _load_multi_source_raw(config)
+        else:
+            raw = _load_single_source_raw(config)
 
-    hourly = raw[feature_vars].resample("1h").mean()
-    hourly.index = hourly.index.tz_localize(None)
-    hourly = hourly.interpolate(method="time")
+        hourly = raw[feature_vars].resample("1h").mean()
+        hourly.index = hourly.index.tz_localize(None)
+
+        # Variables with no continuously-updating live feed (e.g. AE) can't
+        # be time-interpolated past their last real observation — there's
+        # nothing ahead to interpolate toward. Forward-fill those instead,
+        # carrying the last known value forward; every other variable keeps
+        # the normal time-interpolation for genuine live gaps.
+        static_vars = [v for v in (config.static_variables or []) if v in hourly.columns]
+        interp_vars = [v for v in feature_vars if v not in static_vars]
+        hourly[interp_vars] = hourly[interp_vars].interpolate(method="time")
+        if static_vars:
+            hourly[static_vars] = hourly[static_vars].ffill()
 
     derived_cols = add_derived_physics_features(hourly)
     feature_vars = feature_vars + derived_cols
@@ -107,6 +164,30 @@ def latest_minute_observation(dataset: str, variable: str) -> tuple:
         return None, None
     row = df.iloc[-1]
     return row["timestamp_utc"], float(row[raw_col])
+
+
+def resolve_static_actual(dataset: str, variable: str, target_hour) -> float:
+    """Ground-truth lookup for a `static_variables` entry (e.g. AE), which
+    has no continuously-updating live feed — load_live_features forward-
+    fills its last known value indefinitely, and that forward-filled value
+    must never be reported as if it were the real observation for a given
+    target hour. This instead reads the variable's own raw historical
+    source directly (pre-ffill) and returns None unless that source has
+    genuinely been refreshed to cover target_hour.
+    """
+    config = owning_source_config(dataset, variable)
+    raw_col = raw_column_for(dataset, variable)
+    raw = _load_single_source_raw(config)
+    hourly = raw[raw_col].resample("1h").mean()
+    hourly.index = hourly.index.tz_localize(None)
+
+    ts = pd.Timestamp(target_hour)
+    ts = ts.tz_convert(None) if ts.tzinfo is not None else ts
+    ts = ts.floor("h")
+    if ts not in hourly.index:
+        return None
+    value = hourly.loc[ts]
+    return None if pd.isna(value) else float(value)
 
 
 def predict_kp_interval(dataset: str = "analytics") -> dict:
@@ -163,7 +244,10 @@ def predict_kp_interval(dataset: str = "analytics") -> dict:
 
 
 def predict(dataset: str, variable: str, horizon: int) -> dict:
-    if dataset == "analytics" and variable == "kp":
+    # Both the production "analytics" and experimental cascade Kp models
+    # follow NOAA's real 3-hour publishing cadence, not an arbitrary
+    # hourly horizon — see predict_kp_interval.
+    if dataset in ("analytics", "experimental") and variable == "kp":
         return predict_kp_interval(dataset)
 
     metrics_doc = _load_metrics(dataset)

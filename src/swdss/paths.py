@@ -26,6 +26,7 @@ def ensure_data_dirs() -> None:
         PROCESSED_DIR / "imf",
         PROCESSED_DIR / "kp",
         PROCESSED_DIR / "dst",
+        PROCESSED_DIR / "ae",
         PROCESSED_DIR / "solar_events",
         PROCESSED_DIR / "cme",
         PROCESSED_DIR / "f107",

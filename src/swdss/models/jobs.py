@@ -25,16 +25,35 @@ import sqlite3
 import uuid
 from contextlib import contextmanager
 
+import numpy as np
 import pandas as pd
 
-from swdss.models.predict import latest_minute_observation, load_live_features
+from swdss.ingest.kyoto_ae import fetch_kyoto_ae_hour
+from swdss.ingest.kyoto_ae_quicklook import estimate_kyoto_quicklook_ae
+from swdss.models.predict import latest_minute_observation, load_live_features, resolve_static_actual
 from swdss.models.predict import predict as predict_live
-from swdss.models.registry import HORIZONS
+from swdss.models.registry import DATASETS, HORIZONS, IMF_VARIABLES, SOLAR_WIND_VARIABLES
 from swdss.paths import DATA_DIR
 
 DB_PATH = DATA_DIR / "predictions" / "predictions.db"
 
+# How often the verification engine actually hits Kyoto WDC, independent
+# of how often poll_jobs itself is called (which can be every page
+# render/auto-refresh — far more often than this). Tracked per-job via
+# the verification_checked_at column. Kyoto WDC's official digital AE
+# values publish with a real lag of ~10-20 days, so there is no value in
+# checking more than once a day — doing so would just be needless load
+# against an upstream service that hasn't changed.
+KYOTO_VERIFICATION_INTERVAL = pd.Timedelta(days=1)
+
 JOB_HISTORY_LIMIT = 20
+
+# AE predictions are precious, low-frequency research artifacts, not
+# disposable high-frequency jobs like Solar Wind/IMF — every one must
+# stay visible until the user explicitly deletes it, never silently
+# capped out of the "Running Predictions" view.
+UNCAPPED_HISTORY_DATASETS = {"ae"}
+
 STABILITY_WINDOW = 10
 
 # The live Solar Wind + IMF + Geomagnetic readings shown per-tick in the
@@ -44,7 +63,14 @@ STABILITY_WINDOW = 10
 # forecast specifically, "Current Dst" and "Previous Kp" are explicit
 # table columns, and Previous Kp is expected to stay fixed for the whole
 # session (it only changes when NOAA publishes a new official value).
-ANALYTICS_INPUT_VARIABLES = ["speed", "density", "temperature", "bt", "bx_gsm", "by_gsm", "bz_gsm", "dst", "kp"]
+ANALYTICS_INPUT_VARIABLES = ["speed", "density", "temperature", "bt", "bx_gsm", "by_gsm", "bz_gsm", "dst", "kp", "ae"]
+
+# The live Solar Wind + IMF readings shown per-tick for the AE predictor —
+# deliberately excludes Kp/Dst (AE V1 is kept independent of them, see
+# README's staged AE plan). Derived physics (Ey/VBz/Dynamic Pressure) and
+# the latest known AE value are computed/looked up separately below, the
+# same way they're computed for training and live inference.
+AE_INPUT_VARIABLES = SOLAR_WIND_VARIABLES + IMF_VARIABLES
 
 
 @contextmanager
@@ -119,6 +145,29 @@ def _init_db() -> None:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_ticks_job ON eval_ticks(job_id)")
         _ensure_column(conn, "ticks", "inputs_json", "TEXT")
+        # Only meaningfully used by static-target variables (e.g. AE) —
+        # see _advance_predicting / _verify_static_jobs. NULL for every
+        # other job, whose completion already depends on a real actual
+        # value being resolved directly.
+        _ensure_column(conn, "jobs", "verification_status", "TEXT")
+        # Timestamp of the last actual Kyoto WDC check (not every poll —
+        # see KYOTO_VERIFICATION_INTERVAL), so the verification engine's
+        # own cadence is independent of how often the dashboard re-renders.
+        _ensure_column(conn, "jobs", "verification_checked_at", "TEXT")
+        # Timestamp of the moment verification actually SUCCEEDED — distinct
+        # from verification_checked_at, which updates on every attempt
+        # whether or not that attempt found new data. Nullable; set once,
+        # permanently, the moment verification_status flips to 'verified'.
+        _ensure_column(conn, "jobs", "verified_at", "TEXT")
+        # Quicklook Verification (AE only) — an approximate, image-based
+        # estimate read off Kyoto WDC's real-time graph immediately after
+        # completion. Explicitly NOT the official verification source
+        # (that's verification_status/verified_at above) — stored in its
+        # own separate columns so it can never overwrite or be confused
+        # with the official result.
+        _ensure_column(conn, "jobs", "quicklook_ae", "REAL")
+        _ensure_column(conn, "jobs", "quicklook_image_url", "TEXT")
+        _ensure_column(conn, "jobs", "quicklook_checked_at", "TEXT")
 
 
 def _ensure_column(conn, table: str, column: str, decl: str) -> None:
@@ -160,16 +209,51 @@ def _fetch_ticks(conn, job_id: str) -> list[dict]:
 
 def _capture_live_inputs(dataset: str) -> dict:
     """Snapshots the current live Solar Wind + IMF readings, for the
-    Analytics page's multi-input terminal display. Returns {} for
+    Analytics/AE pages' multi-input terminal display. Returns {} for
     single-source datasets (nothing extra to show beyond their own value).
     """
-    if dataset != "analytics":
-        return {}
-    inputs = {}
-    for var in ANALYTICS_INPUT_VARIABLES:
-        _, value = latest_minute_observation(dataset, var)
-        inputs[var] = value
-    return inputs
+    if dataset == "analytics":
+        inputs = {}
+        for var in ANALYTICS_INPUT_VARIABLES:
+            _, value = latest_minute_observation(dataset, var)
+            inputs[var] = value
+        return inputs
+
+    if dataset == "ae":
+        inputs = {}
+        for var in AE_INPUT_VARIABLES:
+            _, value = latest_minute_observation(dataset, var)
+            inputs[var] = value
+
+        # Same formulas as swdss.models.features.add_derived_physics_features,
+        # computed here for a single live reading rather than a dataframe.
+        speed, density, bz = inputs.get("speed"), inputs.get("density"), inputs.get("bz_gsm")
+        if speed is not None and bz is not None:
+            inputs["vbz"] = speed * min(bz, 0)
+            inputs["ey"] = -speed * bz * 1e-3
+        if speed is not None and density is not None:
+            inputs["dynamic_pressure"] = 1.6726e-6 * density * speed**2
+
+        _, inputs["ae"] = latest_minute_observation(dataset, "ae")
+        return inputs
+
+    if dataset == "experimental":
+        inputs = {}
+        for var in ANALYTICS_INPUT_VARIABLES:
+            if var == "ae":
+                continue  # observed AE must never appear in the experimental cascade
+            _, value = latest_minute_observation("analytics", var)
+            inputs[var] = value
+
+        # predicted_ae has no stored source (see predict.generate_predicted_ae)
+        # — recomputing the cascade's frame here is the only way to show the
+        # live figure feeding this session's Kp/Dst models.
+        frame = load_live_features("experimental")
+        predicted_ae_series = frame["predicted_ae"].dropna() if "predicted_ae" in frame.columns else pd.Series(dtype=float)
+        inputs["predicted_ae"] = float(predicted_ae_series.iloc[-1]) if not predicted_ae_series.empty else None
+        return inputs
+
+    return {}
 
 
 def _append_tick(
@@ -229,8 +313,12 @@ def _tick_reference_variable(dataset: str, variable: str) -> str:
     first tick stamped with whatever stale hour Kp last updated (e.g.
     06:00), instead of "now". Speed updates close to every NOAA minute, so
     it's used as the freshness reference for any Analytics job.
+
+    AE has the same issue in an even sharper form: it has no live feed at
+    all, so its own timestamp never advances — using it as the reference
+    would log exactly one tick ever and then look permanently stuck.
     """
-    return "speed" if dataset == "analytics" else variable
+    return "speed" if dataset in ("analytics", "ae", "experimental") else variable
 
 
 def start_job(dataset: str, variable: str, horizon: int) -> tuple:
@@ -273,7 +361,7 @@ def start_job(dataset: str, variable: str, horizon: int) -> tuple:
                 _to_utc_iso(pd.Timestamp.now(tz="UTC")),
             ),
         )
-        used_horizon = "interval" if (dataset == "analytics" and variable == "kp") else horizon
+        used_horizon = "interval" if (dataset in ("analytics", "experimental") and variable == "kp") else horizon
         _append_tick(
             conn, job_id, minute_ts, minute_val, result["predicted_value"], used_horizon, _capture_live_inputs(dataset)
         )
@@ -288,7 +376,15 @@ def resolve_actual_value(dataset: str, variable: str, target_hour) -> float:
     """Looks up the hourly-mean actual value for a target hour from live
     data, once that hour has occurred. Returns None ("Pending") if the hour
     hasn't arrived yet or live data doesn't cover it.
+
+    `static_variables` (e.g. AE) have no live feed at all — their entry in
+    load_live_features is forward-filled and must never be reported as a
+    real observation, so those are resolved separately and honestly.
     """
+    config = DATASETS[dataset]
+    if variable in (config.static_variables or []):
+        return resolve_static_actual(dataset, variable, target_hour)
+
     frame = load_live_features(dataset)
     ts = pd.Timestamp(target_hour)
     ts = ts.tz_convert(None) if ts.tzinfo is not None else ts
@@ -306,6 +402,38 @@ def _finalize_job(conn, job_row: sqlite3.Row, actual_value: float) -> None:
     )
 
 
+def _capture_quicklook_estimate(conn, job_id: str, target_hour) -> None:
+    """Quicklook Verification (AE only): an approximate, image-based
+    estimate read off Kyoto WDC's continuously-updating real-time graph,
+    captured once immediately on completion. This is explicitly NOT the
+    official verification source — a network hiccup or a not-yet-drawn
+    column here just leaves quicklook_ae NULL, retried later via
+    refresh_quicklook_estimate; it never blocks or affects prediction
+    completion (already finished by the time this runs) or the separate,
+    official verification engine.
+    """
+    try:
+        estimate, image_url = estimate_kyoto_quicklook_ae(target_hour)
+    except Exception:
+        return
+    conn.execute(
+        "UPDATE jobs SET quicklook_ae=?, quicklook_image_url=?, quicklook_checked_at=? WHERE job_id=?",
+        (estimate, image_url, _to_utc_iso(pd.Timestamp.now(tz="UTC")), job_id),
+    )
+
+
+def refresh_quicklook_estimate(job_id: str) -> dict:
+    """Manually re-runs the Quicklook estimate for a completed AE job
+    (e.g. if the first automatic attempt failed, or to re-read the graph
+    now that more of the day has been drawn). Returns the updated job.
+    """
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        if row is not None:
+            _capture_quicklook_estimate(conn, job_id, pd.Timestamp(row["target_hour"]))
+    return get_job(job_id)
+
+
 def _advance_predicting(conn, job_row: sqlite3.Row) -> None:
     """Phase 1 (status='in_progress'): refine the forecast for the fixed
     target hour every time a new NOAA minute arrives, switching models at
@@ -321,26 +449,46 @@ def _advance_predicting(conn, job_row: sqlite3.Row) -> None:
     job leaves 'in_progress' nothing ever logs a prediction tick again.
     A timeout fallback (10 min past target) avoids getting stuck forever
     if NOAA stops publishing.
+
+    Variables with NO live feed at all (config.static_variables, e.g. AE)
+    can never satisfy "data_has_reached_target" — there is no NOAA feed to
+    reach it. For those, completion must depend ONLY on wall-clock time
+    reaching the target, never on an observation that will never arrive
+    through this phase. Verification (whether the historical source has
+    since been refreshed to cover the target hour) is a fully separate,
+    ongoing check — see _verify_static_jobs — decoupled from prediction
+    completion entirely.
     """
     dataset = job_row["dataset"]
     variable = job_row["variable"]
     target_hour = pd.Timestamp(job_row["target_hour"])
     now = pd.Timestamp.now(tz="UTC")
-    is_kp_interval = dataset == "analytics" and variable == "kp"
+    is_kp_interval = dataset in ("analytics", "experimental") and variable == "kp"
+    is_static_target = variable in (DATASETS[dataset].static_variables or [])
 
-    # Has the TARGET variable's own data started arriving for the new
-    # interval? Checked against the predicted variable itself (e.g. Kp),
-    # since that's specifically asking "has NOAA started publishing for
-    # the interval we're forecasting" — not a freshness/tick-timing check.
-    target_minute_ts, _ = latest_minute_observation(dataset, variable)
-    data_has_reached_target = target_minute_ts is not None and pd.Timestamp(target_minute_ts) >= target_hour
-    stalled_past_target = now >= target_hour + pd.Timedelta(minutes=10)
-    if data_has_reached_target or stalled_past_target:
-        conn.execute(
-            "UPDATE jobs SET status='evaluating', last_minute_seen=NULL WHERE job_id=?",
-            (job_row["job_id"],),
-        )
-        return
+    if is_static_target:
+        if now >= target_hour:
+            conn.execute(
+                "UPDATE jobs SET status='completed', verification_status='pending', completed_at=? WHERE job_id=?",
+                (_to_utc_iso(now), job_row["job_id"]),
+            )
+            if variable == "ae":
+                _capture_quicklook_estimate(conn, job_row["job_id"], target_hour)
+            return
+    else:
+        # Has the TARGET variable's own data started arriving for the new
+        # interval? Checked against the predicted variable itself (e.g. Kp),
+        # since that's specifically asking "has NOAA started publishing for
+        # the interval we're forecasting" — not a freshness/tick-timing check.
+        target_minute_ts, _ = latest_minute_observation(dataset, variable)
+        data_has_reached_target = target_minute_ts is not None and pd.Timestamp(target_minute_ts) >= target_hour
+        stalled_past_target = now >= target_hour + pd.Timedelta(minutes=10)
+        if data_has_reached_target or stalled_past_target:
+            conn.execute(
+                "UPDATE jobs SET status='evaluating', last_minute_seen=NULL WHERE job_id=?",
+                (job_row["job_id"],),
+            )
+            return
 
     # Tick timing/dedup driven by the fastest-updating reference variable
     # instead — see _tick_reference_variable for why.
@@ -431,10 +579,59 @@ def _advance_evaluating(conn, job_row: sqlite3.Row) -> None:
     _append_eval_tick(conn, job_row["job_id"], minute_ts, minute_val)
 
 
+def _verify_static_jobs(conn, dataset: str) -> None:
+    """Phase 2 (verification) for variables with no live feed at all (e.g.
+    AE) — completely independent of Phase 1 (prediction) above, both in
+    when it runs and in its data source. A job reaching 'completed' here
+    has already frozen its final prediction purely because the target
+    time arrived, with no dependency on an observation ever showing up.
+
+    AE is verified exclusively against Kyoto WDC's published real-time
+    (quicklook) AE digital data (swdss.ingest.kyoto_ae) — never NOAA,
+    which publishes no AE product at all, and never the local historical
+    file predict.resolve_static_actual reads (that's a different, stale
+    source used only as the forward-filled live *feature*, not as ground
+    truth). Throttled to roughly once per KYOTO_VERIFICATION_INTERVAL per
+    job, independent of how often poll_jobs itself is invoked, so a page
+    left open with a fast auto-refresh doesn't hammer Kyoto WDC.
+    """
+    now = pd.Timestamp.now(tz="UTC")
+    rows = conn.execute(
+        "SELECT * FROM jobs WHERE dataset=? AND status='completed' AND verification_status='pending'",
+        (dataset,),
+    ).fetchall()
+    for row in rows:
+        if row["variable"] != "ae":
+            continue  # only AE has a Kyoto-based verification source today
+
+        last_checked = row["verification_checked_at"]
+        if last_checked is not None and (now - pd.Timestamp(last_checked)) < KYOTO_VERIFICATION_INTERVAL:
+            continue
+
+        try:
+            actual = fetch_kyoto_ae_hour(pd.Timestamp(row["target_hour"]))
+        except Exception:
+            continue  # transient network/parse issue — try again next interval
+
+        conn.execute(
+            "UPDATE jobs SET verification_checked_at=? WHERE job_id=?",
+            (_to_utc_iso(now), row["job_id"]),
+        )
+        if actual is not None:
+            # Persisted permanently: verification_status/verified_at/
+            # actual_value never revert once set, regardless of anything
+            # that happens to prediction jobs afterward.
+            conn.execute(
+                "UPDATE jobs SET actual_value=?, verification_status='verified', verified_at=? WHERE job_id=?",
+                (actual, _to_utc_iso(now), row["job_id"]),
+            )
+
+
 def poll_jobs(dataset: str) -> None:
     """Advances every active job for this dataset (predicting or
-    evaluating). Call this on every page render so jobs keep advancing as
-    long as the dashboard is open.
+    evaluating), then separately checks any completed-but-unverified
+    static-target jobs (see _verify_static_jobs). Call this on every page
+    render so jobs keep advancing as long as the dashboard is open.
     """
     with _connect() as conn:
         rows = conn.execute(
@@ -446,18 +643,28 @@ def poll_jobs(dataset: str) -> None:
                 _advance_predicting(conn, row)
             else:
                 _advance_evaluating(conn, row)
+        _verify_static_jobs(conn, dataset)
 
 
 def get_running_jobs(dataset: str, limit: int = JOB_HISTORY_LIMIT) -> list[dict]:
     """Returns this dataset's non-saved jobs (in-progress or completed but
-    never saved), newest first, capped at `limit`. Once a job is saved it
-    moves out of this list entirely and into get_saved_jobs.
+    never saved), newest first, capped at `limit` — except for
+    UNCAPPED_HISTORY_DATASETS (currently just "ae"), where every job stays
+    visible indefinitely; only an explicit Delete ever removes one. Once a
+    (capped-dataset) job is saved it moves out of this list entirely and
+    into get_saved_jobs.
     """
     with _connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM jobs WHERE dataset=? AND saved=0 ORDER BY created_at DESC LIMIT ?",
-            (dataset, limit),
-        ).fetchall()
+        if dataset in UNCAPPED_HISTORY_DATASETS:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE dataset=? AND saved=0 ORDER BY created_at DESC",
+                (dataset,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE dataset=? AND saved=0 ORDER BY created_at DESC LIMIT ?",
+                (dataset, limit),
+            ).fetchall()
         jobs = [_row_to_job(r) for r in rows]
         for job in jobs:
             job["ticks"] = _fetch_ticks(conn, job["job_id"])
@@ -489,6 +696,29 @@ def get_job(job_id: str) -> dict:
         job = _row_to_job(row)
         job["ticks"] = _fetch_ticks(conn, job_id)
         job["eval_ticks"] = _fetch_eval_ticks(conn, job_id)
+        return job
+
+
+def find_matching_job(dataset: str, variable: str, target_hour) -> dict:
+    """Finds the most recent job for `dataset`/`variable` whose target hour
+    exactly matches `target_hour` — used to look up a production
+    ("analytics") counterpart for an experimental job (or vice versa) so
+    the dashboard can show them side by side. Returns None if no
+    comparable job exists yet (e.g. no production job was ever started
+    for that same target hour) — the comparison is "whenever possible",
+    not guaranteed.
+    """
+    target_iso = _to_utc_iso(target_hour)
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM jobs WHERE dataset=? AND variable=? AND target_hour=? ORDER BY created_at DESC LIMIT 1",
+            (dataset, variable, target_iso),
+        ).fetchone()
+        if row is None:
+            return None
+        job = _row_to_job(row)
+        job["ticks"] = _fetch_ticks(conn, job["job_id"])
+        job["eval_ticks"] = _fetch_eval_ticks(conn, job["job_id"])
         return job
 
 
@@ -524,6 +754,32 @@ def job_mae(job: dict) -> float:
         return None
     errors = [abs(t["predicted_value"] - job["actual_value"]) for t in job["ticks"]]
     return sum(errors) / len(errors)
+
+
+def final_percentage_error(job: dict) -> float:
+    """Absolute Error as a percentage of the actual value, using the
+    session's FINAL prediction (the operational forecast) — None if not
+    yet verified, or if the actual value is exactly zero (AE is rarely
+    but can be 0 at very quiet times, and a percentage of zero is
+    undefined).
+    """
+    actual = job["actual_value"]
+    if actual is None or not job["ticks"] or actual == 0:
+        return None
+    final_pred = job["ticks"][-1]["predicted_value"]
+    return abs(final_pred - actual) / abs(actual) * 100
+
+
+def quicklook_error(job: dict) -> float:
+    """Approximate error against the Quicklook estimate — NOT the official
+    error (see final_percentage_error / job's actual_value). None if no
+    Quicklook estimate has been captured yet.
+    """
+    quicklook_ae = job.get("quicklook_ae")
+    if quicklook_ae is None or not job["ticks"]:
+        return None
+    final_pred = job["ticks"][-1]["predicted_value"]
+    return abs(final_pred - quicklook_ae)
 
 
 def average_prediction(job: dict) -> float:
@@ -713,4 +969,123 @@ def get_prediction_statistics(dataset: str) -> dict:
         "mae_by_model": mae_by_model,
         "best_model": best_model,
         "trend": trend,
+    }
+
+
+# Simple, explicit thresholds for "storm" vs "quiet" segmentation — not
+# NOAA/industry-official cutoffs, just the standard textbook ballpark
+# (G1+ Kp, NOAA minor-storm Dst, active/storm-level AE) used consistently
+# across this dashboard's own status labels (see variable_meaning_and_risk
+# in dashboard/home.py).
+_STORM_CHECKS = {
+    "kp": lambda v: v >= 5,
+    "dst": lambda v: v <= -50,
+    "ae": lambda v: v >= 300,
+}
+
+
+def compute_variable_metrics(dataset: str, variable: str) -> dict:
+    """Comprehensive research metrics (MAE, RMSE, R², MAPE, Bias, Max
+    Error, Median Error, Average Drift, Forecast Stability, Storm vs.
+    Quiet performance) across every completed & verified job for this
+    dataset/variable. This is the measurement layer Hypothesis Testing
+    and the Research Lab's metrics panels are built on — it never
+    influences prediction, only reports on forecasts already made.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE dataset=? AND variable=? AND status='completed' AND actual_value IS NOT NULL",
+            (dataset, variable),
+        ).fetchall()
+        jobs = [_row_to_job(r) for r in rows]
+        for j in jobs:
+            j["ticks"] = _fetch_ticks(conn, j["job_id"])
+
+    records = []
+    for j in jobs:
+        if not j["ticks"]:
+            continue
+        final_pred = j["ticks"][-1]["predicted_value"]
+        actual = j["actual_value"]
+        records.append(
+            {
+                "predicted": final_pred,
+                "actual": actual,
+                "drift": forecast_drift(j),
+                "completed_at": j["completed_at"] or j["created_at"],
+            }
+        )
+
+    empty = {
+        "count": 0,
+        "mae": None,
+        "rmse": None,
+        "r2": None,
+        "mape": None,
+        "bias": None,
+        "max_error": None,
+        "median_error": None,
+        "avg_drift": None,
+        "stability": None,
+        "storm_mae": None,
+        "storm_count": 0,
+        "quiet_mae": None,
+        "quiet_count": 0,
+        "trend": [],
+        "predicted_vs_actual": [],
+        "errors": [],
+    }
+    if not records:
+        return empty
+
+    predicted = np.array([r["predicted"] for r in records], dtype=float)
+    actual = np.array([r["actual"] for r in records], dtype=float)
+    errors = predicted - actual
+    abs_errors = np.abs(errors)
+
+    mae = float(np.mean(abs_errors))
+    rmse = float(np.sqrt(np.mean(errors**2)))
+    bias = float(np.mean(errors))
+    max_error = float(np.max(abs_errors))
+    median_error = float(np.median(abs_errors))
+
+    ss_res = float(np.sum((actual - predicted) ** 2))
+    ss_tot = float(np.sum((actual - np.mean(actual)) ** 2))
+    r2 = float(1 - ss_res / ss_tot) if ss_tot > 0 else None
+
+    nonzero = actual != 0
+    mape = float(np.mean(np.abs(errors[nonzero] / actual[nonzero])) * 100) if nonzero.any() else None
+
+    drifts = [r["drift"] for r in records if r["drift"] is not None]
+    avg_drift = float(np.mean(np.abs(drifts))) if drifts else None
+    stability = float(np.std(drifts)) if len(drifts) > 1 else None
+
+    is_storm = _STORM_CHECKS.get(variable)
+    if is_storm:
+        storm_errors = [abs(r["predicted"] - r["actual"]) for r in records if is_storm(r["actual"])]
+        quiet_errors = [abs(r["predicted"] - r["actual"]) for r in records if not is_storm(r["actual"])]
+    else:
+        storm_errors, quiet_errors = [], []
+
+    trend = sorted([(r["completed_at"], abs(r["predicted"] - r["actual"])) for r in records], key=lambda t: t[0])
+    predicted_vs_actual = [(r["predicted"], r["actual"]) for r in records]
+
+    return {
+        "count": len(records),
+        "mae": mae,
+        "rmse": rmse,
+        "r2": r2,
+        "mape": mape,
+        "bias": bias,
+        "max_error": max_error,
+        "median_error": median_error,
+        "avg_drift": avg_drift,
+        "stability": stability,
+        "storm_mae": float(np.mean(storm_errors)) if storm_errors else None,
+        "storm_count": len(storm_errors),
+        "quiet_mae": float(np.mean(quiet_errors)) if quiet_errors else None,
+        "quiet_count": len(quiet_errors),
+        "trend": trend,
+        "predicted_vs_actual": predicted_vs_actual,
+        "errors": errors.tolist(),
     }

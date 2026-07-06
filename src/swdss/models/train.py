@@ -93,10 +93,11 @@ def train_dataset(dataset_key: str) -> list[dict]:
     results = []
 
     for variable in config.variables:
-        # Kp on the Analytics page follows NOAA's real 3-hour cadence
-        # instead of an arbitrary hourly horizon — trained separately by
+        # Kp on both the production Analytics page and the experimental
+        # cascade follows NOAA's real 3-hour cadence instead of an
+        # arbitrary hourly horizon — trained separately by
         # train_kp_interval_model(), not as 5 fixed-horizon models here.
-        if dataset_key == "analytics" and variable == "kp":
+        if dataset_key in ("analytics", "experimental") and variable == "kp":
             continue
 
         for horizon in HORIZONS:
@@ -132,7 +133,7 @@ def train_dataset(dataset_key: str) -> list[dict]:
             )
 
     metrics_doc_path = metrics_path(dataset_key)
-    if dataset_key == "analytics" and metrics_doc_path.exists():
+    if dataset_key in ("analytics", "experimental") and metrics_doc_path.exists():
         # Don't clobber the kp_interval entry if it was trained in a
         # previous run and this run doesn't (re)train it.
         with open(metrics_doc_path) as f:
@@ -148,7 +149,7 @@ def train_dataset(dataset_key: str) -> list[dict]:
     return results
 
 
-def train_kp_interval_model() -> dict:
+def train_kp_interval_model(dataset: str = "analytics") -> dict:
     """Kp is only ever officially published every 3 hours (00, 03, 06, ...
     UTC). Instead of an arbitrary hourly horizon, this trains a single
     model whose target is always "the Kp value of the next official
@@ -156,8 +157,12 @@ def train_kp_interval_model() -> dict:
     targets the 18-21 UTC interval's eventual Kp, same as observing at
     17:55 in that same interval. The lead time naturally varies 1-3 hours
     row by row, which the model learns directly from the training data.
+
+    Used for both the production "analytics" dataset and the experimental
+    cascade ("experimental") — same cadence-aware target logic, only the
+    feature set differs (observed AE vs. predicted_ae).
     """
-    config = DATASETS["analytics"]
+    config = DATASETS[dataset]
     base_df, feature_vars = _load_base_df(config)
     frame, feature_columns = build_feature_frame(base_df, feature_vars)
 
@@ -175,7 +180,7 @@ def train_kp_interval_model() -> dict:
 
     best_name, best_metrics, final_model = _fit_best(X, y)
 
-    path = kp_interval_model_path()
+    path = kp_interval_model_path(dataset)
     joblib.dump(final_model, path)
 
     record = {
@@ -191,7 +196,7 @@ def train_kp_interval_model() -> dict:
         "n_samples": int(len(X)),
     }
 
-    metrics_doc_path = metrics_path("analytics")
+    metrics_doc_path = metrics_path(dataset)
     metrics_doc = {}
     if metrics_doc_path.exists():
         with open(metrics_doc_path) as f:
@@ -201,7 +206,7 @@ def train_kp_interval_model() -> dict:
         json.dump(metrics_doc, f, indent=2)
 
     print(
-        f"[analytics] kp +next-interval -> {best_name} "
+        f"[{dataset}] kp +next-interval -> {best_name} "
         f"(R2={best_metrics['r2']:.4f} MAE={best_metrics['mae']:.3f} RMSE={best_metrics['rmse']:.3f})"
     )
     return record
@@ -216,8 +221,9 @@ def main() -> None:
     for dataset_key in requested:
         all_results.extend(train_dataset(dataset_key))
 
-    if "analytics" in requested:
-        all_results.append(train_kp_interval_model())
+    for dataset_key in ("analytics", "experimental"):
+        if dataset_key in requested:
+            all_results.append(train_kp_interval_model(dataset_key))
 
     print("\n=== Training Summary ===")
     summary = pd.DataFrame(all_results)[["variable", "horizon", "algorithm", "r2", "mae", "rmse"]]

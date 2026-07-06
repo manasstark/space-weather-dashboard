@@ -13,9 +13,17 @@ from swdss.paths import (
 )
 
 
+# NOAA retired the old separate /products/solar-wind/plasma-7-day.json and
+# mag-7-day.json endpoints (both now 404 — the whole solar-wind/ directory
+# is gone). Their replacement, propagated-solar-wind.json, combines plasma
+# AND IMF into one minute-cadence, ~7-day rolling feed. solar_wind and imf
+# are fetched from it independently (matching the existing one-job-per-
+# dataset architecture) and each cleaner just selects its own columns.
+_PROPAGATED_SOLAR_WIND_URL = "https://services.swpc.noaa.gov/products/geospace/propagated-solar-wind.json"
+
 NOAA_URLS = {
-    "solar_wind": "https://services.swpc.noaa.gov/products/solar-wind/plasma-7-day.json",
-    "imf": "https://services.swpc.noaa.gov/products/solar-wind/mag-7-day.json",
+    "solar_wind": _PROPAGATED_SOLAR_WIND_URL,
+    "imf": _PROPAGATED_SOLAR_WIND_URL,
     "kp": "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json",
     "dst": "https://services.swpc.noaa.gov/products/kyoto-dst.json",
     "solar_events": "https://services.swpc.noaa.gov/json/edited_events.json",
@@ -158,14 +166,17 @@ def clean_imf(payload: list) -> pd.DataFrame:
     df = noaa_table_to_df(payload)
     df = clean_time_column(df)
 
+    # The old mag-7-day.json used "bx_gsm"/"by_gsm"/"bz_gsm"; the current
+    # propagated-solar-wind.json already uses bare "bx"/"by"/"bz". Renaming
+    # only when the _gsm-suffixed names are present keeps this working
+    # against either shape.
     rename_map = {
-        "bt": "bt",
         "bx_gsm": "bx",
         "by_gsm": "by",
         "bz_gsm": "bz",
     }
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
-    df = df.rename(columns=rename_map)
     columns = ["bt", "bx", "by", "bz"]
     return minute_values(df, columns)
 
