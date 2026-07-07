@@ -32,6 +32,7 @@ from swdss.ingest.kyoto_ae import fetch_kyoto_ae_hour
 from swdss.ingest.kyoto_ae_quicklook import estimate_kyoto_quicklook_ae_full
 from swdss.models.predict import latest_minute_observation, load_live_features, resolve_static_actual
 from swdss.models.predict import predict as predict_live
+from swdss.models.predict import predict_kp_rolling
 from swdss.models.registry import DATASETS, HORIZONS, IMF_VARIABLES, SOLAR_WIND_VARIABLES
 from swdss.paths import DATA_DIR
 
@@ -206,6 +207,18 @@ def _init_db() -> None:
         # so the UI can warn plainly when an estimate is really just a
         # partial-hour average, not the eventual full-hour figure.
         _ensure_column(conn, "jobs", "quicklook_hour_coverage", "REAL")
+        # Kp interval jobs only: the FROZEN production forecast (Mode 1),
+        # computed once at job creation from features strictly before the
+        # target interval — see predict.predict_kp_interval — and never
+        # touched again. Every tick logged after creation is instead the
+        # separate, deliberately unrestricted "ticks" table, so the two
+        # products never overwrite each other.
+        _ensure_column(conn, "jobs", "production_prediction", "REAL")
+        # The exact pre-interval feature timestamp the frozen forecast was
+        # computed from (predict_kp_interval's own `observed_at`) — shown
+        # on the dashboard so it's never ambiguous which data window
+        # produced the Mode 1 number.
+        _ensure_column(conn, "jobs", "production_observed_at", "TEXT")
 
 
 def _ensure_column(conn, table: str, column: str, decl: str) -> None:
@@ -366,6 +379,12 @@ def start_job(dataset: str, variable: str, horizon: int) -> tuple:
 
     Returns (job, created) where created=False signals a duplicate.
     """
+    is_kp_interval_job = dataset in ("analytics", "experimental") and variable == "kp"
+    # For Kp, predict_live/predict_kp_interval returns the FROZEN Mode 1
+    # production forecast (training-consistent, capped to data strictly
+    # before the target interval) — this is what gets stored permanently
+    # on the job and never recomputed. Every other variable's `result` is
+    # just its one and only prediction, same as always.
     result = predict_live(dataset, variable, horizon)
     start_hour_iso = _to_utc_iso(result["observed_at"])
 
@@ -382,10 +401,26 @@ def start_job(dataset: str, variable: str, horizon: int) -> tuple:
 
         minute_ts, minute_val = latest_minute_observation(dataset, _tick_reference_variable(dataset, variable))
 
+        # The first entry in the Mode 2 rolling-estimate timeline — computed
+        # separately from the frozen Mode 1 value above, since it
+        # deliberately uses whatever data is freshest right now (which may
+        # already be inside the target interval), never capped to the
+        # pre-interval window. Falls back to the frozen value only if the
+        # rolling call itself fails (e.g. a transient feature-availability
+        # issue) so job creation never breaks over this secondary product.
+        first_tick_value = result["predicted_value"]
+        if is_kp_interval_job:
+            try:
+                first_tick_value = predict_kp_rolling(dataset)["predicted_value"]
+            except Exception:
+                pass
+
         job_id = str(uuid.uuid4())
         conn.execute(
             "INSERT INTO jobs (job_id, dataset, variable, horizon, start_hour, target_hour, model_name, "
-            "metrics_json, status, saved, created_at, last_minute_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL)",
+            "metrics_json, status, saved, created_at, last_minute_seen, production_prediction, "
+            "production_observed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?)",
             (
                 job_id,
                 dataset,
@@ -397,11 +432,13 @@ def start_job(dataset: str, variable: str, horizon: int) -> tuple:
                 json.dumps(result["metrics"]),
                 "in_progress",
                 _to_utc_iso(pd.Timestamp.now(tz="UTC")),
+                result["predicted_value"] if is_kp_interval_job else None,
+                _to_utc_iso(result["observed_at"]) if is_kp_interval_job else None,
             ),
         )
-        used_horizon = "interval" if (dataset in ("analytics", "experimental") and variable == "kp") else horizon
+        used_horizon = "rolling" if is_kp_interval_job else horizon
         _append_tick(
-            conn, job_id, minute_ts, minute_val, result["predicted_value"], used_horizon, _capture_live_inputs(dataset)
+            conn, job_id, minute_ts, minute_val, first_tick_value, used_horizon, _capture_live_inputs(dataset)
         )
 
         job = _row_to_job(conn.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone())
@@ -507,33 +544,38 @@ def refresh_quicklook_estimate(job_id: str) -> dict:
 def _advance_predicting(conn, job_row: sqlite3.Row) -> None:
     """Phase 1 (status='in_progress'): refine the forecast for the fixed
     target hour every time a new NOAA minute arrives, switching models at
-    checkpoints as the remaining time to target narrows.
+    checkpoints as the remaining time to target narrows. Three variable
+    classes are handled, each in its own branch below:
 
-    Transitioning to the evaluation phase is gated on the freshest
-    *available* NOAA minute reaching the target hour — not on wall-clock
-    time alone. live_update.py fetches on its own ~1-2 minute cadence, so
-    at the instant the wall clock crosses into the target hour, the local
-    data can still be a couple of minutes behind (e.g. the 07:57/07:59
-    readings might not land until just after 08:00). Transitioning on wall
-    clock alone would skip logging those last ticks entirely, since once a
-    job leaves 'in_progress' nothing ever logs a prediction tick again.
-    A timeout fallback (10 min past target) avoids getting stuck forever
-    if NOAA stops publishing.
+    1. Static targets (config.static_variables, e.g. AE) have NO live feed
+       for the *predicted* variable itself, so completion can't be gated
+       on it reaching the target hour. Their reference/input variable
+       (_tick_reference_variable, e.g. "speed") does keep updating live
+       though, so the same "wait for real data, not wall clock alone"
+       principle still applies to it: keep ticking on every new reference
+       minute, and only complete once that reference data reaches the
+       target hour (or a 10-minute stall timeout, in case NOAA stops
+       publishing entirely).
 
-    Variables with NO live feed at all (config.static_variables, e.g. AE)
-    can never satisfy this the same way — there is no NOAA feed for the
-    *predicted* variable itself to reach the target hour. But their
-    reference/input variable (_tick_reference_variable, e.g. "speed" for
-    AE) DOES keep updating live, so the same "wait for real data, not just
-    wall clock" principle still applies to it: keep ticking on every new
-    reference-variable minute, and only complete once that reference data
-    itself reaches the target hour (or the same stall timeout elapses) —
-    never purely on wall-clock time, which would silently skip whatever
-    reference minutes hadn't landed yet at the exact instant poll_jobs
-    happened to run. Verification (whether the historical AE source has
-    since been refreshed to cover the target hour) is a fully separate,
-    ongoing check — see _verify_static_jobs — decoupled from prediction
-    completion entirely.
+    2. Kp interval jobs run TWO independent products (see
+       predict.predict_kp_interval / predict_kp_rolling): a frozen
+       production_prediction set once at job creation (never touched
+       here), and a separate, deliberately unrestricted "rolling"
+       nowcast ticked here on every new minute. No stall timeout — Kp not
+       being published yet is the normal state for the whole target
+       interval, not a stuck feed.
+
+    3. Everything else (Dst, Solar Wind, IMF) is checkpoint-based:
+       transitions to evaluating once the target variable's own live data
+       reaches the target hour (or a 10-minute stall timeout), then ticks
+       at discrete trained horizons (1/3/6/12/24h) as the remaining time
+       to target narrows.
+
+    In all three cases, transitioning out of 'in_progress' is gated on the
+    freshest *available* data reaching the target — never wall-clock time
+    alone, which would silently skip whatever readings hadn't landed yet
+    at the exact instant poll_jobs happened to run (live_update.py fetches
+    on its own ~1-2 minute cadence, so there's normally a small lag).
     """
     dataset = job_row["dataset"]
     variable = job_row["variable"]
@@ -574,20 +616,60 @@ def _advance_predicting(conn, job_row: sqlite3.Row) -> None:
             if variable == "ae":
                 _capture_quicklook_estimate(conn, job_row["job_id"], target_hour)
         return
-    else:
-        # Has the TARGET variable's own data started arriving for the new
-        # interval? Checked against the predicted variable itself (e.g. Kp),
-        # since that's specifically asking "has NOAA started publishing for
-        # the interval we're forecasting" — not a freshness/tick-timing check.
+
+    if is_kp_interval:
+        # Mode 1 (production_prediction, frozen at job creation — see
+        # start_job) never gets touched again here. Every tick logged in
+        # this branch is Mode 2, the EXPERIMENTAL rolling nowcast
+        # (predict_kp_rolling) — deliberately never predict_kp_interval,
+        # which would just recompute the same frozen, training-consistent
+        # value over and over (it's capped to data before the target
+        # interval, which doesn't change while we wait) and would also
+        # misuse the production model on fresher, in-interval data the
+        # instant that cap were lifted. No stall-timeout fallback either:
+        # unlike hourly variables, "NOAA hasn't published yet" is Kp's
+        # entirely normal state for the whole 3h+ target interval, not a
+        # sign of a stuck feed — transition to evaluating only once the
+        # official value has actually arrived.
         target_minute_ts, _ = latest_minute_observation(dataset, variable)
         data_has_reached_target = target_minute_ts is not None and pd.Timestamp(target_minute_ts) >= target_hour
-        stalled_past_target = now >= target_hour + pd.Timedelta(minutes=10)
-        if data_has_reached_target or stalled_past_target:
+        if data_has_reached_target:
             conn.execute(
                 "UPDATE jobs SET status='evaluating', last_minute_seen=NULL WHERE job_id=?",
                 (job_row["job_id"],),
             )
             return
+
+        minute_ts, minute_val = latest_minute_observation(dataset, _tick_reference_variable(dataset, variable))
+        if minute_ts is None:
+            return
+        minute_iso = _to_utc_iso(minute_ts)
+        if minute_iso == job_row["last_minute_seen"]:
+            return
+        try:
+            rolling_result = predict_kp_rolling(dataset)
+        except Exception:
+            conn.execute("UPDATE jobs SET last_minute_seen=? WHERE job_id=?", (minute_iso, job_row["job_id"]))
+            return
+        _append_tick(
+            conn, job_row["job_id"], minute_ts, minute_val, rolling_result["predicted_value"], "rolling",
+            _capture_live_inputs(dataset),
+        )
+        return
+
+    # Has the TARGET variable's own data started arriving for the new
+    # interval? Checked against the predicted variable itself (e.g. Dst),
+    # since that's specifically asking "has NOAA started publishing for
+    # the interval we're forecasting" — not a freshness/tick-timing check.
+    target_minute_ts, _ = latest_minute_observation(dataset, variable)
+    data_has_reached_target = target_minute_ts is not None and pd.Timestamp(target_minute_ts) >= target_hour
+    stalled_past_target = now >= target_hour + pd.Timedelta(minutes=10)
+    if data_has_reached_target or stalled_past_target:
+        conn.execute(
+            "UPDATE jobs SET status='evaluating', last_minute_seen=NULL WHERE job_id=?",
+            (job_row["job_id"],),
+        )
+        return
 
     # Tick timing/dedup driven by the fastest-updating reference variable
     # instead — see _tick_reference_variable for why.
@@ -597,21 +679,6 @@ def _advance_predicting(conn, job_row: sqlite3.Row) -> None:
 
     minute_iso = _to_utc_iso(minute_ts)
     if minute_iso == job_row["last_minute_seen"]:
-        return
-
-    if is_kp_interval:
-        # Only one model (not five discrete horizons) — it already learned
-        # to handle a 1-3 hour lookahead directly from training, so every
-        # new minute just ticks straight through, no checkpoint gating.
-        try:
-            result = predict_live(dataset, variable, 1)
-        except Exception:
-            conn.execute("UPDATE jobs SET last_minute_seen=? WHERE job_id=?", (minute_iso, job_row["job_id"]))
-            return
-        _append_tick(
-            conn, job_row["job_id"], minute_ts, minute_val, result["predicted_value"], "interval",
-            _capture_live_inputs(dataset),
-        )
         return
 
     try:
@@ -928,6 +995,47 @@ def final_percentage_error(job: dict) -> float:
         return None
     final_pred = job["ticks"][-1]["predicted_value"]
     return abs(final_pred - actual) / abs(actual) * 100
+
+
+def production_error(job: dict) -> float:
+    """Kp interval jobs only: absolute error of the FROZEN Mode 1
+    production forecast against the official Kp value — this is the
+    number that feeds official model evaluation (aggregated across many
+    jobs into R²/MAE/RMSE elsewhere). None until production_prediction
+    and actual_value are both set.
+    """
+    prod = job.get("production_prediction")
+    actual = job.get("actual_value")
+    if prod is None or actual is None:
+        return None
+    return abs(prod - actual)
+
+
+def production_bias(job: dict) -> float:
+    """Signed error (prediction - actual) of the frozen production
+    forecast. Unlike production_error, the sign is the point here:
+    persistently positive means the model runs high, persistently
+    negative means it runs low — production_error alone can't show that.
+    """
+    prod = job.get("production_prediction")
+    actual = job.get("actual_value")
+    if prod is None or actual is None:
+        return None
+    return prod - actual
+
+
+def rolling_final_error(job: dict) -> float:
+    """Kp interval jobs only: absolute error of the FINAL Mode 2 rolling
+    estimate (the last tick logged before the job resolved) against the
+    official Kp value — kept strictly for research comparison against
+    production_error, never as a substitute for it and never used for
+    official model evaluation.
+    """
+    actual = job.get("actual_value")
+    ticks = job.get("ticks")
+    if actual is None or not ticks:
+        return None
+    return abs(ticks[-1]["predicted_value"] - actual)
 
 
 def quicklook_error(job: dict) -> float:

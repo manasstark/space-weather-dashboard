@@ -190,12 +190,54 @@ def resolve_static_actual(dataset: str, variable: str, target_hour) -> float:
     return None if pd.isna(value) else float(value)
 
 
+def _kp_target_interval(dataset: str) -> tuple:
+    """The interval NOAA hasn't published yet — the target BOTH the frozen
+    production forecast and the experimental rolling nowcast are always
+    aimed at (they answer different questions about the *same* interval,
+    never different ones). Never derived from wall-clock time: at 12:37
+    UTC the clock has already entered the 12:00-15:00 interval, but NOAA
+    typically hasn't published that interval's value yet (the interval
+    has to finish and then be processed) — the latest *official* value is
+    usually still the previous one (09:00-12:00). Using the clock would
+    silently skip forecasting the interval that's actually still unknown.
+
+    latest_minute_observation reads Kp's raw processed parquet directly —
+    no resampling/interpolation/forward-fill — so it can only ever report
+    an interval NOAA has genuinely published, never one merely "implied"
+    by the current time.
+
+    Returns (target_hour, official_kp_interval_start, official_kp_value).
+    """
+    official_kp_ts, official_kp_value = latest_minute_observation(dataset, "kp")
+    if official_kp_ts is None:
+        raise ValueError(f"No official Kp observation available yet for {dataset}.")
+    official_kp_ts = pd.Timestamp(official_kp_ts)
+    official_kp_ts = official_kp_ts.tz_convert(None) if official_kp_ts.tzinfo is not None else official_kp_ts
+    official_kp_ts = official_kp_ts.floor("3h")
+    target_hour = official_kp_ts + pd.Timedelta(hours=3)
+    return target_hour, official_kp_ts, official_kp_value
+
+
 def predict_kp_interval(dataset: str = "analytics") -> dict:
-    """Kp on the Analytics page follows NOAA's real publishing cadence:
-    a new official value only every 3 hours (00, 03, 06, ... UTC). This
-    always targets the NEXT such boundary after the latest available
-    hourly bucket, using the single interval-aware model — never an
-    arbitrary hourly horizon.
+    """PRODUCTION Kp forecast — frozen and training-consistent. This is
+    the number used for official model evaluation (R²/MAE/RMSE/Bias).
+
+    train_kp_interval_model trains on: for every hourly row timestamped
+    inside 3h-block B, the label is block B+1's eventual Kp ("observing at
+    16:42, inside 15-18 UTC, targets 18-21 UTC's eventual Kp"). The model
+    has never seen a training example where the input features come from
+    inside the SAME block it's predicting — feeding it features from
+    inside the target interval would silently violate that distribution
+    and produce a meaningless answer, not an error.
+
+    So to correctly predict target interval [T, T+3h), the input features
+    MUST come from strictly before T — the latest available hour in the
+    interval immediately preceding it. That's enforced here by filtering
+    to `usable.index < target_hour` before taking the latest row. Once
+    computed, this value must never be recomputed against fresher data —
+    see jobs.py, where it's stored once at job creation and frozen for
+    the job's lifetime (Mode 1). For the separate, deliberately
+    unrestricted operational product, see predict_kp_rolling (Mode 2).
     """
     metrics_doc = _load_metrics(dataset)
     if "kp_interval" not in metrics_doc:
@@ -208,14 +250,20 @@ def predict_kp_interval(dataset: str = "analytics") -> dict:
     if usable.empty:
         raise ValueError(f"Not enough live history to build features for {dataset}/kp.")
 
-    latest = usable.iloc[-1]
-    observed_at = usable.index[-1]
+    target_hour, official_kp_ts, official_kp_value = _kp_target_interval(dataset)
+
+    prior = usable[usable.index < target_hour]
+    if prior.empty:
+        raise ValueError(f"Not enough pre-interval history to build a frozen {dataset}/kp forecast.")
+
+    latest = prior.iloc[-1]
+    observed_at = prior.index[-1]
 
     model = _load_kp_interval_model(dataset)
     X = latest[feature_columns].to_frame().T
     predicted_value = float(model.predict(X)[0])
 
-    current_value = float(latest["kp"])
+    current_value = official_kp_value
     change = predicted_value - current_value
     if abs(change) < 1e-9:
         trend = "Stable"
@@ -224,7 +272,6 @@ def predict_kp_interval(dataset: str = "analytics") -> dict:
     else:
         trend = "Decreasing"
 
-    next_block_start = observed_at.floor("3h") + pd.Timedelta(hours=3)
     recent_series = frame["kp"].dropna().tail(48)
 
     return {
@@ -238,8 +285,59 @@ def predict_kp_interval(dataset: str = "analytics") -> dict:
         "model_name": meta["algorithm"],
         "metrics": {"r2": meta["r2"], "mae": meta["mae"], "rmse": meta["rmse"]},
         "observed_at": observed_at,
-        "predicted_for": next_block_start,
+        "predicted_for": target_hour,
         "recent_series": recent_series,
+        "official_kp_interval_start": official_kp_ts,
+        "official_kp_value": official_kp_value,
+    }
+
+
+def predict_kp_rolling(dataset: str = "analytics") -> dict:
+    """EXPERIMENTAL Kp rolling nowcast — Mode 2. NOT the production
+    forecast, and NEVER used for official model evaluation (that's
+    predict_kp_interval). This deliberately feeds the SAME model whatever
+    data is freshest right now, even when that's already inside the
+    target interval itself — which is exactly the distribution mismatch
+    predict_kp_interval's docstring warns against. It answers a different,
+    legitimate question instead: "given everything upstream we know right
+    now, including partway through this interval, what does that suggest
+    about how it's shaping up?" — an operational situational-awareness
+    read, not a calibrated forecast. Always label output from this
+    function "Experimental Rolling Estimate" wherever it's shown.
+    """
+    metrics_doc = _load_metrics(dataset)
+    if "kp_interval" not in metrics_doc:
+        raise ValueError(f"No trained Kp interval model for {dataset}. Run swdss.models.train_kp_interval_model.")
+    meta = metrics_doc["kp_interval"]
+    feature_columns = meta["feature_columns"]
+
+    frame = load_live_features(dataset)
+    usable = frame.dropna(subset=feature_columns)
+    if usable.empty:
+        raise ValueError(f"Not enough live history to build features for {dataset}/kp.")
+
+    target_hour, official_kp_ts, official_kp_value = _kp_target_interval(dataset)
+
+    latest = usable.iloc[-1]
+    observed_at = usable.index[-1]
+
+    model = _load_kp_interval_model(dataset)
+    X = latest[feature_columns].to_frame().T
+    predicted_value = float(model.predict(X)[0])
+
+    return {
+        "dataset": dataset,
+        "variable": "kp",
+        "horizon": "interval",
+        "predicted_value": predicted_value,
+        "model_name": meta["algorithm"],
+        "metrics": {"r2": meta["r2"], "mae": meta["mae"], "rmse": meta["rmse"]},
+        "observed_at": observed_at,
+        "predicted_for": target_hour,
+        "official_kp_interval_start": official_kp_ts,
+        "official_kp_value": official_kp_value,
+        "experimental": True,
+        "label": "Experimental Rolling Estimate",
     }
 
 

@@ -41,6 +41,30 @@ from swdss.models.hypothesis import (
     update_notes,
 )
 from swdss.models.physics_interpretation import physics_interpretation
+from swdss.models.imf_research import (
+    ALL_TRAINABLE_MODELS,
+    DEFAULT_GRANULARITY,
+    DEFAULT_HORIZON,
+    DEFAULT_SEQUENCE_LENGTH,
+    FUTURE_MODELS,
+    GRANULARITY_OPTIONS,
+    HOURLY_HORIZONS,
+    HYPERPARAM_SCHEMA,
+    MINUTE_HORIZONS,
+    SEQUENCE_LENGTH_OPTIONS,
+    SEQUENCE_MODELS,
+    TABULAR_MODELS,
+    TARGET_OPTIONS,
+    compare_runs,
+    delete_run,
+    get_run,
+    list_runs,
+    load_research_frame,
+    promote_run,
+    train_horizon_sweep,
+    train_research_model,
+)
+from swdss.models import kp_research
 from swdss.models.jobs import (
     average_prediction,
     classify_quicklook_error,
@@ -57,10 +81,13 @@ from swdss.models.jobs import (
     job_mae,
     model_quality_label,
     poll_jobs,
+    production_bias,
+    production_error,
     quicklook_error,
     quicklook_label,
     quicklook_relative_error,
     refresh_quicklook_estimate,
+    rolling_final_error,
     save_job,
     stability_metric,
     start_job,
@@ -235,6 +262,13 @@ def apply_retro_windows_style() -> None:
         .stRadio span,
         .stRadio p {{
             color: #000000 !important;
+        }}
+
+        [data-testid="stCheckbox"] label,
+        [data-testid="stCheckbox"] label *,
+        [data-testid="stCheckbox"] span,
+        [data-testid="stCheckbox"] p {{
+            color: #ffffff !important;
         }}
 
         div[data-testid="stDataFrame"] * {{
@@ -469,6 +503,7 @@ STATUS_BADGE_STYLES = {
     "verified": ("Verified", "#1f5a2e", "#d4f4dd"),
     "quicklook_pending": ("Awaiting Quicklook Estimate", "#5a1f8a", "#f2e8ff"),
     "quicklook_verified": ("Quicklook Estimate Available", "#5a1f8a", "#f2e8ff"),
+    "kp_waiting_official": ("Waiting for Official NOAA Kp", "#1f5a7a", "#d0eaf7"),
 }
 
 QUICKLOOK_CONFIDENCE_COLORS = {
@@ -1716,31 +1751,64 @@ def render_explainability_section(dataset: str, variable: str, horizon) -> None:
 
 
 def render_kp_forecast_dialog(job: dict) -> None:
-    """Kp on the Analytics page isn't predicted hourly like every other
-    variable — it follows NOAA's real 3-hour publishing cadence, runs as
-    one continuous session for the whole current interval, and reports a
-    Final vs. Average prediction (only the final one is the operational
-    forecast; the average is a stability indicator). That's different
-    enough from the generic dialog to warrant its own layout entirely.
+    """Kp on the Analytics page runs TWO independent products from one job
+    record — see predict.predict_kp_interval / predict_kp_rolling for the
+    full reasoning:
+
+    - Mode 1, Production Forecast: `production_prediction`, frozen at job
+      creation from data strictly BEFORE the target interval (matching
+      how the model was trained — features from block B predict block
+      B+1, never block B's own value). This is the number used for
+      official model evaluation and never changes after creation.
+    - Mode 2, Operational Rolling Estimate: every tick logged after
+      creation (job["ticks"]), computed from whatever data is freshest
+      right now — deliberately off the training distribution, an
+      "operational situational awareness" read, always labeled
+      Experimental, never used for official evaluation.
+
+    They're rendered in clearly separate sections below and never allowed
+    to overwrite each other, matching how they're stored.
     """
-    decimals = 2
     ticks = job["ticks"]
     metrics = job.get("metrics", {})
 
-    start_hour = pd.Timestamp(job["start_hour"])
     target_hour = pd.Timestamp(job["target_hour"])
     created_at = pd.Timestamp(job["created_at"])
-    current_interval_start = start_hour.floor("3h")
-    current_interval_end = current_interval_start + pd.Timedelta(hours=3)
     target_interval_end = target_hour + pd.Timedelta(hours=3)
+    production_prediction = job.get("production_prediction")
+    production_observed_at = job.get("production_observed_at")
 
     st.subheader("Kp Forecast")
-    st.markdown(
-        f"**Current Interval:** {current_interval_start.strftime('%H:%M')}–{current_interval_end.strftime('%H:%M UTC')}  \n"
-        f"**Forecast Target:** {target_hour.strftime('%H:%M')}–{target_interval_end.strftime('%H:%M UTC')}  \n"
-        f"**Prediction Started:** {created_at.strftime('%H:%M:%S UTC')}"
+    st.caption(
+        "Two independent products: a frozen Production Forecast (used for official model "
+        "evaluation) and an Experimental Rolling Estimate (situational awareness only). "
+        "Neither ever overwrites the other."
     )
-    st.markdown(status_badge_html(job["status"]), unsafe_allow_html=True)
+
+    # ==================== Production Forecast (Frozen) ====================
+    st.markdown("##### Production Forecast (Frozen)")
+    pc1, pc2, pc3, pc4 = st.columns(4)
+    with pc1:
+        metric_card("Prediction Generated", created_at.strftime("%H:%M:%S UTC"), "")
+    with pc2:
+        metric_card(
+            "Prediction Time",
+            "N/A" if production_observed_at is None else pd.Timestamp(production_observed_at).strftime("%H:%M UTC"),
+            "Input data timestamp — strictly before the interval, matching training",
+        )
+    with pc3:
+        metric_card(
+            "Forecast Interval", f"{target_hour.strftime('%H:%M')}–{target_interval_end.strftime('%H:%M UTC')}", ""
+        )
+    with pc4:
+        metric_card(
+            "Frozen Forecast Value",
+            "N/A" if production_prediction is None else f"{production_prediction:.2f}",
+            "Never recomputed — used for official model evaluation",
+        )
+
+    badge_key = "kp_waiting_official" if job["status"] in ("in_progress", "evaluating") else job["status"]
+    st.markdown(status_badge_html(badge_key), unsafe_allow_html=True)
     st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
 
     st.markdown(
@@ -1765,14 +1833,94 @@ def render_kp_forecast_dialog(job: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
-    st.markdown("##### Live Forecast Console")
+    # ================== Operational Rolling Estimate (Experimental) ==================
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Operational Rolling Estimate (Experimental)")
+    st.warning(
+        "⚠️ Uses whatever upstream data is freshest right now, including data from inside the "
+        "forecast interval itself — a situational-awareness read, not a calibrated forecast. "
+        "Never used for official model evaluation; see Production Forecast above for that."
+    )
 
-    def _fmt(value, dp):
-        return "N/A" if value is None else f"{value:.{dp}f}"
+    latest_tick = ticks[-1] if ticks else None
+    latest_inputs = (latest_tick.get("inputs") or {}) if latest_tick else {}
+    latest_minute_at = (
+        pd.Timestamp(latest_tick["minute_at"]) if latest_tick and latest_tick.get("minute_at") else None
+    )
+    rolling_value = latest_tick["predicted_value"] if latest_tick else None
+    drift = forecast_drift(job)
+
+    if len(ticks) >= 2:
+        rolling_diff = ticks[-1]["predicted_value"] - ticks[-2]["predicted_value"]
+        if abs(rolling_diff) < 1e-9:
+            rolling_trend = "Stable"
+        elif rolling_diff > 0:
+            rolling_trend = "Increasing"
+        else:
+            rolling_trend = "Decreasing"
+    else:
+        rolling_trend = "N/A"
+
+    def _fmt(value, dp, suffix=""):
+        return "N/A" if value is None else f"{value:.{dp}f}{suffix}"
+
+    r1, r2c, r3, r4, r5 = st.columns(5)
+    with r1:
+        metric_card("Current Time", pd.Timestamp.now(tz="UTC").strftime("%H:%M:%S UTC"), "")
+    with r2c:
+        metric_card(
+            "Latest Solar Wind Update",
+            _fmt(latest_inputs.get("speed"), 1, " km/s"),
+            "" if latest_minute_at is None else latest_minute_at.strftime("%H:%M:%S UTC"),
+        )
+    with r3:
+        metric_card(
+            "Latest IMF Update",
+            "N/A" if latest_inputs.get("bz_gsm") is None else f"Bz {latest_inputs['bz_gsm']:.2f} nT",
+            "" if latest_minute_at is None else latest_minute_at.strftime("%H:%M:%S UTC"),
+        )
+    with r4:
+        metric_card("Latest Dst", _fmt(latest_inputs.get("dst"), 1, " nT"), "")
+    with r5:
+        metric_card("Latest AE", _fmt(latest_inputs.get("ae"), 1, " nT"), "")
+
+    r6, r7, r8, r9, r10 = st.columns(5)
+    with r6:
+        metric_card(
+            "Current Rolling Estimate",
+            "N/A" if rolling_value is None else f"{rolling_value:.2f}",
+            "Experimental — not the production forecast",
+        )
+    with r7:
+        metric_card(
+            "Last Updated", "N/A" if latest_minute_at is None else latest_minute_at.strftime("%H:%M:%S UTC"), ""
+        )
+    with r8:
+        metric_card("Trend", rolling_trend, "")
+    with r9:
+        if drift is None:
+            metric_card("Prediction Drift", "N/A", "")
+        else:
+            sign = "+" if drift >= 0 else ""
+            metric_card(
+                "Prediction Drift",
+                f"{sign}{drift:.2f}",
+                "First rolling estimate to latest",
+                tooltip="How much the rolling estimate has moved as new data arrived.",
+            )
+    with r10:
+        r2_val = metrics.get("r2")
+        metric_card(
+            "Confidence",
+            model_quality_label(r2_val),
+            "Reflects the underlying model only — not calibrated for off-distribution input",
+        )
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Prediction History — Rolling Estimate Timeline")
 
     if ticks:
-        forecast_col = f"Forecast ({target_hour.strftime('%H:%M')}–{target_interval_end.strftime('%H:%M UTC')})"
+        estimate_col = f"Rolling Estimate ({target_hour.strftime('%H:%M')}–{target_interval_end.strftime('%H:%M UTC')})"
         columns = [
             "Time UTC",
             "Speed (km/s)",
@@ -1785,7 +1933,7 @@ def render_kp_forecast_dialog(job: dict) -> None:
             "Latest Dst (nT)",
             "Latest Official Kp",
             "Latest AE (nT)",
-            forecast_col,
+            estimate_col,
         ]
 
         row_html = []
@@ -1865,94 +2013,73 @@ def render_kp_forecast_dialog(job: dict) -> None:
                 x=chart_times,
                 y=[t["predicted_value"] for t in plotted],
                 mode="lines+markers",
-                name="Predicted Kp",
+                name="Rolling Estimate (Experimental)",
             )
         )
         fig.update_layout(
-            title="Kp Forecast Drift Toward Next Interval",
+            title="Rolling Estimate Timeline (Experimental)",
             height=360,
             legend_title_text="",
-            yaxis_title="Predicted Kp",
+            yaxis_title="Rolling Kp Estimate",
         )
         plot_retro(fig)
 
+    # ==================== Verification ====================
     if job["status"] in ("completed", "stopped"):
         st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
-        st.markdown("##### Forecast Summary")
+        st.markdown("##### Verification")
 
-        final_pred = ticks[-1]["predicted_value"] if ticks else None
-        avg_pred = average_prediction(job)
         actual = job["actual_value"]
-        final_error = None if (final_pred is None or actual is None) else abs(final_pred - actual)
-        avg_error = None if (avg_pred is None or actual is None) else abs(avg_pred - actual)
-        drift = forecast_drift(job)
-        prev_kp = (ticks[0].get("inputs") or {}).get("kp") if ticks else None
+        prod_err = production_error(job)
+        prod_bias = production_bias(job)
+        roll_err = rolling_final_error(job)
+        final_rolling_value = ticks[-1]["predicted_value"] if ticks else None
 
-        s1, s2, s3, s4 = st.columns(4)
-        with s1:
+        st.markdown("**Production Forecast → Official Kp** (official model evaluation)")
+        v1, v2, v3, v4 = st.columns(4)
+        with v1:
             metric_card(
-                "Current Interval",
-                f"{current_interval_start.strftime('%H:%M')}–{current_interval_end.strftime('%H:%M')}",
-                "",
+                "Frozen Forecast", "N/A" if production_prediction is None else f"{production_prediction:.2f}", ""
             )
-        with s2:
+        with v2:
             metric_card(
-                "Forecast Target", f"{target_hour.strftime('%H:%M')}–{target_interval_end.strftime('%H:%M')}", ""
-            )
-        with s3:
-            metric_card("Latest Official Kp", "N/A" if prev_kp is None else f"{prev_kp:.2f}", "")
-        with s4:
-            metric_card(
-                "Final Prediction",
-                "N/A" if final_pred is None else f"{final_pred:.2f}",
-                "Last forecast before the interval ended — the operational forecast",
-            )
-
-        s5, s6, s7, s8 = st.columns(4)
-        with s5:
-            metric_card(
-                "Average Prediction",
-                "N/A" if avg_pred is None else f"{avg_pred:.2f}",
-                "Stability indicator, not the operational forecast",
-                tooltip="Mean of every prediction generated during the session.",
-            )
-        with s6:
-            metric_card(
-                "Actual Kp",
+                "Official Kp",
                 "Pending" if actual is None else f"{actual:.2f}",
                 "" if job["status"] == "completed" else "Stopped before the interval closed",
             )
-        with s7:
+        with v3:
             metric_card(
-                "Final Prediction Error",
-                "N/A" if final_error is None else f"{final_error:.2f}",
-                "Primary operational accuracy metric",
+                "Production Error", "N/A" if prod_err is None else f"{prod_err:.2f}", "Primary official accuracy metric"
             )
-        with s8:
+        with v4:
             metric_card(
-                "Average Prediction Error",
-                "N/A" if avg_error is None else f"{avg_error:.2f}",
-                "Secondary stability metric",
+                "Production Bias",
+                "N/A" if prod_bias is None else f"{prod_bias:+.2f}",
+                "Signed — positive means the model runs high",
             )
 
-        s9, s10, s11, s12 = st.columns(4)
-        with s9:
-            if drift is None:
-                metric_card("Forecast Drift", "N/A", "")
-            else:
-                sign = "+" if drift >= 0 else ""
-                metric_card(
-                    "Forecast Drift",
-                    f"{sign}{drift:.2f}",
-                    "Final minus initial prediction",
-                    tooltip="How much the forecast moved from the first tick to the last.",
-                )
-        with s10:
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+        st.markdown("**Final Rolling Estimate → Official Kp** (research comparison only, never official)")
+        v5, v6, v7 = st.columns(3)
+        with v5:
+            metric_card(
+                "Final Rolling Estimate",
+                "N/A" if final_rolling_value is None else f"{final_rolling_value:.2f}",
+                "Experimental",
+            )
+        with v6:
+            metric_card("Official Kp", "Pending" if actual is None else f"{actual:.2f}", "")
+        with v7:
+            metric_card("Rolling Error", "N/A" if roll_err is None else f"{roll_err:.2f}", "Research only")
+
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+        m1, m2, m3 = st.columns(3)
+        with m1:
             r2 = metrics.get("r2")
             metric_card("Model Quality", model_quality_label(r2), "N/A" if r2 is None else f"R² = {r2:.4f}")
-        with s11:
+        with m2:
             metric_card("MAE", f"{metrics.get('mae', float('nan')):.3f}", "Model's typical training error")
-        with s12:
+        with m3:
             metric_card("RMSE", f"{metrics.get('rmse', float('nan')):.3f}", "")
 
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
@@ -3657,13 +3784,15 @@ def heliosphere_page(df: pd.DataFrame) -> None:
             prediction_statistics_panel("solar_wind")
 
     with tabs[1]:
-        inner = st.tabs(["Current Analysis", "Predictions", "Prediction Statistics"])
+        inner = st.tabs(["Current Analysis", "Predictions", "Prediction Statistics", "Research Laboratory"])
         with inner[0]:
             current_analysis_imf(df)
         with inner[1]:
             prediction_panel("imf", IMF_VARIABLES)
         with inner[2]:
             prediction_statistics_panel("imf")
+        with inner[3]:
+            render_imf_research_laboratory()
 
     with tabs[2]:
         st.subheader("Derived Parameters")
@@ -5707,7 +5836,7 @@ def render_quicklook_verification_tab() -> None:
 def analytics_page(df: pd.DataFrame) -> None:
     st.title("Analytics")
     st.subheader("Combined Earth Analysis")
-    inner = st.tabs(["Current Analysis", "Prediction", "AE Predictions", "Experimental Predictions"])
+    inner = st.tabs(["Current Analysis", "Prediction", "AE Predictions", "Research & Experiments"])
     with inner[0]:
         earth_analysis(df)
     with inner[1]:
@@ -5719,15 +5848,19 @@ def analytics_page(df: pd.DataFrame) -> None:
         with ae_inner[1]:
             render_quicklook_verification_tab()
     with inner[3]:
-        st.markdown(_experimental_badge_html(), unsafe_allow_html=True)
-        st.caption(
-            "Research feature: cascades Predicted AE (from the frozen AE model) into the Kp/Dst "
-            "models as an extra feature, instead of the production pipeline's observed AE. "
-            "Completely separate models and training data from the Prediction tab — for "
-            "comparison purposes only, not a replacement for it."
-        )
-        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-        prediction_panel("experimental", EXPERIMENTAL_VARIABLES)
+        research_inner = st.tabs(["Experimental Predictions", "Kp Research Laboratory"])
+        with research_inner[0]:
+            st.markdown(_experimental_badge_html(), unsafe_allow_html=True)
+            st.caption(
+                "Research feature: cascades Predicted AE (from the frozen AE model) into the Kp/Dst "
+                "models as an extra feature, instead of the production pipeline's observed AE. "
+                "Completely separate models and training data from the Prediction tab — for "
+                "comparison purposes only, not a replacement for it."
+            )
+            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+            prediction_panel("experimental", EXPERIMENTAL_VARIABLES)
+        with research_inner[1]:
+            render_kp_research_laboratory()
 
 
 def render_independent_models_tab() -> None:
@@ -5983,6 +6116,1398 @@ def render_physics_interpretation_panel(df: pd.DataFrame) -> None:
 
 
 CONCLUSION_COLORS = {"Supported": "#1f7a3a", "Not Supported": "#7a1f1f", "Inconclusive": "#7a5a1f"}
+
+
+# ==================== IMF Research Laboratory (Bz experimentation) ====================
+# Fully isolated from the Production Prediction tab — see
+# swdss.models.imf_research module docstring for the production-safety
+# contract. Nothing below ever writes to the production model files.
+
+
+def _imf_research_notes() -> None:
+    st.info(
+        "**Why Bz is hard to forecast.** Bz is fundamentally different from Solar Wind Speed or "
+        "Density: it's the *orientation* of the interplanetary magnetic field, not a scalar plasma "
+        "quantity. Its evolution depends on evolving magnetic structures — CME flux-rope rotation, "
+        "turbulence, current-sheet crossings — not just how fast or dense the plasma is. Sequence "
+        "models (LSTM/GRU) may capture this temporal magnetic evolution better than single-row "
+        "regression models, since they see how the field has been *rotating* over time, not just its "
+        "instantaneous value."
+    )
+
+
+def _imf_research_hyperparam_inputs(model_type: str, key_prefix: str) -> dict:
+    schema = HYPERPARAM_SCHEMA.get(model_type, {})
+    values = {}
+    if not schema:
+        st.caption("No tunable hyperparameters for this model.")
+        return values
+    cols = st.columns(min(len(schema), 4))
+    for i, (name, spec) in enumerate(schema.items()):
+        with cols[i % len(cols)]:
+            label = name.replace("_", " ").title()
+            if spec["type"] == "int":
+                values[name] = st.number_input(
+                    label,
+                    min_value=spec["min"],
+                    max_value=spec["max"],
+                    value=spec["default"],
+                    step=1,
+                    key=f"{key_prefix}_{model_type}_{name}",
+                )
+            else:
+                values[name] = st.number_input(
+                    label,
+                    min_value=float(spec["min"]),
+                    max_value=float(spec["max"]),
+                    value=float(spec["default"]),
+                    step=0.01,
+                    key=f"{key_prefix}_{model_type}_{name}",
+                )
+    return values
+
+
+def _imf_research_model_selector(key_prefix: str) -> str:
+    options = ALL_TRAINABLE_MODELS + FUTURE_MODELS
+
+    def _fmt(name):
+        return f"{name} (coming soon)" if name in FUTURE_MODELS else name
+
+    choice = st.selectbox("Model Architecture", options, format_func=_fmt, key=f"{key_prefix}_model_select")
+    if choice in FUTURE_MODELS:
+        st.warning(f"{choice} is a registered placeholder for future work — not trainable yet.")
+    return choice
+
+
+def _imf_research_granularity_horizon(key_prefix: str) -> tuple:
+    """Shared Forecast Granularity + Forecast Horizon control pair — the
+    axis that was missing before this redesign (see imf_research.py
+    module docstring): "Minute" targets shift(-horizon) minutes on live
+    minute data; "Hourly" targets shift(-horizon) hours on the SAME
+    historical CSVs production trains on, via the identical
+    swdss.models.features functions. Returns (granularity, horizon).
+    """
+    granularity = st.radio(
+        "Forecast Granularity", GRANULARITY_OPTIONS, horizontal=True, key=f"{key_prefix}_granularity"
+    )
+    horizon_options = MINUTE_HORIZONS if granularity == "Minute" else HOURLY_HORIZONS
+    unit = "min" if granularity == "Minute" else "hour"
+    horizon = st.radio(
+        "Forecast Horizon",
+        horizon_options,
+        format_func=lambda h: f"{h} {unit}" + ("s" if h != 1 else ""),
+        horizontal=True,
+        key=f"{key_prefix}_horizon",
+    )
+    if granularity == "Hourly":
+        st.caption("Sourced from the same 3-year historical CSVs production trains on — genuinely comparable R².")
+    else:
+        st.caption("Sourced from the live ~7-day minute-level buffer — includes the new physics features.")
+    return granularity, horizon
+
+
+def _imf_research_run_row(run: dict, best_run_id: str = None, key_prefix: str = "runs") -> None:
+    """key_prefix disambiguates widget keys when the same run is rendered
+    from more than one tab in the same script run (e.g. a trained LSTM/GRU
+    run appears in both Training Runs' full log and Sequence Models' own
+    list) — Streamlit renders every tab's content on every rerun (inactive
+    tabs are just CSS-hidden), so two calls with the same run_id would
+    otherwise register duplicate widget keys and crash.
+    """
+    m = run["metrics"]
+    is_best = run["run_id"] == best_run_id
+    with st.container(border=True):
+        c1, c2, c3, c4, c5, c6 = st.columns([0.24, 0.13, 0.13, 0.13, 0.13, 0.24])
+        with c1:
+            star = "⭐ " if is_best else ""
+            promoted_tag = " 🚀" if run.get("promoted") else ""
+            st.markdown(f"**{star}{run['model_type']}**{promoted_tag}")
+            granularity = run.get("granularity", "Minute")
+            horizon_label = run.get("horizon_label") or (f"{run.get('horizon', 1)}m" if granularity == "Minute" else f"{run.get('horizon', 1)}h")
+            seq_note = f" · seq={run['sequence_length']}{'m' if granularity == 'Minute' else 'h'}" if run.get("sequence_length") else ""
+            st.caption(
+                f"{run['target']} · {granularity} · +{horizon_label}{seq_note} · "
+                f"{pd.Timestamp(run['trained_at']).strftime('%Y-%m-%d %H:%M UTC')}"
+            )
+        with c2:
+            metric_card("R²", f"{m['r2']:.4f}", "")
+        with c3:
+            metric_card("MAE", f"{m['mae']:.3f}", "")
+        with c4:
+            metric_card("RMSE", f"{m['rmse']:.3f}", "")
+        with c5:
+            metric_card("Bias", f"{m['bias']:+.3f}", "")
+        with c6:
+            st.markdown("<div style='height: 22px;'></div>", unsafe_allow_html=True)
+            b1, b2 = st.columns(2)
+            with b1:
+                if st.button(
+                    "Promoted" if run.get("promoted") else "Promote",
+                    key=f"{key_prefix}_promote_{run['run_id']}",
+                    disabled=run.get("promoted", False),
+                    use_container_width=True,
+                ):
+                    promote_run(run["run_id"])
+                    st.toast("Marked as promoted (label only — production untouched).")
+                    st.rerun()
+            with b2:
+                if st.button("Delete", key=f"{key_prefix}_delete_{run['run_id']}", use_container_width=True):
+                    delete_run(run["run_id"])
+                    st.toast("Run deleted.")
+                    st.rerun()
+
+
+def render_imf_training_runs_tab() -> None:
+    st.caption(
+        "Train a new experimental model — any target, any granularity/horizon, any architecture "
+        "including LSTM/GRU. Every run is stored separately from the production predictor and NEVER "
+        "overwrites it — Promote only labels a run for your own tracking; wiring a model into "
+        "production is always a manual, deliberate step."
+    )
+    target_label = st.selectbox("Target Variable", list(TARGET_OPTIONS), index=0, key="imf_research_target")
+    granularity, horizon = _imf_research_granularity_horizon("train_runs")
+    model_type = _imf_research_model_selector("train_runs")
+
+    sequence_length = None
+    if model_type in SEQUENCE_MODELS:
+        unit = "minutes" if granularity == "Minute" else "hours"
+        sequence_length = st.selectbox(
+            f"Sequence Length ({unit}, look-back window — independent of the forecast horizon above)",
+            SEQUENCE_LENGTH_OPTIONS,
+            index=SEQUENCE_LENGTH_OPTIONS.index(DEFAULT_SEQUENCE_LENGTH),
+            key="train_runs_seqlen",
+        )
+
+    st.markdown("**Hyperparameters**")
+    hyperparams = _imf_research_hyperparam_inputs(model_type, "train_runs") if model_type in ALL_TRAINABLE_MODELS else {}
+
+    if st.button(
+        "🧪 Train Model", key="train_runs_train_btn", type="primary", disabled=model_type not in ALL_TRAINABLE_MODELS
+    ):
+        with st.spinner(f"Training {model_type} on {target_label} ({granularity}, +{horizon})..."):
+            try:
+                run = train_research_model(
+                    target_label,
+                    model_type,
+                    granularity=granularity,
+                    horizon=horizon,
+                    sequence_length=sequence_length,
+                    hyperparams=hyperparams,
+                )
+                st.toast(f"Trained {model_type} — R²={run['metrics']['r2']:.4f}")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Training failed: {exc}")
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Training Run Log")
+    runs = list_runs()
+    if not runs:
+        st.info("No training runs yet. Train a model above.")
+        return
+
+    filt1, filt2 = st.columns(2)
+    with filt1:
+        target_filter = st.selectbox("Filter by target", ["All"] + list(TARGET_OPTIONS), key="train_runs_filter")
+    with filt2:
+        granularity_filter = st.selectbox(
+            "Filter by granularity", ["All"] + GRANULARITY_OPTIONS, key="train_runs_granularity_filter"
+        )
+    filtered = runs
+    if target_filter != "All":
+        filtered = [r for r in filtered if r["target"] == target_filter]
+    if granularity_filter != "All":
+        filtered = [r for r in filtered if r.get("granularity", "Minute") == granularity_filter]
+    best_id = max(filtered, key=lambda r: r["metrics"]["r2"])["run_id"] if filtered else None
+    for run in filtered:
+        _imf_research_run_row(run, best_run_id=best_id, key_prefix="training_runs")
+
+
+def render_imf_model_comparison_tab() -> None:
+    st.caption(
+        "Compare trained models for a single target side by side — R²/MAE/RMSE/MAPE/Bias, best "
+        "model highlighted."
+    )
+    target_label = st.selectbox("Target", list(TARGET_OPTIONS), key="imf_compare_target")
+    granularity_filter = st.selectbox("Granularity", ["All"] + GRANULARITY_OPTIONS, key="imf_compare_granularity")
+    runs = list_runs(target_label)
+    if granularity_filter != "All":
+        runs = [r for r in runs if r.get("granularity", "Minute") == granularity_filter]
+    if not runs:
+        st.info(f"No trained models for {target_label} yet — train one in Training Runs.")
+        return
+
+    def _run_label(r):
+        gran = r.get("granularity", "Minute")
+        hz = r.get("horizon_label") or f"{r.get('horizon', 1)}{'m' if gran == 'Minute' else 'h'}"
+        return f"{r['model_type']} · {gran} +{hz} ({pd.Timestamp(r['trained_at']).strftime('%m-%d %H:%M')})"
+
+    run_labels = [_run_label(r) for r in runs]
+    default_n = min(4, len(run_labels))
+    selected = st.multiselect("Models to compare", run_labels, default=run_labels[:default_n], key="imf_compare_select")
+    chosen = [runs[run_labels.index(s)] for s in selected]
+    if not chosen:
+        st.info("Select at least one model above.")
+        return
+
+    best_id = max(chosen, key=lambda r: r["metrics"]["r2"])["run_id"]
+
+    rows = []
+    for r in chosen:
+        m = r["metrics"]
+        gran = r.get("granularity", "Minute")
+        hz = r.get("horizon_label") or f"{r.get('horizon', 1)}{'m' if gran == 'Minute' else 'h'}"
+        rows.append(
+            {
+                "Model": r["model_type"] + (" ⭐" if r["run_id"] == best_id else ""),
+                "Granularity": gran,
+                "Horizon": hz,
+                "R²": round(m["r2"], 4),
+                "MAE": round(m["mae"], 4),
+                "RMSE": round(m["rmse"], 4),
+                "MAPE (%)": round(m["mape"], 2) if m["mape"] is not None else None,
+                "Bias": round(m["bias"], 4),
+                "Trained": pd.Timestamp(r["trained_at"]).strftime("%Y-%m-%d %H:%M UTC"),
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Predicted vs. Actual / Residuals")
+    detail_label = st.selectbox("Inspect model", selected, key="imf_compare_detail")
+    detail_run = chosen[selected.index(detail_label)]
+    sample = detail_run["prediction_sample"]
+    y_true = sample["y_true"]
+    y_pred = sample["y_pred"]
+    residuals = [p - t for p, t in zip(y_pred, y_true)]
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=y_true, y=y_pred, mode="markers", marker=dict(size=4), name="Predicted vs Actual"))
+        lo, hi = min(y_true + y_pred), max(y_true + y_pred)
+        fig.add_trace(go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines", line=dict(dash="dash", color="gray"), name="Perfect"))
+        fig.update_layout(
+            title="Predicted vs. Actual (held-out test sample)", height=340, xaxis_title="Actual", yaxis_title="Predicted"
+        )
+        plot_retro(fig)
+    with col_b:
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(y=residuals, mode="markers", marker=dict(size=4), name="Residual"))
+        fig2.add_hline(y=0, line_dash="dash", line_color="gray")
+        fig2.update_layout(title="Residual Plot", height=340, yaxis_title="Predicted − Actual")
+        plot_retro(fig2)
+
+    if detail_run.get("feature_importance"):
+        st.markdown("##### Feature Importance")
+        fi_df = pd.DataFrame(detail_run["feature_importance"], columns=["Feature", "Importance"])
+        fig3 = go.Figure(go.Bar(x=fi_df["Importance"], y=fi_df["Feature"], orientation="h"))
+        fig3.update_layout(title="Top Contributing Features", height=420, yaxis=dict(autorange="reversed"))
+        plot_retro(fig3)
+    else:
+        st.caption("Feature importance not available for this model type (e.g. LSTM/GRU).")
+
+    if detail_run.get("loss_history"):
+        st.markdown("##### Training / Validation Loss")
+        lh = detail_run["loss_history"]
+        fig4 = go.Figure()
+        fig4.add_trace(go.Scatter(y=lh["loss"], mode="lines", name="Training Loss"))
+        if lh.get("val_loss"):
+            fig4.add_trace(go.Scatter(y=lh["val_loss"], mode="lines", name="Validation Loss"))
+        fig4.update_layout(title="Training / Validation Loss", height=340, xaxis_title="Epoch", yaxis_title="MSE Loss")
+        plot_retro(fig4)
+
+
+@st.cache_data(ttl=REFRESH_SECONDS, show_spinner=False)
+def _cached_imf_research_frame(granularity: str = DEFAULT_GRANULARITY):
+    """Same redundant-read problem as the Kp lab's Physics Experiments tab
+    (see _cached_kp_research_frame) — Feature Engineering and Physics
+    Experiments both call load_research_frame() unconditionally on every
+    script rerun (every 15s via auto_refresh(), and once per Kp/IMF
+    Research Lab sub-tab per rerun regardless of which is visually
+    active). Unlike the Kp lab's static historical CSV, "Minute"
+    granularity genuinely reads the LIVE ~7-day minute buffer, which does
+    update in near-real-time — so this keeps the same REFRESH_SECONDS TTL
+    the rest of the dashboard's live data uses (see load_master_data)
+    rather than caching indefinitely.
+    """
+    return load_research_frame(granularity)
+
+
+def render_imf_feature_engineering_tab() -> None:
+    st.caption(
+        "The full minute-level feature set this research pipeline trains on — baseline IMF/Solar "
+        "Wind variables plus the new physics-informed features below."
+    )
+    try:
+        frame, feature_columns = _cached_imf_research_frame()
+    except Exception as exc:
+        st.warning(f"Could not load the research feature frame: {exc}")
+        return
+
+    latest = frame.iloc[-1]
+    st.markdown("##### New Physics Features — Current Live Values")
+    physics_cols_display = [
+        ("southward_duration_min", "Southward Duration", "min", "Consecutive minutes Bz < 0"),
+        ("strong_southward_duration_min", "Strong Southward Duration", "min", "Consecutive minutes Bz < -5 nT"),
+        (
+            "integrated_southward_bz_60m",
+            "Integrated Southward Bz (60m)",
+            "nT·min",
+            "Rolling cumulative |Bz| (southward only)",
+        ),
+        ("dbz_gsm", "ΔBz (Magnetic Rotation)", "nT/min", "Minute-to-minute change in Bz"),
+        ("clock_angle_deg", "IMF Clock Angle", "°", "atan2(By, Bz) — 180° = purely southward"),
+        ("clock_angle_rate_deg", "Clock Angle Rate", "°/min", "How fast the field orientation is rotating"),
+        ("bt_persistence_60m_std", "Bt Persistence (60m std)", "nT", "Field-strength volatility over the last hour"),
+    ]
+    cols = st.columns(4)
+    for i, (col, label, unit, desc) in enumerate(physics_cols_display):
+        with cols[i % 4]:
+            val = latest.get(col)
+            metric_card(label, "N/A" if pd.isna(val) else f"{val:.2f} {unit}", desc)
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Full Feature List Used for Training")
+    st.caption(f"{len(feature_columns)} total input features per model.")
+    with st.expander("Show all feature names"):
+        st.code("\n".join(feature_columns), language="text")
+
+
+def render_imf_sequence_models_tab() -> None:
+    """Review-only: LSTM/GRU are trained from the unified form in
+    Training Runs (same target/granularity/horizon/model selector as
+    every other architecture) — this tab exists to inspect what those
+    runs actually did, especially the training/validation loss curves
+    that only sequence models produce, without duplicating the trainer.
+    """
+    st.caption(
+        "LSTM/GRU never see a single row — each prediction looks back over a window of consecutive "
+        "minutes, letting the model learn temporal patterns in how the field evolves, not just its "
+        "instantaneous state. Train new ones from the Training Runs tab (same unified form as every "
+        "other model); this tab is for reviewing what they learned."
+    )
+    if not SEQUENCE_MODELS:
+        st.warning("TensorFlow/Keras is not installed — sequence models are unavailable in this environment.")
+        return
+
+    seq_runs = [r for r in list_runs() if r["model_type"] in SEQUENCE_MODELS]
+    if not seq_runs:
+        st.info("No LSTM/GRU runs yet — train one from the Training Runs tab.")
+        return
+
+    def _run_label(r):
+        gran = r.get("granularity", "Minute")
+        hz = r.get("horizon_label") or f"{r.get('horizon', 1)}{'m' if gran == 'Minute' else 'h'}"
+        return f"{r['model_type']} · {r['target']} · {gran} +{hz} ({pd.Timestamp(r['trained_at']).strftime('%m-%d %H:%M')})"
+
+    labels = [_run_label(r) for r in seq_runs]
+    selected = st.selectbox("Inspect run", labels, key="imf_seq_inspect")
+    run = seq_runs[labels.index(selected)]
+
+    m = run["metrics"]
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        metric_card("R²", f"{m['r2']:.4f}", "")
+    with c2:
+        metric_card("MAE", f"{m['mae']:.3f}", "")
+    with c3:
+        metric_card("RMSE", f"{m['rmse']:.3f}", "")
+    with c4:
+        metric_card("MAPE", "N/A" if m["mape"] is None else f"{m['mape']:.1f}%", "")
+    with c5:
+        metric_card("Bias", f"{m['bias']:+.3f}", "")
+
+    if run.get("loss_history"):
+        lh = run["loss_history"]
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(y=lh["loss"], mode="lines", name="Training Loss"))
+        if lh.get("val_loss"):
+            fig.add_trace(go.Scatter(y=lh["val_loss"], mode="lines", name="Validation Loss"))
+        fig.update_layout(title="Training / Validation Loss", height=340, xaxis_title="Epoch", yaxis_title="MSE Loss")
+        plot_retro(fig)
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### All Sequence Model Runs")
+    for r in seq_runs:
+        _imf_research_run_row(r, key_prefix="sequence_models")
+
+
+def render_imf_physics_experiments_tab() -> None:
+    st.caption("Exploratory analysis: how do the new physics features relate to Bz's behavior historically?")
+    try:
+        frame, _ = _cached_imf_research_frame()
+    except Exception as exc:
+        st.warning(f"Could not load the research feature frame: {exc}")
+        return
+
+    feature_options = {
+        "Southward Duration (min)": "southward_duration_min",
+        "Integrated Southward Bz (60m)": "integrated_southward_bz_60m",
+        "IMF Clock Angle (°)": "clock_angle_deg",
+        "Clock Angle Rate (°/min)": "clock_angle_rate_deg",
+        "Bt Persistence Std (60m)": "bt_persistence_60m_std",
+    }
+    label = st.selectbox("Physics feature", list(feature_options), key="imf_physics_feature_select")
+    col = feature_options[label]
+
+    recent = frame.tail(24 * 60).dropna(subset=[col, "bz_gsm"])
+    if recent.empty:
+        st.info("Not enough history to plot yet.")
+        return
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(go.Scatter(x=recent.index, y=recent["bz_gsm"], name="Bz (nT)", line=dict(color="#1f5a7a")), secondary_y=False)
+    fig.add_trace(go.Scatter(x=recent.index, y=recent[col], name=label, line=dict(color="#7a1f5a")), secondary_y=True)
+    fig.update_layout(title=f"Bz vs. {label} — last {len(recent)} minutes", height=380)
+    fig.update_yaxes(title_text="Bz (nT)", secondary_y=False)
+    fig.update_yaxes(title_text=label, secondary_y=True)
+    plot_retro(fig)
+
+    next_bz = frame["bz_gsm"].shift(-1)
+    valid = frame[[col]].join(next_bz.rename("next_bz")).dropna()
+    if len(valid) > 10:
+        corr = valid[col].corr(valid["next_bz"])
+        st.caption(f"Correlation between {label} and next-minute Bz across the full history: **{corr:.3f}**")
+        fig2 = go.Figure(go.Scattergl(x=valid[col], y=valid["next_bz"], mode="markers", marker=dict(size=3, opacity=0.4)))
+        fig2.update_layout(title=f"{label} vs. Next-Minute Bz", height=380, xaxis_title=label, yaxis_title="Next-minute Bz (nT)")
+        plot_retro(fig2)
+
+
+def render_imf_hyperparameter_tuning_tab() -> None:
+    st.caption(
+        "Manually adjust and train with custom hyperparameters for the tabular models — not an "
+        "automated search, a direct way to test a specific configuration and compare it against "
+        "other runs in Model Comparison."
+    )
+    target_label = st.selectbox("Target Variable", list(TARGET_OPTIONS), key="imf_tune_target")
+    granularity, horizon = _imf_research_granularity_horizon("tune")
+    model_type = st.selectbox("Model", TABULAR_MODELS, key="imf_tune_model")
+    hyperparams = _imf_research_hyperparam_inputs(model_type, "tune")
+
+    if st.button("🧪 Train with these Hyperparameters", key="imf_tune_train_btn", type="primary"):
+        with st.spinner(f"Training {model_type}..."):
+            try:
+                run = train_research_model(
+                    target_label, model_type, granularity=granularity, horizon=horizon, hyperparams=hyperparams
+                )
+                st.success(f"Trained — R²={run['metrics']['r2']:.4f}, MAE={run['metrics']['mae']:.3f}")
+            except Exception as exc:
+                st.error(f"Training failed: {exc}")
+
+
+def render_imf_hypothesis_testing_tab() -> None:
+    st.caption(
+        "Compare two training runs — e.g. a baseline architecture vs. an experimental one — and get "
+        "a rule-based Supported/Not Supported/Inconclusive verdict. Adapted from the same philosophy "
+        "as the main Research Lab's Hypothesis Testing, but for offline training-run metrics rather "
+        "than live verified predictions."
+    )
+    runs = list_runs()
+    if len(runs) < 2:
+        st.info("Train at least two models (any target) to compare them here.")
+        return
+
+    def _run_label(r):
+        gran = r.get("granularity", "Minute")
+        hz = r.get("horizon_label") or f"{r.get('horizon', 1)}{'m' if gran == 'Minute' else 'h'}"
+        return f"{r['model_type']} — {r['target']} · {gran} +{hz} ({pd.Timestamp(r['trained_at']).strftime('%m-%d %H:%M')})"
+
+    run_labels = [_run_label(r) for r in runs]
+    col1, col2 = st.columns(2)
+    with col1:
+        baseline_label = st.selectbox("Baseline", run_labels, index=0, key="imf_hyp_baseline")
+    with col2:
+        experimental_label = st.selectbox(
+            "Experimental", run_labels, index=min(1, len(run_labels) - 1), key="imf_hyp_experimental"
+        )
+
+    if st.button("Compare", key="imf_hyp_compare_btn"):
+        baseline_run = runs[run_labels.index(baseline_label)]
+        experimental_run = runs[run_labels.index(experimental_label)]
+        if baseline_run["run_id"] == experimental_run["run_id"]:
+            st.warning("Choose two different runs.")
+            return
+        result = compare_runs(baseline_run["run_id"], experimental_run["run_id"])
+        st.markdown(
+            f"### Verdict: <span style='color:{CONCLUSION_COLORS.get(result['verdict'], '#404040')}'>{result['verdict']}</span>",
+            unsafe_allow_html=True,
+        )
+        st.write(result["explanation"])
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            metric_card("ΔR²", f"{result['delta_r2']:+.4f}", "")
+        with c2:
+            metric_card("ΔMAE", f"{result['delta_mae']:+.4f}", "")
+        with c3:
+            metric_card("Samples", f"{experimental_run['n_test_samples']}", "held-out test rows")
+
+
+def render_imf_horizon_analysis_tab() -> None:
+    """Answers the core scientific question this whole redesign exists
+    for: how does forecast skill decay with lead time? Trains (or reuses)
+    one run per horizon in the chosen granularity's full horizon list and
+    plots Horizon vs. R²/MAE/RMSE — the same sweep verified against
+    production's own bz_gsm_*h models during this redesign (1h/3h/6h/
+    12h/24h Hourly R² landed within ~0.01-0.02 of production's own
+    metrics.json values, and decayed in the identical shape).
+    """
+    st.caption(
+        "Automatically trains (or reuses existing runs for) one model per horizon and plots how "
+        "R²/MAE/RMSE change with forecast lead time — the central research question this lab exists "
+        "to answer."
+    )
+    target_label = st.selectbox("Target Variable", list(TARGET_OPTIONS), key="imf_horizon_target")
+    granularity = st.radio("Forecast Granularity", GRANULARITY_OPTIONS, horizontal=True, key="imf_horizon_granularity")
+    horizon_list = MINUTE_HORIZONS if granularity == "Minute" else HOURLY_HORIZONS
+    st.caption(f"Horizons swept: {', '.join(str(h) for h in horizon_list)} {'minutes' if granularity == 'Minute' else 'hours'}")
+    model_type = st.selectbox("Model", TABULAR_MODELS, key="imf_horizon_model")
+    reuse_existing = st.checkbox(
+        "Reuse existing runs where available (faster)", value=True, key="imf_horizon_reuse"
+    )
+
+    if st.button("📈 Run Horizon Sweep", key="imf_horizon_sweep_btn", type="primary"):
+        with st.spinner(f"Sweeping {model_type} across {len(horizon_list)} horizons for {target_label} ({granularity})..."):
+            try:
+                runs = train_horizon_sweep(target_label, model_type, granularity=granularity, reuse_existing=reuse_existing)
+                st.session_state["imf_horizon_sweep_result"] = {
+                    "target": target_label,
+                    "granularity": granularity,
+                    "model_type": model_type,
+                    "run_ids": [r["run_id"] for r in runs],
+                }
+                st.toast(f"Swept {len(runs)} horizons.")
+            except Exception as exc:
+                st.error(f"Horizon sweep failed: {exc}")
+
+    result = st.session_state.get("imf_horizon_sweep_result")
+    if not result:
+        st.info("Pick a target, granularity, and model above, then run the sweep.")
+        return
+
+    runs = [get_run(rid) for rid in result["run_ids"]]
+    runs = [r for r in runs if r is not None]
+    if not runs:
+        st.warning("Swept runs are no longer available (were they deleted?). Run the sweep again.")
+        return
+    runs = sorted(runs, key=lambda r: r.get("horizon", 1))
+
+    unit = "min" if result["granularity"] == "Minute" else "h"
+    horizon_labels = [f"{r.get('horizon', 1)}{unit}" for r in runs]
+    r2_values = [r["metrics"]["r2"] for r in runs]
+    mae_values = [r["metrics"]["mae"] for r in runs]
+    rmse_values = [r["metrics"]["rmse"] for r in runs]
+
+    st.markdown(
+        f"##### {result['model_type']} — {result['target']} ({result['granularity']}) — skill decay with lead time"
+    )
+    fig_r2 = go.Figure(go.Scatter(x=horizon_labels, y=r2_values, mode="lines+markers", name="R²"))
+    fig_r2.add_hline(y=0, line_dash="dash", line_color="gray")
+    fig_r2.update_layout(title="Horizon vs. R²", height=340, xaxis_title="Forecast Horizon", yaxis_title="R²")
+    plot_retro(fig_r2)
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        fig_mae = go.Figure(go.Scatter(x=horizon_labels, y=mae_values, mode="lines+markers", name="MAE"))
+        fig_mae.update_layout(title="Horizon vs. MAE", height=320, xaxis_title="Forecast Horizon", yaxis_title="MAE")
+        plot_retro(fig_mae)
+    with col_b:
+        fig_rmse = go.Figure(go.Scatter(x=horizon_labels, y=rmse_values, mode="lines+markers", name="RMSE"))
+        fig_rmse.update_layout(title="Horizon vs. RMSE", height=320, xaxis_title="Forecast Horizon", yaxis_title="RMSE")
+        plot_retro(fig_rmse)
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    table_rows = [
+        {
+            "Horizon": horizon_labels[i],
+            "R²": round(r2_values[i], 4),
+            "MAE": round(mae_values[i], 4),
+            "RMSE": round(rmse_values[i], 4),
+            "Test Samples": runs[i]["n_test_samples"],
+        }
+        for i in range(len(runs))
+    ]
+    st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+
+
+def render_imf_research_laboratory() -> None:
+    st.markdown("### 🧪 IMF Research Laboratory")
+    st.caption(
+        "A research environment for comparing Bz/Bt/Bx/By forecasting architectures — fully isolated "
+        "from the Production Prediction tab, which continues using the current trained production "
+        "model exactly as-is. Models trained here never overwrite it."
+    )
+    _imf_research_notes()
+
+    sub = st.tabs(
+        [
+            "Training Runs",
+            "Horizon Analysis",
+            "Model Comparison",
+            "Feature Engineering",
+            "Physics Experiments",
+            "Sequence Models",
+            "Hyperparameter Tuning",
+            "Hypothesis Testing",
+        ]
+    )
+    with sub[0]:
+        render_imf_training_runs_tab()
+    with sub[1]:
+        render_imf_horizon_analysis_tab()
+    with sub[2]:
+        render_imf_model_comparison_tab()
+    with sub[3]:
+        render_imf_feature_engineering_tab()
+    with sub[4]:
+        render_imf_physics_experiments_tab()
+    with sub[5]:
+        render_imf_sequence_models_tab()
+    with sub[6]:
+        render_imf_hyperparameter_tuning_tab()
+    with sub[7]:
+        render_imf_hypothesis_testing_tab()
+
+
+# ==================== Kp Research Laboratory ====================
+# Fully isolated from the Production Prediction tab — see
+# swdss.models.kp_research module docstring for the production-safety
+# contract. Nothing below ever writes to models/analytics/ or its
+# metrics.json. Answers "why does one model perform better than another?"
+# and "which physics actually improves Kp prediction?" — never intended
+# to replace the operational forecast.
+
+
+def _kp_research_notes() -> None:
+    st.info(
+        "**What this lab is for.** Production answers *what is the operational forecast* — this lab "
+        "answers *why* one model or feature set performs better than another. Every run trains "
+        "against the exact same target (NOAA's next official 3-hour Kp interval) and the same "
+        "3-year historical dataset production itself trains on, so results here are genuinely "
+        "comparable to production's own R²≈0.68 — not a different, easier problem."
+    )
+
+
+def _kp_research_hyperparam_inputs(model_type: str, key_prefix: str) -> dict:
+    schema = kp_research.HYPERPARAM_SCHEMA.get(model_type, {})
+    values = {}
+    if not schema:
+        st.caption("No tunable hyperparameters for this model.")
+        return values
+    cols = st.columns(min(len(schema), 4))
+    for i, (name, spec) in enumerate(schema.items()):
+        with cols[i % len(cols)]:
+            label = name.replace("_", " ").title()
+            if spec["type"] == "int":
+                values[name] = st.number_input(
+                    label, min_value=spec["min"], max_value=spec["max"], value=spec["default"], step=1,
+                    key=f"{key_prefix}_{model_type}_{name}",
+                )
+            else:
+                values[name] = st.number_input(
+                    label, min_value=float(spec["min"]), max_value=float(spec["max"]), value=float(spec["default"]),
+                    step=0.01, key=f"{key_prefix}_{model_type}_{name}",
+                )
+    return values
+
+
+def _kp_research_model_selector(key_prefix: str) -> str:
+    options = kp_research.ALL_TRAINABLE_MODELS + kp_research.FUTURE_MODELS
+
+    def _fmt(name):
+        return f"{name} (coming soon)" if name in kp_research.FUTURE_MODELS else name
+
+    choice = st.selectbox("Model Architecture", options, format_func=_fmt, key=f"{key_prefix}_model_select")
+    if choice in kp_research.FUTURE_MODELS:
+        st.warning(f"{choice} is a registered placeholder for future work — not trainable yet.")
+    return choice
+
+
+def _kp_research_feature_toggle_form(key_prefix: str, defaults: dict = None) -> dict:
+    defaults = defaults or kp_research.default_feature_toggles()
+    toggles = {}
+    cols = st.columns(len(kp_research.FEATURE_GROUP_COLUMNS))
+    for i, (group, group_cols) in enumerate(kp_research.FEATURE_GROUP_COLUMNS.items()):
+        with cols[i]:
+            st.markdown(f"**{group}**")
+            toggles[group] = {}
+            for col in group_cols:
+                label = VARIABLE_LABELS.get(col, col.replace("_", " ").title())
+                toggles[group][col] = st.checkbox(
+                    label, value=defaults.get(group, {}).get(col, True), key=f"{key_prefix}_feat_{group}_{col}"
+                )
+    return toggles
+
+
+def _kp_research_engineered_toggle_form(key_prefix: str, defaults: dict = None) -> dict:
+    defaults = defaults or kp_research.default_engineered_toggles()
+    toggles = {}
+    cols = st.columns(len(kp_research.ENGINEERED_GROUPS))
+    for i, group in enumerate(kp_research.ENGINEERED_GROUPS):
+        with cols[i]:
+            toggles[group] = st.checkbox(group, value=defaults.get(group, True), key=f"{key_prefix}_eng_{group}")
+    return toggles
+
+
+def _kp_research_physics_toggle_form(key_prefix: str, defaults: dict = None) -> dict:
+    defaults = defaults or {}
+    toggles = {}
+    cols = st.columns(3)
+    for i, name in enumerate(kp_research.PHYSICS_FEATURE_OPTIONS):
+        with cols[i % 3]:
+            toggles[name] = st.checkbox(name, value=defaults.get(name, False), key=f"{key_prefix}_phys_{name}")
+    return toggles
+
+
+def _kp_research_run_row(run: dict, best_run_id: str = None, key_prefix: str = "kp_runs") -> None:
+    """key_prefix disambiguates widget keys when the same run is rendered
+    from more than one tab in the same script run — see the identical
+    IMF lab pattern (_imf_research_run_row) this was copied from.
+    """
+    m = run["metrics"]
+    is_best = run["run_id"] == best_run_id
+    with st.container(border=True):
+        c1, c2, c3, c4, c5, c6, c7 = st.columns([0.22, 0.11, 0.11, 0.11, 0.11, 0.11, 0.23])
+        with c1:
+            star = "⭐ " if is_best else ""
+            promoted_tag = " 🚀" if run.get("promoted") else ""
+            st.markdown(f"**{star}{run['model_type']}**{promoted_tag}")
+            seq_note = f" · seq={run['sequence_length']}h" if run.get("sequence_length") else ""
+            st.caption(f"Kp{seq_note} · {pd.Timestamp(run['trained_at']).strftime('%Y-%m-%d %H:%M UTC')}")
+        with c2:
+            metric_card("R²", f"{m['r2']:.4f}", "")
+        with c3:
+            metric_card("MAE", f"{m['mae']:.3f}", "")
+        with c4:
+            metric_card("RMSE", f"{m['rmse']:.3f}", "")
+        with c5:
+            metric_card("Train Time", f"{run.get('training_time_sec', 0):.2f}s", "")
+        with c6:
+            metric_card("Predict Time", f"{run.get('prediction_time_sec', 0) * 1000:.1f}ms", "")
+        with c7:
+            st.markdown("<div style='height: 22px;'></div>", unsafe_allow_html=True)
+            b1, b2, b3 = st.columns(3)
+            with b1:
+                if st.button(
+                    "Promoted" if run.get("promoted") else "Promote",
+                    key=f"{key_prefix}_promote_{run['run_id']}",
+                    disabled=run.get("promoted", False),
+                    use_container_width=True,
+                ):
+                    kp_research.promote_run(run["run_id"])
+                    st.toast("Marked as promoted (label only — production untouched).")
+                    st.rerun()
+            with b2:
+                if st.button(
+                    "Load",
+                    key=f"{key_prefix}_load_{run['run_id']}",
+                    use_container_width=True,
+                    disabled=run["model_type"] in kp_research.SEQUENCE_MODELS,
+                ):
+                    try:
+                        model = kp_research.load_trained_model(run["run_id"])
+                        st.toast(f"Loaded {run['model_type']} model ({type(model).__name__}) into memory.")
+                    except Exception as exc:
+                        st.error(f"Load failed: {exc}")
+            with b3:
+                if st.button("Delete", key=f"{key_prefix}_delete_{run['run_id']}", use_container_width=True):
+                    kp_research.delete_run(run["run_id"])
+                    st.toast("Run deleted.")
+                    st.rerun()
+
+
+def render_kp_model_comparison_tab() -> None:
+    st.caption(
+        "Train, evaluate, and compare Kp models — every run auto-saves to its own registry (never "
+        "overwrites production) and can be reloaded via each run card's Load button. Target is "
+        "always NOAA's next official 3-hour Kp interval, identical to production's own definition."
+    )
+    model_type = _kp_research_model_selector("kp_compare")
+    with st.expander("Feature Groups", expanded=True):
+        feature_toggles = _kp_research_feature_toggle_form("kp_compare")
+    with st.expander("Engineered Features", expanded=False):
+        engineered_groups = _kp_research_engineered_toggle_form("kp_compare")
+    with st.expander("Physics Experiment Features (optional)", expanded=False):
+        physics_features = _kp_research_physics_toggle_form("kp_compare")
+
+    sequence_length = None
+    if model_type in kp_research.SEQUENCE_MODELS:
+        sequence_length = st.selectbox(
+            "Sequence Length (hours, look-back window)",
+            kp_research.SEQUENCE_LENGTH_OPTIONS,
+            index=kp_research.SEQUENCE_LENGTH_OPTIONS.index(kp_research.DEFAULT_SEQUENCE_LENGTH),
+            key="kp_compare_seqlen",
+        )
+
+    st.markdown("**Hyperparameters**")
+    hyperparams = (
+        _kp_research_hyperparam_inputs(model_type, "kp_compare") if model_type in kp_research.ALL_TRAINABLE_MODELS else {}
+    )
+    notes = st.text_input("Notes (optional)", key="kp_compare_notes")
+
+    if st.button(
+        "🧪 Train Model", key="kp_compare_train_btn", type="primary",
+        disabled=model_type not in kp_research.ALL_TRAINABLE_MODELS,
+    ):
+        with st.spinner(f"Training {model_type}..."):
+            try:
+                run = kp_research.train_kp_research_model(
+                    model_type,
+                    feature_toggles=feature_toggles,
+                    engineered_groups=engineered_groups,
+                    physics_features=physics_features,
+                    sequence_length=sequence_length,
+                    hyperparams=hyperparams,
+                    notes=notes,
+                )
+                st.toast(f"Trained {model_type} — R²={run['metrics']['r2']:.4f}")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Training failed: {exc}")
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Run Log")
+    runs = kp_research.list_runs()
+    if not runs:
+        st.info("No training runs yet. Train a model above.")
+        return
+    best_id = max(runs, key=lambda r: r["metrics"]["r2"])["run_id"]
+    for run in runs[:10]:
+        _kp_research_run_row(run, best_run_id=best_id, key_prefix="kp_compare")
+    if len(runs) > 10:
+        st.caption(f"Showing 10 most recent of {len(runs)} runs — see Experiment Tracking for the full history.")
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Compare Models")
+
+    def _run_label(r):
+        seq = f" seq={r['sequence_length']}h" if r.get("sequence_length") else ""
+        return f"{r['model_type']}{seq} ({pd.Timestamp(r['trained_at']).strftime('%m-%d %H:%M')})"
+
+    run_labels = [_run_label(r) for r in runs]
+    default_n = min(4, len(run_labels))
+    selected = st.multiselect("Models to compare", run_labels, default=run_labels[:default_n], key="kp_compare_select")
+    chosen = [runs[run_labels.index(s)] for s in selected]
+    if not chosen:
+        st.info("Select at least one model above.")
+        return
+
+    best_chosen_id = max(chosen, key=lambda r: r["metrics"]["r2"])["run_id"]
+    rows = []
+    for r in chosen:
+        m = r["metrics"]
+        rows.append(
+            {
+                "Model": r["model_type"] + (" ⭐" if r["run_id"] == best_chosen_id else ""),
+                "R²": round(m["r2"], 4),
+                "MAE": round(m["mae"], 4),
+                "RMSE": round(m["rmse"], 4),
+                "MAPE (%)": round(m["mape"], 2) if m["mape"] is not None else None,
+                "Bias": round(m["bias"], 4),
+                "Training Time (s)": round(r.get("training_time_sec", 0), 3),
+                "Prediction Time (ms)": round(r.get("prediction_time_sec", 0) * 1000, 2),
+                "Trained": pd.Timestamp(r["trained_at"]).strftime("%Y-%m-%d %H:%M UTC"),
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Predicted vs. Actual / Residuals / Feature Importance")
+    detail_label = st.selectbox("Inspect model", selected, key="kp_compare_detail")
+    detail_run = chosen[selected.index(detail_label)]
+    sample = detail_run["prediction_sample"]
+    y_true = sample["y_true"]
+    y_pred = sample["y_pred"]
+    residuals = [p - t for p, t in zip(y_pred, y_true)]
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=y_true, y=y_pred, mode="markers", marker=dict(size=4), name="Predicted vs Actual"))
+        lo, hi = min(y_true + y_pred), max(y_true + y_pred)
+        fig.add_trace(go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines", line=dict(dash="dash", color="gray"), name="Perfect"))
+        fig.update_layout(
+            title="Predicted vs. Actual (held-out test sample)", height=340, xaxis_title="Actual Kp", yaxis_title="Predicted Kp"
+        )
+        plot_retro(fig, key="kp_compare_pred_actual")
+    with col_b:
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(y=residuals, mode="markers", marker=dict(size=4), name="Residual"))
+        fig2.add_hline(y=0, line_dash="dash", line_color="gray")
+        fig2.update_layout(title="Residual Plot", height=340, yaxis_title="Predicted − Actual")
+        plot_retro(fig2, key="kp_compare_residual")
+
+    if detail_run.get("feature_importance"):
+        st.markdown("##### Feature Importance (Top 20)")
+        fi_df = pd.DataFrame(detail_run["feature_importance"], columns=["Feature", "Importance"])
+        fig3 = go.Figure(go.Bar(x=fi_df["Importance"], y=fi_df["Feature"], orientation="h"))
+        fig3.update_layout(title="Top Contributing Features", height=420, yaxis=dict(autorange="reversed"))
+        plot_retro(fig3, key="kp_compare_feature_importance")
+    else:
+        st.caption("Feature importance not available for this model type (e.g. SVR, LSTM/GRU).")
+
+    if detail_run.get("loss_history"):
+        st.markdown("##### Training / Validation Loss")
+        lh = detail_run["loss_history"]
+        fig4 = go.Figure()
+        fig4.add_trace(go.Scatter(y=lh["loss"], mode="lines", name="Training Loss"))
+        if lh.get("val_loss"):
+            fig4.add_trace(go.Scatter(y=lh["val_loss"], mode="lines", name="Validation Loss"))
+        fig4.update_layout(title="Training / Validation Loss", height=340, xaxis_title="Epoch", yaxis_title="MSE Loss")
+        plot_retro(fig4, key="kp_compare_loss")
+
+
+def render_kp_feature_ablation_tab() -> None:
+    st.caption(
+        "Trains a Full Model (every feature group + every engineered group enabled) then retrains "
+        "once per unit with just that one disabled — ranked by how much R² drops when removed, i.e. "
+        "how much the full model actually relies on it. This is leave-one-out, not the cumulative "
+        "'enable Ey, then enable VBz, ...' style — a cumulative sweep's deltas depend on the order "
+        "features are added (whichever goes first tends to look most important merely by going "
+        "first), whereas leave-one-out is order-independent. Physics-experiment features are tested "
+        "individually in Hypothesis Testing instead."
+    )
+    model_type = st.selectbox("Model", kp_research.TABULAR_MODELS, key="kp_ablation_model")
+    if st.button("🔬 Run Feature Ablation Sweep", key="kp_ablation_run_btn", type="primary"):
+        n_units = len(kp_research.FEATURE_ABLATION_UNITS) + 1
+        with st.spinner(f"Training {n_units} models ({model_type})..."):
+            try:
+                result = kp_research.run_feature_ablation_sweep(model_type)
+                st.session_state["kp_ablation_result"] = result
+                st.toast("Feature ablation sweep complete.")
+            except Exception as exc:
+                st.error(f"Ablation sweep failed: {exc}")
+
+    result = st.session_state.get("kp_ablation_result")
+    if not result:
+        st.info("Pick a model above, then run the sweep.")
+        return
+
+    st.markdown(f"##### {result['model_type']} — Full Model R² = {result['full_r2']:.4f}")
+    ranked = result["ranked"]
+    fig = go.Figure(
+        go.Bar(
+            x=[r["delta_r2"] for r in ranked],
+            y=[r["unit"] for r in ranked],
+            orientation="h",
+            marker_color=["#1f7a3a" if r["delta_r2"] >= 0 else "#7a1f1f" for r in ranked],
+        )
+    )
+    fig.update_layout(
+        title="R² Drop When Removed — Ranked Feature Group Contribution",
+        height=380,
+        xaxis_title="ΔR² (Full Model − Without This Group)",
+        yaxis=dict(autorange="reversed"),
+    )
+    plot_retro(fig, key="kp_ablation_bar")
+
+    table_rows = [
+        {
+            "Rank": i + 1,
+            "Feature Group": r["unit"].replace("Without ", ""),
+            "R² Without": round(r["r2"], 4),
+            "ΔR² (contribution)": round(r["delta_r2"], 4),
+            "MAE Without": round(r["mae"], 4),
+        }
+        for i, r in enumerate(ranked)
+    ]
+    st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+    st.caption(
+        f"Swept at {pd.Timestamp(result['swept_at']).strftime('%Y-%m-%d %H:%M UTC')} — a positive ΔR² "
+        "means removing that group made the model worse (it was contributing); negative means the "
+        "model did slightly better without it on this particular held-out split."
+    )
+
+
+@st.cache_data(ttl=REFRESH_SECONDS, show_spinner=False)
+def _cached_kp_research_frame(feature_toggles: dict = None, engineered_groups: dict = None, physics_features: dict = None):
+    """Read-only exploratory calls into kp_research.load_kp_research_frame()
+    (e.g. the Physics Experiments tab) re-run on every script rerun — every
+    15s via the app-wide auto_refresh(), plus once per Kp Research Lab
+    sub-tab per rerun since st.tabs() executes every tab body regardless of
+    which one is visually active — even though the underlying
+    analytics_features.csv is a static historical file that never changes
+    within a session. Caching here eliminates that redundant CSV read +
+    physics-feature recomputation with zero staleness risk (the source
+    data genuinely doesn't change). NEVER used by train_kp_research_model
+    itself — training always calls the uncached engine function directly,
+    since that call only happens once per explicit Train click, not on
+    every idle rerun.
+    """
+    return kp_research.load_kp_research_frame(feature_toggles, engineered_groups, physics_features)
+
+
+def render_kp_physics_experiments_tab() -> None:
+    st.caption(
+        "Exploratory analysis: how does each individual physics-derived feature relate to Kp's "
+        "behavior historically? Enable one to inspect it, or quick-train a model with just that one "
+        "feature added on top of the full default feature set."
+    )
+    label = st.selectbox("Physics feature", kp_research.PHYSICS_FEATURE_OPTIONS, key="kp_physics_feature_select")
+
+    try:
+        base_frame, base_cols = _cached_kp_research_frame()
+        frame, cols_with = _cached_kp_research_frame(physics_features={label: True})
+    except Exception as exc:
+        st.warning(f"Could not load the research feature frame: {exc}")
+        return
+
+    new_cols = [c for c in cols_with if c not in base_cols]
+    if not new_cols:
+        st.warning("Could not resolve this feature's column name.")
+        return
+    col = new_cols[-1]
+
+    latest = frame[col].dropna()
+    if latest.empty:
+        st.info("Not enough history to compute this feature yet.")
+        return
+    metric_card(label, f"{latest.iloc[-1]:.3f}", f"Latest hourly value ({latest.index[-1].strftime('%Y-%m-%d %H:%M UTC')})")
+
+    recent = frame.tail(24 * 30).dropna(subset=[col, "kp"])
+    if not recent.empty:
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        fig.add_trace(go.Scatter(x=recent.index, y=recent["kp"], name="Kp", line=dict(color="#1f5a7a")), secondary_y=False)
+        fig.add_trace(go.Scatter(x=recent.index, y=recent[col], name=label, line=dict(color="#7a1f5a")), secondary_y=True)
+        fig.update_layout(title=f"Kp vs. {label} — last {len(recent)} hours", height=380)
+        fig.update_yaxes(title_text="Kp", secondary_y=False)
+        fig.update_yaxes(title_text=label, secondary_y=True)
+        plot_retro(fig, key=f"kp_physics_timeseries_{col}")
+
+    next_target = kp_research.build_kp_interval_target(frame)
+    valid = frame[[col]].join(next_target.rename("next_kp")).dropna()
+    if len(valid) > 10:
+        corr = valid[col].corr(valid["next_kp"])
+        st.caption(f"Correlation between {label} and the next official Kp interval, across the full history: **{corr:.3f}**")
+        fig2 = go.Figure(go.Scattergl(x=valid[col], y=valid["next_kp"], mode="markers", marker=dict(size=3, opacity=0.4)))
+        fig2.update_layout(title=f"{label} vs. Next Kp Interval", height=380, xaxis_title=label, yaxis_title="Next official Kp interval")
+        plot_retro(fig2, key=f"kp_physics_corr_{col}")
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    if st.button(f"🧪 Quick-Train Linear Regression with {label} added", key="kp_physics_quick_train"):
+        with st.spinner("Training..."):
+            try:
+                run = kp_research.train_kp_research_model(
+                    "Linear Regression", physics_features={label: True}, notes=f"Physics Experiments — quick test of {label}"
+                )
+                st.success(
+                    f"Trained — R²={run['metrics']['r2']:.4f}, MAE={run['metrics']['mae']:.3f} "
+                    "(compare against the Feature Ablation / Model Comparison full-model baseline)."
+                )
+            except Exception as exc:
+                st.error(f"Training failed: {exc}")
+
+
+def render_kp_sequence_models_tab() -> None:
+    st.caption(
+        "LSTM/GRU look back over a window of consecutive hours (Sequence Length) rather than a "
+        "single row, letting the model learn how Kp's drivers have been evolving, not just their "
+        "instantaneous values. Trains in an isolated subprocess (see swdss.models.kp_research) — "
+        "TensorFlow cannot safely share a process with this lab's scikit-learn/XGBoost/LightGBM/"
+        "CatBoost imports."
+    )
+    if not kp_research.SEQUENCE_MODELS:
+        st.warning("TensorFlow/Keras is not installed — sequence models are unavailable in this environment.")
+        return
+
+    model_type = st.selectbox("Model", kp_research.SEQUENCE_MODELS, key="kp_seq_model")
+    sequence_length = st.selectbox(
+        "Sequence Length (hours)",
+        kp_research.SEQUENCE_LENGTH_OPTIONS,
+        index=kp_research.SEQUENCE_LENGTH_OPTIONS.index(kp_research.DEFAULT_SEQUENCE_LENGTH),
+        key="kp_seq_seqlen",
+    )
+    with st.expander("Feature Groups", expanded=False):
+        feature_toggles = _kp_research_feature_toggle_form("kp_seq")
+    hyperparams = _kp_research_hyperparam_inputs(model_type, "kp_seq")
+
+    if st.button("🧪 Train Sequence Model", key="kp_seq_train_btn", type="primary"):
+        with st.spinner(f"Training {model_type} (seq={sequence_length}h) — isolated subprocess, ~10-30s..."):
+            try:
+                run = kp_research.train_kp_research_model(
+                    model_type,
+                    feature_toggles=feature_toggles,
+                    sequence_length=sequence_length,
+                    hyperparams=hyperparams,
+                    notes="Sequence Models tab",
+                )
+                st.toast(f"Trained {model_type} — R²={run['metrics']['r2']:.4f}")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Training failed: {exc}")
+
+    all_runs = kp_research.list_runs()
+    seq_runs = [r for r in all_runs if r["model_type"] in kp_research.SEQUENCE_MODELS]
+    tabular_runs = [r for r in all_runs if r["model_type"] not in kp_research.SEQUENCE_MODELS]
+    if not seq_runs:
+        st.info("No LSTM/GRU runs yet — train one above.")
+        return
+
+    best_seq = max(seq_runs, key=lambda r: r["metrics"]["r2"])
+    if tabular_runs:
+        best_tabular = max(tabular_runs, key=lambda r: r["metrics"]["r2"])
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            metric_card("Best Sequence Model R²", f"{best_seq['metrics']['r2']:.4f}", best_seq["model_type"])
+        with c2:
+            metric_card("Best Tabular Model R²", f"{best_tabular['metrics']['r2']:.4f}", best_tabular["model_type"])
+        with c3:
+            diff = best_seq["metrics"]["r2"] - best_tabular["metrics"]["r2"]
+            metric_card("Sequence Advantage", f"{diff:+.4f}", "Positive = sequence models outperform tabular")
+
+    def _run_label(r):
+        return f"{r['model_type']} seq={r['sequence_length']}h ({pd.Timestamp(r['trained_at']).strftime('%m-%d %H:%M')})"
+
+    labels = [_run_label(r) for r in seq_runs]
+    selected = st.selectbox("Inspect run", labels, key="kp_seq_inspect")
+    run = seq_runs[labels.index(selected)]
+    m = run["metrics"]
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        metric_card("R²", f"{m['r2']:.4f}", "")
+    with c2:
+        metric_card("MAE", f"{m['mae']:.3f}", "")
+    with c3:
+        metric_card("RMSE", f"{m['rmse']:.3f}", "")
+    with c4:
+        metric_card("MAPE", "N/A" if m["mape"] is None else f"{m['mape']:.1f}%", "")
+    with c5:
+        metric_card("Bias", f"{m['bias']:+.3f}", "")
+
+    if run.get("loss_history"):
+        lh = run["loss_history"]
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(y=lh["loss"], mode="lines", name="Training Loss"))
+        if lh.get("val_loss"):
+            fig.add_trace(go.Scatter(y=lh["val_loss"], mode="lines", name="Validation Loss"))
+        fig.update_layout(title="Training / Validation Loss", height=340, xaxis_title="Epoch", yaxis_title="MSE Loss")
+        plot_retro(fig, key="kp_seq_loss")
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### All Sequence Model Runs")
+    for r in seq_runs:
+        _kp_research_run_row(r, key_prefix="kp_seq")
+
+
+def render_kp_experiment_tracking_tab() -> None:
+    st.caption(
+        "Every experiment ever run in this lab — full configuration and results, for reproducibility. "
+        "Filter, inspect, promote, or delete any run."
+    )
+    runs = kp_research.list_runs()
+    if not runs:
+        st.info("No experiments recorded yet — train a model in any other tab.")
+        return
+
+    model_filter = st.selectbox("Filter by model", ["All"] + kp_research.ALL_TRAINABLE_MODELS, key="kp_track_model_filter")
+    filtered = runs if model_filter == "All" else [r for r in runs if r["model_type"] == model_filter]
+    st.caption(f"{len(filtered)} of {len(runs)} total experiments")
+
+    rows = []
+    for r in filtered:
+        feat_summary = ", ".join(g for g, cols in r.get("feature_toggles", {}).items() if all(cols.values())) or "partial"
+        physics_on = ", ".join(k for k, v in (r.get("physics_features") or {}).items() if v) or "None"
+        rows.append(
+            {
+                "Timestamp": pd.Timestamp(r["trained_at"]).strftime("%Y-%m-%d %H:%M UTC"),
+                "Model": r["model_type"],
+                "Feature Groups (fully on)": feat_summary,
+                "Physics Features": physics_on,
+                "Seq Len": str(r["sequence_length"]) + "h" if r.get("sequence_length") else "—",
+                "Train N": r["n_train_samples"],
+                "Test N": r["n_test_samples"],
+                "R²": round(r["metrics"]["r2"], 4),
+                "MAE": round(r["metrics"]["mae"], 4),
+                "RMSE": round(r["metrics"]["rmse"], 4),
+                "MAPE (%)": round(r["metrics"]["mape"], 2) if r["metrics"]["mape"] is not None else None,
+                "Bias": round(r["metrics"]["bias"], 4),
+                "Train Time (s)": round(r.get("training_time_sec", 0), 3),
+                "Notes": r.get("notes", ""),
+                "Promoted": "🚀" if r.get("promoted") else "",
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Manage Runs")
+    for r in filtered[:15]:
+        _kp_research_run_row(r, key_prefix="kp_track")
+    if len(filtered) > 15:
+        st.caption(f"Showing 15 most recent of {len(filtered)}.")
+
+
+def render_kp_hypothesis_testing_tab() -> None:
+    st.caption(
+        "Fixed, reproducible hypotheses: each trains a baseline WITHOUT the tested feature and an "
+        "experimental run WITH it (everything else at defaults), then reports ΔR²/ΔMAE/ΔRMSE and an "
+        "Accept/Reject verdict (Accept requires ΔR² ≥ "
+        f"{kp_research.HYPOTHESIS_ACCEPT_THRESHOLD_R2})."
+    )
+    hypothesis_label = st.selectbox("Hypothesis", list(kp_research.HYPOTHESIS_DEFINITIONS), key="kp_hyp_select")
+    model_type = st.selectbox("Model", kp_research.TABULAR_MODELS, key="kp_hyp_model")
+
+    if st.button("🔬 Run Hypothesis Test", key="kp_hyp_run_btn", type="primary"):
+        with st.spinner(f"Testing: {hypothesis_label}..."):
+            try:
+                result = kp_research.run_hypothesis_test(hypothesis_label, model_type)
+                st.session_state["kp_hyp_last_result"] = result
+                st.toast(f"{result['verdict']} — ΔR²={result['delta_r2']:+.4f}")
+            except Exception as exc:
+                st.error(f"Hypothesis test failed: {exc}")
+
+    result = st.session_state.get("kp_hyp_last_result")
+    if result and result["hypothesis"] == hypothesis_label:
+        color = "#1f7a3a" if result["verdict"] == "Accept" else "#7a1f1f"
+        st.markdown(f"### Verdict: <span style='color:{color}'>{result['verdict']}</span>", unsafe_allow_html=True)
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            metric_card("ΔR²", f"{result['delta_r2']:+.4f}", "")
+        with c2:
+            metric_card("ΔMAE", f"{result['delta_mae']:+.4f}", "")
+        with c3:
+            metric_card("ΔRMSE", f"{result['delta_rmse']:+.4f}", "")
+        with c4:
+            metric_card("Baseline → Experimental R²", f"{result['baseline_r2']:.4f} → {result['experimental_r2']:.4f}", "")
+
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Hypothesis Test History")
+    results = kp_research.list_hypothesis_results()
+    if not results:
+        st.info("No hypothesis tests run yet.")
+        return
+    rows = [
+        {
+            "Hypothesis": r["hypothesis"],
+            "Model": r["model_type"],
+            "Verdict": r["verdict"],
+            "ΔR²": round(r["delta_r2"], 4),
+            "ΔMAE": round(r["delta_mae"], 4),
+            "ΔRMSE": round(r["delta_rmse"], 4),
+            "Tested": pd.Timestamp(r["tested_at"]).strftime("%Y-%m-%d %H:%M UTC"),
+        }
+        for r in results
+    ]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+def render_kp_visualization_tab() -> None:
+    st.caption(
+        "Cross-experiment views: how R² has moved across every run in this lab, which model "
+        "architecture performs best overall, and a full diagnostic breakdown for any single run."
+    )
+    runs = kp_research.list_runs()
+    if not runs:
+        st.info("No experiments yet.")
+        return
+
+    runs_sorted = sorted(runs, key=lambda r: r["trained_at"])
+    fig = go.Figure(
+        go.Scatter(
+            x=[pd.Timestamp(r["trained_at"]) for r in runs_sorted],
+            y=[r["metrics"]["r2"] for r in runs_sorted],
+            mode="markers+lines",
+            text=[r["model_type"] for r in runs_sorted],
+            name="R² over time",
+        )
+    )
+    fig.update_layout(title="Experiment History — R² Over Time", height=360, xaxis_title="Trained At", yaxis_title="R²")
+    plot_retro(fig, key="kp_viz_history")
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    by_model: dict = {}
+    for r in runs:
+        by_model.setdefault(r["model_type"], []).append(r["metrics"]["r2"])
+    model_avg = {m: sum(v) / len(v) for m, v in by_model.items()}
+    fig2 = go.Figure(go.Bar(x=list(model_avg.keys()), y=list(model_avg.values())))
+    fig2.update_layout(title="Average R² by Model Architecture (across all runs)", height=360, yaxis_title="Mean R²")
+    plot_retro(fig2, key="kp_viz_model_avg")
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Inspect a Single Run")
+
+    def _run_label(r):
+        seq = f" seq={r['sequence_length']}h" if r.get("sequence_length") else ""
+        return f"{r['model_type']}{seq} — R²={r['metrics']['r2']:.4f} ({pd.Timestamp(r['trained_at']).strftime('%m-%d %H:%M')})"
+
+    labels = [_run_label(r) for r in runs]
+    selected = st.selectbox("Run", labels, key="kp_viz_run_select")
+    run = runs[labels.index(selected)]
+    sample = run["prediction_sample"]
+    y_true, y_pred = sample["y_true"], sample["y_pred"]
+    residuals = [p - t for p, t in zip(y_pred, y_true)]
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        fig3 = go.Figure()
+        fig3.add_trace(go.Scatter(x=y_true, y=y_pred, mode="markers", marker=dict(size=4), name="Predicted vs Actual"))
+        lo, hi = min(y_true + y_pred), max(y_true + y_pred)
+        fig3.add_trace(go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines", line=dict(dash="dash", color="gray"), name="Perfect"))
+        fig3.update_layout(title="Predicted vs. Actual", height=320)
+        plot_retro(fig3, key="kp_viz_pred_actual")
+    with col_b:
+        fig4 = go.Figure(go.Scatter(y=residuals, mode="markers", marker=dict(size=4)))
+        fig4.add_hline(y=0, line_dash="dash", line_color="gray")
+        fig4.update_layout(title="Residual Plot", height=320)
+        plot_retro(fig4, key="kp_viz_residual")
+
+    if run.get("feature_importance"):
+        fi_df = pd.DataFrame(run["feature_importance"][:15], columns=["Feature", "Importance"])
+        fig5 = go.Figure(go.Bar(x=fi_df["Importance"], y=fi_df["Feature"], orientation="h"))
+        fig5.update_layout(title="Top 15 Feature Importance", height=380, yaxis=dict(autorange="reversed"))
+        plot_retro(fig5, key="kp_viz_feature_importance")
+
+    if run.get("loss_history"):
+        lh = run["loss_history"]
+        fig6 = go.Figure()
+        fig6.add_trace(go.Scatter(y=lh["loss"], mode="lines", name="Training Loss"))
+        if lh.get("val_loss"):
+            fig6.add_trace(go.Scatter(y=lh["val_loss"], mode="lines", name="Validation Loss"))
+        fig6.update_layout(title="Learning Curve", height=320)
+        plot_retro(fig6, key="kp_viz_loss")
+
+
+def render_kp_research_laboratory() -> None:
+    st.markdown("### 🧪 Kp Research Laboratory")
+    st.caption(
+        "A scientific experimentation platform for Kp forecasting — fully isolated from the "
+        "Production Prediction tab, which continues using the current trained production model "
+        "exactly as-is. Nothing trained here overwrites it; Promote only labels a run for your own "
+        "tracking, wiring a model into production is always a manual, deliberate step."
+    )
+    _kp_research_notes()
+    with st.expander("Future Research — planned architecture extensions"):
+        st.write(", ".join(kp_research.FUTURE_MODELS))
+        st.caption(
+            "Registered as disabled entries in the model selector now, so adding a real "
+            "implementation later never requires redesigning this interface."
+        )
+
+    sub = st.tabs(
+        [
+            "Model Comparison",
+            "Feature Ablation",
+            "Physics Experiments",
+            "Sequence Models",
+            "Experiment Tracking",
+            "Hypothesis Testing",
+            "Visualization",
+        ]
+    )
+    with sub[0]:
+        render_kp_model_comparison_tab()
+    with sub[1]:
+        render_kp_feature_ablation_tab()
+    with sub[2]:
+        render_kp_physics_experiments_tab()
+    with sub[3]:
+        render_kp_sequence_models_tab()
+    with sub[4]:
+        render_kp_experiment_tracking_tab()
+    with sub[5]:
+        render_kp_hypothesis_testing_tab()
+    with sub[6]:
+        render_kp_visualization_tab()
+
 
 _HYPOTHESIS_DATASET_OPTIONS = ["analytics", "ae", "experimental"]
 _HYPOTHESIS_VARIABLE_OPTIONS = ["kp", "dst", "ae"]

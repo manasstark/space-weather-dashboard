@@ -54,7 +54,7 @@ DATASET_JOBS = {
     ),
     "kp": DatasetJob(
         name="kp",
-        cadence_seconds=3 * 60 * 60,
+        cadence_seconds=30 * 60,
         cleaner=clean_kp,
     ),
 }
