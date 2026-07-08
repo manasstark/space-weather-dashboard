@@ -13,33 +13,28 @@ ROLLING_WINDOW = 24
 
 
 def add_lag_features(df: pd.DataFrame, columns: list[str], lags: list[int] = LAGS) -> list[str]:
-    created = []
+    new_cols = {}
     for column in columns:
         for lag in lags:
             name = f"{column}_lag{lag}h"
-            df[name] = df[column].shift(lag)
-            created.append(name)
-    return created
+            new_cols[name] = df[column].shift(lag)
+    df[list(new_cols.keys())] = pd.DataFrame(new_cols, index=df.index)
+    return list(new_cols.keys())
 
 
 def add_rolling_features(df: pd.DataFrame, columns: list[str], window: int = ROLLING_WINDOW) -> list[str]:
-    created = []
+    new_cols = {}
     for column in columns:
-        mean_name = f"{column}_{window}h"
-        std_name = f"{column}_{window}h_std"
-        df[mean_name] = df[column].rolling(window).mean()
-        df[std_name] = df[column].rolling(window).std()
-        created.extend([mean_name, std_name])
-    return created
+        new_cols[f"{column}_{window}h"] = df[column].rolling(window).mean()
+        new_cols[f"{column}_{window}h_std"] = df[column].rolling(window).std()
+    df[list(new_cols.keys())] = pd.DataFrame(new_cols, index=df.index)
+    return list(new_cols.keys())
 
 
 def add_change_features(df: pd.DataFrame, columns: list[str]) -> list[str]:
-    created = []
-    for column in columns:
-        name = f"{column}_change"
-        df[name] = df[column].diff()
-        created.append(name)
-    return created
+    new_cols = {f"{column}_change": df[column].diff() for column in columns}
+    df[list(new_cols.keys())] = pd.DataFrame(new_cols, index=df.index)
+    return list(new_cols.keys())
 
 
 def add_derived_physics_features(df: pd.DataFrame) -> list[str]:

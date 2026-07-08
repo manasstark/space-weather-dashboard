@@ -35,6 +35,19 @@ Built as a portfolio project to practice professional software development, data
 
 ---
 
+## ⚠️ Testing Phase Notice
+
+**This project is currently in active testing and development.** Core features are functional and working, but the system is still being stress-tested, validated, and refined. If you're reviewing this:
+
+- Live prediction jobs, research labs, and verification pipelines are operational but may have rough edges
+- Some features (AE Quicklook, Kyoto WDC verification, Kp/AE Research Labs) are newly built and under active validation
+- Data displayed is real — pulled from NOAA SWPC, NASA DONKI, and Kyoto WDC — not mocked or simulated
+- If something looks off or broken, it is likely being actively worked on
+
+Feedback is welcome. Full public deployment is a planned next step once testing is complete.
+
+---
+
 ## Overview
 
 The project tracks the full Sun-to-Earth space weather chain — solar activity, solar wind, the interplanetary magnetic field, and the resulting geomagnetic response — using real NOAA SWPC and NASA DONKI data. It started as a series of exploratory Jupyter notebooks and has since grown into:
@@ -174,8 +187,8 @@ dashboard/home.py
 | --- | --- | --- |
 | Solar Wind | 1 minute | retained at native minute resolution |
 | IMF | 1 minute | retained at native minute resolution |
-| Dst | 1 hour | native cadence |
-| Kp | 3 hours | forward-filled to hourly in the master table |
+| Dst | 5 minutes | NOAA publishes updates roughly every few minutes; polling at 5 min catches new values quickly |
+| Kp | 15 minutes | NOAA publishes a new official Kp every 3 hours; 15-min polling reduces the delay before a freshly-published value is fetched |
 | Solar Events | 30 minutes | appended + deduplicated (NOAA only returns a recent snapshot per call) |
 | CME (DONKI) | 1 hour | rolling 30-day fetch each cycle |
 | F10.7 | 24 hours | NOAA's own file already covers a monthly window |
@@ -414,14 +427,17 @@ Both share a dedicated dialog UI distinct from the standalone engine's pipeline-
 
 ## Running the Project
 
+Open two terminal windows from the project root.
+
+**Terminal 1 — Live data updater** (keep this running at all times):
 ```bash
-# 1. Activate the project's virtual environment
-source venv/bin/activate
-
-# 2. Start the live data updater (refreshes all datasets on their own cadences)
 PYTHONPATH=src venv/bin/python3 -m swdss.features.live_update
+```
 
-# 3. In a separate terminal, launch the dashboard
+Refreshes all 7 datasets on their own cadences (Solar Wind/IMF every 60s, Dst every 5 min, Kp every 15 min, Solar Events every 30 min, CME every 1h, F10.7 every 24h), rebuilds the master feature table, and ticks all active prediction jobs in the background — jobs advance even if the dashboard is on a different page or closed entirely.
+
+**Terminal 2 — Dashboard**:
+```bash
 venv/bin/python3 -m streamlit run dashboard/home.py
 ```
 
@@ -431,7 +447,60 @@ To (re)train the prediction models from scratch:
 PYTHONPATH=src venv/bin/python3 -m swdss.models.train
 ```
 
-This retrains all 35 models (3 Solar Wind + 4 IMF variables × 5 horizons), benchmarks all three algorithms per combination, and writes the selected models plus `metrics.json` into `models/<dataset>/`.
+This retrains all 62 production models (Solar Wind × 3, IMF × 4, Kp, Dst, AE, Analytics, Experimental — all 5 horizons each), benchmarks Linear Regression / Random Forest / XGBoost per combination, and writes the selected models plus `metrics.json` into `models/<dataset>/`.
+
+---
+
+## Production Model Refresh (run every ~6 months)
+
+The production models are trained on a static historical archive (NASA OMNI2 hourly data). Every ~6 months, run the refresh pipeline to incorporate new historical observations and retrain all models.
+
+**Last refresh:** July 2026 — models now cover 2023–2025 + Jan–Jun 2026.
+**Next refresh:** December 2026.
+
+### How to run the refresh
+
+```bash
+# Run all steps in sequence (download → merge → retrain → benchmark)
+PYTHONPATH=src venv/bin/python3 scripts/refresh/run_all.py
+```
+
+Or run individual steps:
+
+```bash
+# Step 1 — Download and parse new OMNI2 data
+PYTHONPATH=src venv/bin/python3 scripts/refresh/01_download_parse_2026.py
+
+# Step 2 — Merge with existing archive, build v2 training CSVs
+PYTHONPATH=src venv/bin/python3 scripts/refresh/02_build_v2_datasets.py
+
+# Step 3 — Retrain all production models (can specify datasets)
+PYTHONPATH=src venv/bin/python3 scripts/refresh/03_train_v2.py
+PYTHONPATH=src venv/bin/python3 scripts/refresh/03_train_v2.py solar_wind imf  # specific datasets only
+
+# Step 4 — Benchmark v1 vs v2 and generate promotion report
+PYTHONPATH=src venv/bin/python3 scripts/refresh/04_benchmark.py
+```
+
+### Before the December 2026 refresh
+
+Open `scripts/refresh/01_download_parse_2026.py` and update one line:
+
+```python
+# Change this:
+DOY_MAX = 181   # June 30 (day 181 of 2026)
+
+# To this for full-year 2026:
+DOY_MAX = 365   # December 31
+```
+
+Everything else runs identically. The pipeline will automatically download the full 2026 annual file, merge it with the existing 2023–Jun 2026 archive, retrain all 62 models, and produce a benchmark report at `reports/refresh_v2/report.txt`.
+
+After December 2026, update the script filename and URL for the 2027 file:
+```python
+OMNI_URL = "https://spdf.gsfc.nasa.gov/pub/data/omni/low_res_omni/omni2_2027.dat"
+DOY_MAX = 181  # or 365 depending on how far into 2027 data is available
+```
 
 ---
 
@@ -531,9 +600,15 @@ Kp responds most strongly ~1 hour after a Bz change; Dst responds most strongly 
 * **Kp live-updater polling interval shortened** from 3 hours to 30 minutes (`src/swdss/features/live_update.py`) so a freshly-published NOAA Kp value is picked up sooner — NOAA itself still only publishes a new official Kp value every 3 hours, so this doesn't create new data, it just reduces how long a genuinely-published value can sit unfetched.
 * **Kp Research Laboratory** — a scientific experimentation platform for Kp forecasting, fully isolated from the production Kp predictor (`Analytics → Research & Experiments → Kp Research Laboratory`; the former "Experimental Predictions" tab moved alongside it as a sibling sub-tab under the new "Research & Experiments" parent tab). Trains on the identical `analytics_features.csv` and the identical "next official NOAA 3-hour Kp interval" target logic production itself uses (reused verbatim from `train.py`, not reimplemented) — a full-feature Linear Regression run here reproduces production's R² exactly (0.6812). Seven sub-tabs: **Model Comparison** (12 model types — Linear/Ridge/Lasso/ElasticNet, Random Forest, XGBoost, LightGBM, CatBoost, SVR, MLP, LSTM, GRU — with per-column feature-group toggles across Solar Wind/IMF/Derived Physics/Geomagnetic, plus R²/MAE/RMSE/MAPE/Bias/Training Time/Prediction Time and Load/Promote/Delete per run); **Feature Ablation** (leave-one-out sweep across the 4 base groups + 4 engineered-feature groups — Lags/Rolling Mean/Rolling Std/Rate of Change — ranked by R² drop when removed, chosen over a cumulative "enable one at a time" sweep since leave-one-out is order-independent); **Physics Experiments** (14 new individually-toggleable physics features — Southward Duration, Integrated Ey/VBz, Max VBz, Min Bz, Clock Angle + Change, Storm Phase, Time Since Southward Turning, Previous Storm Strength, Max AE 6h, Max Kp 24h, Min Dst 24h, Integrated Dynamic Pressure — via `swdss.models.kp_physics_features`, all strictly causal); **Sequence Models** (LSTM/GRU, 6/12/24/48-hour look-back windows, trained in the same isolated subprocess pattern as the IMF lab's Keras worker); **Experiment Tracking** (full reproducible run history); **Hypothesis Testing** (12 fixed, reproducible hypotheses — e.g. "Previous AE improves Kp prediction" — each an automatic baseline-vs-experimental run pair reporting ΔR²/ΔMAE/ΔRMSE and an Accept/Reject verdict); and **Visualization** (cross-run R² trends, per-model averages, and full predicted-vs-actual/residual/feature-importance/learning-curve breakdowns for any run). Engine lives in `swdss.models.kp_research`, with its own run/hypothesis JSON registries entirely separate from production's `models/analytics/metrics.json` — "Promote" only labels a run for tracking and never overwrites the production model. `predict.py`/`train.py`/`jobs.py`/`registry.py` and `models/analytics/` were not modified for this feature.
 
+* **AE Research Laboratory** — a scientific experimentation platform for AE forecasting, fully isolated from the production AE predictor (`Analytics → AE Predictions → AE Research Laboratory`; lives alongside the existing Production Prediction and Quicklook Verification sub-tabs, neither of which was modified). Trains on the identical `ae_analytics_features.csv` the production AE model uses — so every research run is genuinely comparable to production, not aimed at a different problem. Twelve model types: Linear/Ridge/Lasso/ElasticNet, Random Forest, XGBoost, LightGBM, CatBoost, SVR, MLP, LSTM, GRU. Feature group toggles: Solar Wind, IMF, Derived Physics (Ey/VBz/Dynamic Pressure), Geomagnetic (previous AE), and Engineered (Lags/Rolling Mean/Rolling Std/Rate of Change). Twelve new AE-specific physics features — Newell Coupling Function, Akasofu ε, Boyle Index, Plasma Beta, Alfvén Mach Number, Magnetopause Stand-off Distance, Integrated Ey, Integrated VBz, Integrated Energy Input, Clock Angle Persistence, Magnetic Shear, Solar Wind Persistence — individually toggleable via `swdss.models.ae_physics_features`. Sequence model support (LSTM/GRU, 1h/3h/6h/12h/24h look-back windows, same isolated subprocess pattern as the IMF and Kp labs). Multi-horizon analysis (15min/30min/1h/2h/3h), hypothesis testing (12 fixed reproducible hypotheses — e.g. "Does Ey improve AE prediction?", "Does Newell Coupling improve AE?"), and full experiment tracking. Engine in `swdss.models.ae_research` with its own run/hypothesis JSON registries entirely separate from production — "Promote" only labels a run, never overwrites the production model. `predict.py`/`train.py`/`jobs.py`/`registry.py` and `models/ae/` were not modified.
+* **Live updater cadence refinements** — Kp polling shortened to 15 minutes; Dst polling at 5 minutes (aligned with NOAA's actual publication frequency); startup now prints a full, aligned cadence table for every dataset so it's immediately clear what's running and at what rate.
+* **Research Lab auto-refresh suppression** — the dashboard's 15-second global auto-refresh is now gated per page: it fires normally on all live-data pages (Home, Photosphere, Heliosphere, Geospace, Analytics) but is suppressed on the dedicated Research Lab page; inside Analytics, a "⏸ Pause Live Refresh" toggle in the Kp and AE Research Lab headers lets the user stop the refresh timer while actively working in an experiment, eliminating the blink without sacrificing live updates on the Current Analysis tab.
+
+* **Production Model Refresh — v2 (July 2026)** — first official production model refresh expanding every training dataset from 2023–2025 to 2023–June 2026. A versioned, fully automated pipeline (`scripts/refresh/`) downloads the NASA OMNI2 hourly archive for Jan–Jun 2026, merges it with the existing 3-year historical corpus, rebuilds all training CSVs, retrains all 62 production models (Solar Wind × 3 variables, IMF × 4 variables, Kp, Dst, AE, Analytics, Experimental — all 5 horizons each), benchmarks v2 vs v1, and promotes winners. All 62 models were promoted on the basis that more training data is preferable to retaining stale models on 6-month-old data. Research labs (Kp, AE, IMF) also now train on the extended dataset — the training CSVs they read are the same ones refreshed by this pipeline. v1 model artifacts remain in `models/{dataset}_v2/`. Next refresh scheduled for December 2026.
+
 ### In Progress / Next
 
-* **Testing phase** — systematically test every trained model (Solar Wind, IMF, Kp/Dst, AE, and the Experimental cascade) and validate the Research Lab workflows (Forecasting Architectures, Hypothesis Testing, Explainability) end-to-end
+* **Testing phase** — systematically test every trained model (Solar Wind, IMF, Kp/Dst, AE, Kp Research Lab, AE Research Lab, and the Experimental cascade) and validate all Research Lab workflows end-to-end across real storm and quiet periods
 * Cross-validation of dashboard-reported extremes and event chains against independent data
 * Multi-day continuous live-updater stress testing
 * Additional derived parameters (IMF clock angle, storm-sudden-commencement flags)

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from swdss.models.jobs import tick_all_active_jobs
 from swdss.features.build_master import (
     clean_cme,
     clean_dst,
@@ -54,7 +55,7 @@ DATASET_JOBS = {
     ),
     "kp": DatasetJob(
         name="kp",
-        cadence_seconds=30 * 60,
+        cadence_seconds=15 * 60,
         cleaner=clean_kp,
     ),
 }
@@ -188,13 +189,13 @@ def run_live_update_loop() -> None:
 
     print("Starting SW-DSS live data updater.")
     print("Cadence:")
-    print("- Solar Wind: 60 seconds")
-    print("- IMF: 60 seconds")
-    print("- Dst: 1 hour")
-    print("- Kp: 3 hours")
+    print("- Solar Wind : 60 seconds")
+    print("- IMF        : 60 seconds")
+    print("- Dst        : 5 minutes")
+    print("- Kp         : 15 minutes")
     print("- Solar Events: 30 minutes")
     print("- CME (DONKI): 1 hour")
-    print("- F10.7: 24 hours")
+    print("- F10.7      : 24 hours")
     print("Press Ctrl+C to stop.")
 
     while True:
@@ -237,6 +238,15 @@ def run_live_update_loop() -> None:
                 traceback.print_exc()
 
         first_run = False
+
+        # Tick all active prediction jobs against the freshest available data.
+        # Runs every loop cycle so jobs advance even when the dashboard is on a
+        # different page, closed, or not open at all.
+        try:
+            tick_all_active_jobs()
+        except Exception:
+            print(f"[{utc_now().isoformat()}] Failed to tick prediction jobs:")
+            traceback.print_exc()
 
         elapsed = time.time() - loop_started
         sleep_seconds = max(10, 60 - elapsed)

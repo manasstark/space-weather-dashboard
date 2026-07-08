@@ -1416,3 +1416,26 @@ def compute_variable_metrics(dataset: str, variable: str) -> dict:
         "predicted_vs_actual": predicted_vs_actual,
         "errors": errors.tolist(),
     }
+
+
+def tick_all_active_jobs() -> None:
+    """Advance every active prediction job across all datasets.
+
+    Called by live_update.py at the end of each update cycle so jobs tick
+    continuously in the background, completely independent of which dashboard
+    page is open or whether the browser is open at all. The dashboard itself
+    becomes a pure read/display layer — it never needs to call poll_jobs to
+    advance a job, only to read results.
+
+    poll_jobs is safe to call from any process: it reads from and writes to
+    SQLite only, with no Streamlit dependency. Errors are swallowed per-dataset
+    so one failing dataset never blocks the others.
+    """
+    all_datasets = list(DATASETS.keys())
+    for dataset in all_datasets:
+        try:
+            poll_jobs(dataset)
+        except Exception:
+            import traceback
+            print(f"[tick_all_active_jobs] Error ticking jobs for '{dataset}':")
+            traceback.print_exc()
