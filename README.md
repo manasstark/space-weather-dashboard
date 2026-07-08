@@ -259,65 +259,114 @@ Prediction never waits on either verification branch, and the two branches never
 Space Weather Dashboard V2/
 │
 ├── data/
-│   ├── raw/                       # Exact NOAA / DONKI API responses, per dataset
-│   ├── processed/                 # Cleaned per-dataset parquet (minute-level for
-│   │                               #   Solar Wind/IMF, native cadence otherwise)
+│   ├── raw/                            # Exact NOAA / DONKI API responses, one file per dataset per fetch
+│   │   └── omni_refresh_2026.csv       # Parsed NASA OMNI2 2026 hourly data (Jan–Jun); input to the refresh pipeline
+│   ├── processed/                      # Cleaned per-dataset parquet (minute-level for Solar Wind/IMF,
+│   │   │                               #   native cadence for everything else)
+│   │   ├── solar_wind/
+│   │   ├── imf/
+│   │   ├── kp/
+│   │   ├── dst/
+│   │   ├── ae/                         # Historical AE from Kyoto WDC — no live NOAA feed exists
+│   │   ├── f107/
+│   │   ├── cme/
+│   │   ├── solar_events/
+│   │   ├── master_omni.csv             # Original versioned OMNI2 archive (2023–2025, 26,304 rows)
+│   │   └── master_omni_v2.csv          # Extended versioned archive (2023–Jun 2026, 30,648 rows)
 │   ├── features/
-│   │   ├── master_df_v1.parquet   # Hourly-merged Sun-Earth feature table
-│   │   └── training/              # Engineered training datasets for the ML models
+│   │   ├── master_df_v1.parquet        # Hourly-merged Sun-Earth feature table (rebuilt by live_update.py)
+│   │   ├── training/                   # Active training CSVs — what production models and research labs read
+│   │   │   ├── solar_wind_features.csv
+│   │   │   ├── imf_features.csv
+│   │   │   ├── kp_features.csv
+│   │   │   ├── dst_features.csv
+│   │   │   ├── analytics_features.csv      # Solar Wind + IMF + Kp + Dst + observed AE; used by Analytics production models
+│   │   │   ├── ae_features.csv             # AE self-referential only; superseded by ae_analytics_features.csv
+│   │   │   ├── ae_analytics_features.csv   # Solar Wind + IMF + AE (no Kp/Dst); used by AE V1 production model + AE Research Lab
+│   │   │   └── experimental_features.csv   # Solar Wind + IMF + Kp + Dst + Predicted AE; used by cascaded research models
+│   │   └── training_v2/                # v2 versions of all training CSVs (2023–Jun 2026); produced by the refresh pipeline
 │   │       ├── solar_wind_features.csv
 │   │       ├── imf_features.csv
 │   │       ├── kp_features.csv
 │   │       ├── dst_features.csv
-│   │       ├── analytics_features.csv   # Combined Solar Wind + IMF + Kp + Dst (+ observed AE), for production Kp/Dst
-│   │       ├── ae_features.csv          # AE + its own lag/rolling/change features only (self-referential);
-│   │       │                            #   superseded by ae_analytics_features.csv below for actual model training
-│   │       ├── ae_analytics_features.csv   # Combined Solar Wind + IMF + AE (no Kp/Dst), for the AE V1 model
-│   │       └── experimental_features.csv   # Combined Solar Wind + IMF + Kp + Dst + Predicted AE, for the cascaded research models
-│   ├── processed/ae/               # Historical AE data (no live NOAA feed — see AE Index Integration)
+│   │       ├── analytics_features.csv
+│   │       ├── ae_analytics_features.csv
+│   │       └── experimental_features.csv
 │   ├── predictions/
-│   │   └── predictions.db         # SQLite store for live forecast jobs + tick history + hypotheses
+│   │   └── predictions.db              # SQLite: live forecast jobs, tick history, hypothesis records
 │   └── saved_events.json / library_index.json
 │
 ├── src/swdss/
-│   ├── paths.py                   # Centralized path constants
+│   ├── paths.py                        # Centralized path constants
 │   ├── ingest/
-│   │   ├── noaa_client.py         # NOAA API client
-│   │   ├── kyoto_ae.py            # Kyoto WDC official digital AE — the sole AE verification source
-│   │   └── kyoto_ae_quicklook.py  # Kyoto WDC real-time graph — approximate, image-based AE estimate
-│   ├── transform/                 # Per-dataset cleaning logic
+│   │   ├── noaa_client.py              # NOAA SWPC + NASA DONKI API client
+│   │   ├── kyoto_ae.py                 # Kyoto WDC official digital AE — the sole authoritative AE verification source
+│   │   └── kyoto_ae_quicklook.py       # Kyoto WDC real-time graph — pixel-based approximate AE estimate (immediate cross-check)
+│   ├── transform/                      # Per-dataset raw-JSON → cleaned-DataFrame cleaning logic
+│   │   ├── solar_wind.py
+│   │   ├── imf.py
+│   │   ├── kp.py
+│   │   └── dst.py
 │   ├── features/
-│   │   ├── build_master.py        # One-shot fetch + clean + merge
-│   │   └── live_update.py         # Continuous per-dataset updater (own cadences)
-│   ├── models/                    # Live prediction engine (see below)
-│   │   ├── registry.py            # Shared config: variables, horizons, model paths,
-│   │   │                          #   multi-source merging, per-dataset unit scale factors
-│   │   ├── features.py            # Lag/rolling/change + derived physics feature engineering
-│   │   ├── train.py               # Multi-algorithm training + best-model selection
-│   │   ├── predict.py             # Live feature pipeline + single-point inference
-│   │   ├── jobs.py                # Continuous forecast job lifecycle (SQLite-backed)
-│   │   ├── experimental.py        # One-time Predicted_AE training-column generation for the cascade
-│   │   ├── explainability.py      # SHAP / permutation-importance local feature attribution
-│   │   ├── physics_interpretation.py  # Rule-based (no LLM) Sun-Earth coupling narrative
-│   │   └── hypothesis.py          # Hypothesis Testing: CRUD + statistics + auto-conclusion engine
-│   └── utils/
+│   │   ├── build_master.py             # One-shot fetch + clean + merge all datasets
+│   │   └── live_update.py              # Continuous per-dataset updater (own cadences); also ticks active prediction jobs
+│   └── models/                         # Prediction engine — training, inference, research, and job lifecycle
+│       ├── registry.py                 # Shared config: dataset keys, variables, horizons, model paths, scale factors
+│       ├── features.py                 # Lag / rolling-mean / rolling-std / rate-of-change + derived physics feature engineering
+│       ├── train.py                    # Multi-algorithm training (LR / RF / XGBoost) + automatic best-model selection
+│       ├── predict.py                  # Live feature pipeline + single-point inference for all datasets
+│       ├── jobs.py                     # Continuous forecast job lifecycle: create / tick / complete / verify (SQLite-backed)
+│       ├── experimental.py             # One-time Predicted_AE column generation from frozen AE 1h model (cascade training data)
+│       ├── explainability.py           # SHAP (TreeExplainer / LinearExplainer) + permutation-sensitivity fallback
+│       ├── physics_interpretation.py   # Rule-based (no LLM) Sun-Earth coupling narrative from live readings
+│       ├── hypothesis.py               # Hypothesis Testing: CRUD, statistics, auto-conclusion engine (Supported/Not Supported/Inconclusive)
+│       ├── imf_research.py             # IMF Research Lab engine: multi-horizon, multi-model, physics experiments, run tracking
+│       ├── imf_research_keras_worker.py  # Isolated subprocess for LSTM/GRU training — prevents scikit-learn / Keras import collision
+│       ├── imf_physics_features.py     # IMF-specific physics features for the Research Lab (Clock Angle, IMF Rotation, etc.)
+│       ├── kp_research.py              # Kp Research Lab engine: model comparison, feature ablation, physics experiments, hypothesis testing
+│       ├── kp_physics_features.py      # Kp-specific physics features (Southward Duration, Integrated Ey/VBz, Storm Phase, etc.)
+│       ├── ae_research.py              # AE Research Lab engine: model comparison, multi-horizon, physics experiments, hypothesis testing
+│       └── ae_physics_features.py      # AE-specific physics features (Newell Coupling, Akasofu ε, Boyle Index, Alfvén Mach Number, etc.)
 │
 ├── dashboard/
-│   ├── home.py                    # Full multi-page Streamlit application
-│   └── assets/                    # Background imagery (magnetosphere, solar disk)
+│   ├── home.py                         # Full multi-page Streamlit application (all pages, dialogs, and research lab UIs)
+│   └── assets/                         # Static imagery (magnetosphere background, NASA SDO solar disk)
 │
-├── models/                        # Trained model artifacts (.joblib + metrics.json)
-│   ├── solar_wind/
-│   ├── imf/
-│   ├── kp/                        # Standalone (self-referential) Kp model — trained, not exposed in the UI
-│   ├── dst/                       # Standalone (self-referential) Dst model — trained, not exposed in the UI
-│   ├── analytics/                 # Combined Sun-Earth models actually used by the Analytics page
-│   │   └── kp_interval.joblib     # Single model targeting NOAA's next official 3h Kp interval
-│   ├── ae/                        # AE V1 models (Solar Wind + IMF + derived physics only), 5 horizons
-│   └── experimental/              # AE V3 cascaded research models (Predicted AE feeding Kp/Dst)
+├── models/                             # Trained model artifacts (.joblib + metrics.json per dataset)
+│   ├── solar_wind/                     # Production Solar Wind models (Speed / Density / Temperature × 5 horizons)
+│   ├── solar_wind_v2/                  # v2 Solar Wind models — versioned backup from the July 2026 refresh
+│   ├── imf/                            # Production IMF models (Bt / Bx / By / Bz × 5 horizons)
+│   ├── imf_v2/                         # v2 IMF models — versioned backup
+│   ├── kp/                             # Standalone self-referential Kp model — baseline only, not exposed in UI
+│   ├── kp_v2/                          # v2 standalone Kp model — versioned backup
+│   ├── dst/                            # Standalone self-referential Dst model — baseline only, not exposed in UI
+│   ├── dst_v2/                         # v2 standalone Dst model — versioned backup
+│   ├── analytics/                      # Production combined Sun-Earth models (Kp / Dst × 5 horizons + kp_interval)
+│   │   └── kp_interval.joblib          # Single model targeting NOAA's next official 3-hour Kp interval
+│   ├── analytics_v2/                   # v2 analytics models — versioned backup
+│   ├── ae/                             # Production AE V1 models (Solar Wind + IMF + physics only, × 5 horizons)
+│   ├── ae_v2/                          # v2 AE models — versioned backup
+│   ├── experimental/                   # Production AE V3 cascaded models (Predicted AE → Kp/Dst, × 5 horizons)
+│   ├── experimental_v2/                # v2 experimental models — versioned backup
+│   ├── imf_research/                   # IMF Research Lab run artifacts (UUID per run, .joblib + run metadata)
+│   ├── kp_research/                    # Kp Research Lab run artifacts (UUID per run)
+│   └── ae_research/                    # AE Research Lab run artifacts (UUID per run)
 │
-├── notebooks/                     # Original exploratory research notebooks
-├── docs/                          # Day-by-day research notes
+├── scripts/
+│   └── refresh/                        # Production Model Refresh pipeline (run every ~6 months)
+│       ├── 01_download_parse_2026.py   # Step 1: download + parse NASA OMNI2 annual file, save to data/raw/
+│       ├── 02_build_v2_datasets.py     # Step 2: merge with existing archive, build all 7 v2 training CSVs
+│       ├── 03_train_v2.py              # Step 3: retrain all 62 production models, write to models/{dataset}_v2/
+│       ├── 04_benchmark.py             # Step 4: compare v1 vs v2 R²/MAE/RMSE, write reports/refresh_v2/report.txt
+│       └── run_all.py                  # Master runner — calls all 4 steps in sequence
+│
+├── reports/
+│   └── refresh_v2/
+│       ├── report.txt                  # Human-readable v1 vs v2 benchmark (PROMOTE / KEEP CURRENT / LARGE SWING per model)
+│       └── benchmark.json              # Machine-readable full benchmark results
+│
+├── notebooks/                          # Original exploratory research notebooks
+├── docs/                               # Day-by-day research notes
 ├── requirements.txt
 └── README.md
 ```
