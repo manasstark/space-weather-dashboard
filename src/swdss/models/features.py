@@ -83,10 +83,35 @@ def build_feature_frame(df: pd.DataFrame, columns: list[str]) -> tuple[pd.DataFr
 
     Returns (frame, feature_columns) where feature_columns is the base
     variables followed by all derived features, in a fixed order.
+
+    All new columns are collected into one dict and joined via pd.concat
+    in a single operation — avoids the fragmentation that builds up when
+    columns are added incrementally across multiple calls.
     """
-    frame = df.copy()
-    lag_cols = add_lag_features(frame, columns)
-    rolling_cols = add_rolling_features(frame, columns)
-    change_cols = add_change_features(frame, columns)
-    feature_columns = list(columns) + lag_cols + rolling_cols + change_cols
+    base = df.copy()
+    new_cols: dict[str, pd.Series] = {}
+
+    lag_names: list[str] = []
+    for column in columns:
+        for lag in LAGS:
+            name = f"{column}_lag{lag}h"
+            new_cols[name] = base[column].shift(lag)
+            lag_names.append(name)
+
+    rolling_names: list[str] = []
+    for column in columns:
+        mean_name = f"{column}_{ROLLING_WINDOW}h"
+        std_name = f"{column}_{ROLLING_WINDOW}h_std"
+        new_cols[mean_name] = base[column].rolling(ROLLING_WINDOW).mean()
+        new_cols[std_name] = base[column].rolling(ROLLING_WINDOW).std()
+        rolling_names += [mean_name, std_name]
+
+    change_names: list[str] = []
+    for column in columns:
+        name = f"{column}_change"
+        new_cols[name] = base[column].diff()
+        change_names.append(name)
+
+    frame = pd.concat([base, pd.DataFrame(new_cols, index=base.index)], axis=1)
+    feature_columns = list(columns) + lag_names + rolling_names + change_names
     return frame, feature_columns

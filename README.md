@@ -283,8 +283,8 @@ Space Weather Dashboard V2/
 │   │   │   ├── analytics_features.csv      # Solar Wind + IMF + Kp + Dst + observed AE; used by Analytics production models
 │   │   │   ├── ae_features.csv             # AE self-referential only; superseded by ae_analytics_features.csv
 │   │   │   ├── ae_analytics_features.csv   # Solar Wind + IMF + AE (no Kp/Dst); used by AE V1 production model + AE Research Lab
-│   │   │   └── experimental_features.csv   # Solar Wind + IMF + Kp + Dst + Predicted AE; used by cascaded research models
-│   │   └── training_v2/                # v2 versions of all training CSVs (2023–Jun 2026); produced by the refresh pipeline
+│   │   │   └── experimental_features.csv   # Solar Wind + IMF + Kp + Dst + Predicted AE (from frozen AE 1h model); used by Experimental production models + Experimental Predictions tab
+│   │   └── training_v2/                # v2 versions of all 7 training CSVs (2023–Jun 2026); produced by the refresh pipeline
 │   │       ├── solar_wind_features.csv
 │   │       ├── imf_features.csv
 │   │       ├── kp_features.csv
@@ -346,8 +346,8 @@ Space Weather Dashboard V2/
 │   ├── analytics_v2/                   # v2 analytics models — versioned backup
 │   ├── ae/                             # Production AE V1 models (Solar Wind + IMF + physics only, × 5 horizons)
 │   ├── ae_v2/                          # v2 AE models — versioned backup
-│   ├── experimental/                   # Production AE V3 cascaded models (Predicted AE → Kp/Dst, × 5 horizons)
-│   ├── experimental_v2/                # v2 experimental models — versioned backup
+│   ├── experimental/                   # Production AE V3 cascaded models (Predicted AE → Kp/Dst, × 5 horizons); trained on 2023–Jun 2026
+│   ├── experimental_v2/                # v2 experimental models — versioned backup from the July 2026 refresh
 │   ├── imf_research/                   # IMF Research Lab run artifacts (UUID per run, .joblib + run metadata)
 │   ├── kp_research/                    # Kp Research Lab run artifacts (UUID per run)
 │   └── ae_research/                    # AE Research Lab run artifacts (UUID per run)

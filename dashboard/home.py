@@ -1545,16 +1545,15 @@ def line_chart(df: pd.DataFrame, columns: list[str], title: str) -> None:
 
 
 def correlation_explorer(df: pd.DataFrame, columns: list[str], title: str) -> None:
-    available = [col for col in columns if col in df.columns]
-    corr_df = df[available].dropna()
+    available = [col for col in columns if col in df.columns and df[col].notna().any()]
 
     st.subheader(title)
 
-    if len(available) < 2 or corr_df.empty:
+    if len(available) < 2:
         st.info("Not enough data for correlation analysis.")
         return
 
-    corr = corr_df.corr(numeric_only=True)
+    corr = df[available].corr(numeric_only=True, min_periods=10)
     fig = px.imshow(
         corr,
         text_auto=".2f",
@@ -1571,7 +1570,7 @@ def correlation_explorer(df: pd.DataFrame, columns: list[str], title: str) -> No
     y_options = [col for col in available if col != x_col]
     y_col = col2.selectbox("Y variable", y_options, key=f"{title}_y")
 
-    scatter_df = df[["timestamp_utc", x_col, y_col]].dropna()
+    scatter_df = df[["timestamp_utc", x_col, y_col]].dropna(subset=[x_col, y_col])
     if scatter_df.empty:
         st.info("No overlapping data for selected variables.")
         return
@@ -3549,6 +3548,40 @@ def current_analysis_imf(df: pd.DataFrame) -> None:
     correlation_explorer(df, ["bt", "bx", "by", "bz"], "IMF Correlations")
 
 
+def _add_geospace_derived_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute derived physics columns used by the Geospace scatter explorer."""
+    d = df.copy().sort_values("timestamp_utc").reset_index(drop=True)
+
+    if "solar_wind_speed" in d.columns and "bz" in d.columns:
+        d["ey"] = -d["solar_wind_speed"] * d["bz"] * 1e-3
+
+    if "solar_wind_speed" in d.columns and "proton_density" in d.columns:
+        d["dynamic_pressure"] = 1.6726e-6 * d["proton_density"] * d["solar_wind_speed"] ** 2
+
+    if "by" in d.columns and "bz" in d.columns:
+        d["clock_angle"] = np.degrees(np.arctan2(d["by"], d["bz"]))
+
+    if "kp" in d.columns:
+        d["prev_kp"] = d["kp"].shift(1)
+
+    if "dst" in d.columns:
+        d["prev_dst"] = d["dst"].shift(1)
+
+    try:
+        from swdss.paths import PROCESSED_DIR
+        ae_path = PROCESSED_DIR / "ae" / "ae_processed.parquet"
+        ae_df = pd.read_parquet(ae_path)[["timestamp_utc", "ae"]].copy()
+        ae_df["prev_ae"] = ae_df["ae"].shift(1)
+        d = d.merge(ae_df[["timestamp_utc", "prev_ae"]], on="timestamp_utc", how="left")
+    except Exception:
+        d["prev_ae"] = np.nan
+
+    if "bz" in d.columns:
+        d["southward_duration"] = (d["bz"] < 0).astype(float).rolling(24, min_periods=1).sum()
+
+    return d
+
+
 def current_analysis_kp(df: pd.DataFrame) -> None:
     st.subheader("Kp Current Analysis")
 
@@ -3586,7 +3619,17 @@ def current_analysis_kp(df: pd.DataFrame) -> None:
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
 
     line_chart(df, ["kp"], "Kp Index")
-    correlation_explorer(df, ["kp", "solar_wind_speed", "proton_density", "bz", "dst"], "Kp With Solar Wind, IMF, Dst")
+    df_geo = _add_geospace_derived_cols(df)
+    correlation_explorer(
+        df_geo,
+        [
+            "kp", "solar_wind_speed", "proton_density", "temperature",
+            "bt", "bx", "by", "bz", "dst",
+            "ey", "dynamic_pressure", "clock_angle",
+            "prev_kp", "prev_ae", "prev_dst", "southward_duration",
+        ],
+        "Kp With Solar Wind, IMF & Derived Physics",
+    )
 
 
 def current_analysis_dst(df: pd.DataFrame) -> None:
@@ -3626,7 +3669,17 @@ def current_analysis_dst(df: pd.DataFrame) -> None:
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
 
     line_chart(df, ["dst"], "Dst Index")
-    correlation_explorer(df, ["dst", "kp", "solar_wind_speed", "proton_density", "bz"], "Dst With Solar Wind, IMF, Kp")
+    df_geo = _add_geospace_derived_cols(df)
+    correlation_explorer(
+        df_geo,
+        [
+            "dst", "kp", "solar_wind_speed", "proton_density", "temperature",
+            "bt", "bx", "by", "bz",
+            "ey", "dynamic_pressure", "clock_angle",
+            "prev_kp", "prev_ae", "prev_dst", "southward_duration",
+        ],
+        "Dst With Solar Wind, IMF & Derived Physics",
+    )
 
 
 def earth_analysis(df: pd.DataFrame) -> None:
@@ -6733,12 +6786,20 @@ def render_imf_horizon_analysis_tab() -> None:
 
 
 def render_imf_research_laboratory() -> None:
-    st.markdown("### 🧪 IMF Research Laboratory")
-    st.caption(
-        "A research environment for comparing Bz/Bt/Bx/By forecasting architectures — fully isolated "
-        "from the Production Prediction tab, which continues using the current trained production "
-        "model exactly as-is. Models trained here never overwrite it."
-    )
+    hdr_col, pause_col = st.columns([3, 1])
+    with hdr_col:
+        st.markdown("### 🧪 IMF Research Laboratory")
+        st.caption(
+            "A research environment for comparing Bz/Bt/Bx/By forecasting architectures — fully isolated "
+            "from the Production Prediction tab, which continues using the current trained production "
+            "model exactly as-is. Models trained here never overwrite it."
+        )
+    with pause_col:
+        st.session_state.setdefault("pause_autorefresh", False)
+        if st.toggle("⏸ Pause Live Refresh", value=st.session_state["pause_autorefresh"], key="imf_lab_pause_toggle"):
+            st.session_state["pause_autorefresh"] = True
+        else:
+            st.session_state["pause_autorefresh"] = False
     _imf_research_notes()
 
     sub = st.tabs(
