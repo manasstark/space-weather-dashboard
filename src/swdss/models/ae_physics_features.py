@@ -15,24 +15,48 @@ only) and takes a DataFrame indexed by hourly timestamp with whichever of
 speed/density/temperature/bt/bx_gsm/by_gsm/bz_gsm/ae columns it needs,
 returning the list of column names it created.
 
-Several formulas here (Akasofu epsilon, Boyle Index, Plasma Beta, Alfven
-Mach Number) are standard SOLAR WIND practical/empirical formulas using
-commonly-cited approximate constants (not first-principles derivations),
-and Magnetic Shear/Clock Angle Persistence/Solar Wind Persistence are
-explicit, disclosed proxies (no magnetopause field model exists in this
-project) — same self-disclosed-heuristic spirit as kp_physics_features.py's
-Storm Phase classifier. Citations are given per function.
+Every quantity here delegates to swdss.physics — the Physics Engine and
+this project's single canonical implementation of these formulas —
+instead of computing locally. This migration resolves two of the
+audit's six flagged cross-lab inconsistencies, with a documented,
+unavoidable consequence: rerunning these specific physics experiments
+after this migration produces DIFFERENT feature values than before,
+because this lab's old formula was scientifically off:
+
+- Plasma Beta: previously used a single-step approximate formula with
+  constant 4.16e-5; verified against a first-principles derivation
+  (2*mu0*n*k*T/B^2 in the appropriate units), the correct constant is
+  3.4699e-5 — a ~20% difference. The Kp Research Laboratory's two-step
+  (Thermal Pressure / Magnetic Pressure) formulation, which already used
+  the correct constant, is now the shared canonical implementation (see
+  swdss.physics.plasma's module docstring for the verification).
+
+- Akasofu epsilon: previously a bare proportional form (v*B^2*sin^4
+  (theta/2), no physical units); now the full SI-scaled form (Watts),
+  matching the Kp Research Laboratory's prior implementation — see
+  swdss.physics.coupling's module docstring for why the SI form was
+  adopted as canonical. Integrated Energy Input (built on Akasofu
+  epsilon here) changes as a direct consequence.
+
+Newell Coupling Function, Boyle Index, and Magnetic Shear were ALREADY
+the scientifically canonical formulation in this lab (see swdss.physics.
+coupling/geometry module docstrings) — no value change for those three.
+Magnetic Pressure, Thermal Pressure, Total Pressure, and IMF Rotation
+Rate are NEW additions to this lab (available in the Kp Research
+Laboratory before this migration; now available here too, for
+cross-lab consistency).
 """
 
-import numpy as np
 import pandas as pd
 
+from swdss.physics import core as physics_core
+from swdss.physics import coupling as physics_coupling
+from swdss.physics import geometry as physics_geometry
+from swdss.physics import magnetosphere as physics_magnetosphere
+from swdss.physics import persistence as physics_persistence
+from swdss.physics import plasma as physics_plasma
+
 DEFAULT_WINDOW_HOURS = 24
-EARTH_RADIUS_KM = 6371.0
-
-
-def _clock_angle_rad(df: pd.DataFrame, clock_angle_col: str = "clock_angle_deg") -> pd.Series:
-    return np.radians(df[clock_angle_col])
 
 
 # ---------------------------------------------------------------- core derived physics
@@ -44,34 +68,31 @@ def _clock_angle_rad(df: pd.DataFrame, clock_angle_col: str = "clock_angle_deg")
 
 def add_ey(df: pd.DataFrame, speed_col: str = "speed", bz_col: str = "bz_gsm") -> list[str]:
     name = "ey"
-    df[name] = -df[speed_col] * df[bz_col] * 1e-3
+    df[name] = physics_core.ey_series(df[speed_col], df[bz_col])
     return [name]
 
 
 def add_vbz(df: pd.DataFrame, speed_col: str = "speed", bz_col: str = "bz_gsm") -> list[str]:
     name = "vbz"
-    df[name] = df[speed_col] * df[bz_col].clip(upper=0)
+    df[name] = physics_core.vbz_series(df[speed_col], df[bz_col])
     return [name]
 
 
 def add_dynamic_pressure(df: pd.DataFrame, density_col: str = "density", speed_col: str = "speed") -> list[str]:
     name = "dynamic_pressure"
-    df[name] = 1.6726e-6 * df[density_col] * df[speed_col] ** 2
+    df[name] = physics_core.dynamic_pressure_series(df[density_col], df[speed_col])
     return [name]
 
 
 def add_clock_angle(df: pd.DataFrame, by_col: str = "by_gsm", bz_col: str = "bz_gsm") -> list[str]:
     name = "clock_angle_deg"
-    angle = np.degrees(np.arctan2(df[by_col], df[bz_col]))
-    df[name] = angle % 360
+    df[name] = physics_geometry.clock_angle_series(df[by_col], df[bz_col])
     return [name]
 
 
 def add_southward_duration(df: pd.DataFrame, bz_col: str = "bz_gsm") -> list[str]:
     name = "southward_duration_hr"
-    condition = df[bz_col] < 0
-    reset_groups = (~condition).cumsum()
-    df[name] = condition.groupby(reset_groups).cumsum()
+    df[name] = physics_core.southward_duration_series(df[bz_col])
     return [name]
 
 
@@ -79,7 +100,7 @@ def add_integrated_southward_bz(
     df: pd.DataFrame, bz_col: str = "bz_gsm", window: int = DEFAULT_WINDOW_HOURS
 ) -> list[str]:
     name = f"integrated_southward_bz_{window}h"
-    df[name] = df[bz_col].clip(upper=0).abs().rolling(window).sum()
+    df[name] = physics_core.integrated_southward_bz_series(df[bz_col], window)
     return [name]
 
 
@@ -103,119 +124,175 @@ def add_all_core_derived_physics(df: pd.DataFrame) -> list[str]:
 def add_newell_coupling(
     df: pd.DataFrame, speed_col: str = "speed", by_col: str = "by_gsm", bz_col: str = "bz_gsm"
 ) -> list[str]:
-    """Newell et al. 2007 (JGR) universal coupling function:
-    dPhi/dt ~ v^(4/3) * B_T^(2/3) * sin^(8/3)(theta_c/2), the most widely
-    used empirical solar-wind/magnetosphere coupling function in the
-    literature (originally calibrated against AE, Dst, and other
-    geomagnetic indices simultaneously) — used here in its standard
-    proportional form (v in km/s, B_T in nT), not scaled to a physical
-    unit system, matching this project's existing VBz/Ey convention of
-    using coupling functions as ML features rather than SI-exact outputs.
+    """Newell et al. 2007 (JGR) universal coupling function — see
+    swdss.physics.coupling for the full reference and unit convention.
     """
     name = "newell_coupling"
-    bt_yz = np.sqrt(df[by_col] ** 2 + df[bz_col] ** 2)
-    clock_angle = np.arctan2(df[by_col], df[bz_col])
-    df[name] = (df[speed_col] ** (4 / 3)) * (bt_yz ** (2 / 3)) * (np.abs(np.sin(clock_angle / 2)) ** (8 / 3))
+    df[name] = physics_coupling.newell_coupling_series(df[speed_col], df[by_col], df[bz_col])
     return [name]
 
 
 def add_akasofu_epsilon(
     df: pd.DataFrame, speed_col: str = "speed", bt_col: str = "bt", clock_angle_col: str = "clock_angle_deg"
 ) -> list[str]:
-    """Akasofu 1981 epsilon parameter, in its standard proportional form
-    (v * B^2 * sin^4(theta_c/2)) — the l0^2 and 4*pi/mu_0 physical
-    constants are dropped, same convention as Newell coupling above,
-    since an ML model absorbs constant scale factors anyway.
+    """Akasofu 1981 epsilon parameter, in Watts (full SI-scaled form —
+    see this module's docstring for why this changed from a bare
+    proportional index). Requires Clock Angle first.
     """
     name = "akasofu_epsilon"
-    theta = _clock_angle_rad(df, clock_angle_col)
-    df[name] = df[speed_col] * df[bt_col] ** 2 * np.sin(theta / 2) ** 4
+    df[name] = physics_coupling.akasofu_epsilon_series(df[speed_col], df[bt_col], df[clock_angle_col])
     return [name]
 
 
 def add_boyle_index(
     df: pd.DataFrame, speed_col: str = "speed", bt_col: str = "bt", clock_angle_col: str = "clock_angle_deg"
 ) -> list[str]:
-    """Boyle et al. 1998 polar cap potential empirical formula:
-    Phi_PC [kV] = 1e-4 * v^2 + 11.7 * Bt * sin^3(theta_c/2)
-    (v in km/s, Bt in nT) — a standard, widely-cited empirical proxy for
-    the cross-polar-cap potential driven by dayside reconnection.
+    """Boyle et al. 1998 polar cap potential empirical formula. Requires
+    Clock Angle first.
     """
     name = "boyle_index"
-    theta = _clock_angle_rad(df, clock_angle_col)
-    df[name] = 1e-4 * df[speed_col] ** 2 + 11.7 * df[bt_col] * np.sin(theta / 2) ** 3
+    df[name] = physics_coupling.boyle_index_series(df[speed_col], df[bt_col], df[clock_angle_col])
     return [name]
 
 
-def add_plasma_beta(df: pd.DataFrame, density_col: str = "density", temperature_col: str = "temperature", bt_col: str = "bt") -> list[str]:
-    """Solar wind plasma beta (ratio of thermal to magnetic pressure),
-    using the standard practical approximate formula
-    beta = 4.16e-5 * n * T / Bt^2 (n in cm^-3, T in K, Bt in nT) commonly
-    used in solar wind physics — an approximation, not an exact
-    first-principles calculation (ignores electron pressure and any
-    non-Maxwellian corrections).
+def add_magnetic_pressure(df: pd.DataFrame, bt_col: str = "bt") -> list[str]:
+    """Magnetic pressure Pb = Bt^2/(2*mu0), converted to nPa. New to this
+    lab — previously only available in the Kp Research Laboratory.
+    """
+    name = "magnetic_pressure_npa"
+    df[name] = physics_plasma.magnetic_pressure_series(df[bt_col])
+    return [name]
+
+
+def add_thermal_pressure(df: pd.DataFrame, density_col: str = "density", temperature_col: str = "temperature") -> list[str]:
+    """Thermal pressure Pth = n*k*T, converted to nPa. New to this lab."""
+    name = "thermal_pressure_npa"
+    df[name] = physics_plasma.thermal_pressure_series(df[density_col], df[temperature_col])
+    return [name]
+
+
+def add_total_pressure(
+    df: pd.DataFrame,
+    dp_col: str = "dynamic_pressure",
+    magnetic_col: str = "magnetic_pressure_npa",
+    thermal_col: str = "thermal_pressure_npa",
+) -> list[str]:
+    """Sum of dynamic, magnetic, and thermal pressure. New to this lab.
+    Requires Magnetic Pressure and Thermal Pressure first.
+    """
+    name = "total_pressure_npa"
+    df[name] = physics_plasma.total_pressure_series(df[dp_col], df[magnetic_col], df[thermal_col])
+    return [name]
+
+
+def add_plasma_beta(df: pd.DataFrame, thermal_col: str = "thermal_pressure_npa", magnetic_col: str = "magnetic_pressure_npa") -> list[str]:
+    """Solar wind plasma beta — see this module's docstring for the
+    constant-discrepancy resolution. Requires Magnetic Pressure and
+    Thermal Pressure first (a dependency this lab's Plasma Beta didn't
+    have before this migration, since it used to be a single-step
+    formula).
     """
     name = "plasma_beta"
-    df[name] = 4.16e-5 * df[density_col] * df[temperature_col] / (df[bt_col] ** 2)
+    df[name] = physics_plasma.plasma_beta_series(df[thermal_col], df[magnetic_col])
     return [name]
 
 
-def add_alfven_mach_number(df: pd.DataFrame, speed_col: str = "speed", density_col: str = "density", bt_col: str = "bt") -> list[str]:
-    """Alfven Mach number M_A = v / v_A, using the standard practical
-    formula for solar-wind Alfven speed v_A[km/s] = 21.8 * Bt[nT] /
-    sqrt(n[cm^-3]) (proton-mass-only approximation, ignoring alpha
-    particle contribution to mass density).
+def add_alfven_speed(df: pd.DataFrame, bt_col: str = "bt", density_col: str = "density") -> list[str]:
+    """Alfven speed VA[km/s] = 21.8 * Bt[nT] / sqrt(n[cm^-3]). New to this
+    lab as a standalone toggle — previously only computed internally,
+    unexposed, by Alfven Mach Number below.
+    """
+    name = "alfven_speed_km_s"
+    df[name] = physics_plasma.alfven_speed_series(df[bt_col], df[density_col])
+    return [name]
+
+
+def add_alfven_mach_number(df: pd.DataFrame, speed_col: str = "speed", alfven_col: str = "alfven_speed_km_s") -> list[str]:
+    """Alfven Mach number M_A = v / v_A. Requires Alfven Speed first (a
+    dependency this feature didn't have before, since it used to compute
+    Alfven speed internally).
     """
     name = "alfven_mach_number"
-    alfven_speed = 21.8 * df[bt_col] / np.sqrt(df[density_col].clip(lower=1e-6))
-    df[name] = df[speed_col] / alfven_speed
+    df[name] = physics_plasma.alfven_mach_number_series(df[speed_col], df[alfven_col])
     return [name]
 
 
 def add_magnetopause_standoff(df: pd.DataFrame, bz_col: str = "bz_gsm", dp_col: str = "dynamic_pressure") -> list[str]:
-    """Shue et al. 1998 empirical magnetopause standoff distance model:
-    R0 [R_E] = (10.22 + 1.29*tanh(0.184*(Bz+8.14))) * Dp^(-1/6.6)
-    (Bz in nT, Dp in nPa) — the standard, widely-used empirical
-    magnetopause location model (this is the full model, not a
-    simplified proportional form, since it's already well-calibrated
-    for direct use as-is).
-    """
+    """Shue et al. 1998 empirical magnetopause standoff distance model."""
     name = "magnetopause_standoff_re"
-    dp_safe = df[dp_col].clip(lower=1e-6)
-    df[name] = (10.22 + 1.29 * np.tanh(0.184 * (df[bz_col] + 8.14))) * dp_safe ** (-1 / 6.6)
+    df[name] = physics_magnetosphere.magnetopause_standoff_series(df[bz_col], df[dp_col])
+    return [name]
+
+
+def add_estimated_compression(df: pd.DataFrame, standoff_col: str = "magnetopause_standoff_re") -> list[str]:
+    """Percentage deviation of the magnetopause standoff distance from
+    its nominal quiet-time value. New to this lab. Requires Magnetopause
+    Stand-off Distance first.
+    """
+    name = "estimated_compression_pct"
+    df[name] = physics_magnetosphere.estimated_compression_series(df[standoff_col])
     return [name]
 
 
 def add_integrated_ey(df: pd.DataFrame, ey_col: str = "ey", window: int = DEFAULT_WINDOW_HOURS) -> list[str]:
     name = f"integrated_ey_{window}h"
-    df[name] = df[ey_col].clip(lower=0).rolling(window).sum()
+    df[name] = physics_core.integrated_ey_series(df[ey_col], window)
     return [name]
 
 
 def add_integrated_vbz(df: pd.DataFrame, vbz_col: str = "vbz", window: int = DEFAULT_WINDOW_HOURS) -> list[str]:
     name = f"integrated_vbz_{window}h"
-    df[name] = df[vbz_col].abs().rolling(window).sum()
+    df[name] = physics_core.integrated_vbz_series(df[vbz_col], window)
     return [name]
 
 
 def add_integrated_energy_input(
-    df: pd.DataFrame,
-    speed_col: str = "speed",
-    by_col: str = "by_gsm",
-    bz_col: str = "bz_gsm",
-    window: int = DEFAULT_WINDOW_HOURS,
+    df: pd.DataFrame, epsilon_col: str = "akasofu_epsilon", window: int = DEFAULT_WINDOW_HOURS
 ) -> list[str]:
-    """Rolling sum of the Newell coupling function over `window` hours —
-    a cumulative energy-input proxy. Computes Newell coupling internally
-    (rather than requiring add_newell_coupling to have already run) so
-    this is usable regardless of whether "Newell Coupling Function" is
-    separately enabled as its own feature.
+    """Rolling sum of Akasofu epsilon over `window` hours — a genuine
+    cumulative-ENERGY quantity (Watt-hours), which is why Akasofu epsilon
+    (an actual power/energy-rate quantity) is integrated here rather than
+    Newell coupling (a flux-opening rate, not an energy quantity) — this
+    lab previously integrated Newell coupling instead; see this module's
+    docstring. Requires Akasofu Epsilon first (a dependency this feature
+    didn't have before, since it used to recompute Newell internally).
     """
     name = f"integrated_energy_input_{window}h"
-    bt_yz = np.sqrt(df[by_col] ** 2 + df[bz_col] ** 2)
-    clock_angle = np.arctan2(df[by_col], df[bz_col])
-    newell = (df[speed_col] ** (4 / 3)) * (bt_yz ** (2 / 3)) * (np.abs(np.sin(clock_angle / 2)) ** (8 / 3))
-    df[name] = newell.rolling(window).sum()
+    df[name] = physics_coupling.integrated_energy_input_series(df[epsilon_col], window)
+    return [name]
+
+
+def add_clock_angle_change(df: pd.DataFrame, clock_angle_col: str = "clock_angle_deg") -> list[str]:
+    """Hour-to-hour change in clock angle. New to this lab as a standalone
+    toggle (previously only computed internally, unexposed, by this lab's
+    now-removed Clock Angle Persistence). Requires Clock Angle first.
+    """
+    name = "clock_angle_change_deg"
+    df[name] = physics_geometry.clock_angle_rate_series(df[clock_angle_col])
+    return [name]
+
+
+def add_imf_rotation_rate(
+    df: pd.DataFrame, clock_angle_change_col: str = "clock_angle_change_deg", window: int = DEFAULT_WINDOW_HOURS
+) -> list[str]:
+    """Rolling sum of |hour-to-hour clock angle change| over `window`
+    hours. New to this lab — previously only available (mislabeled as
+    "Magnetic Shear") in the Kp Research Laboratory; see
+    kp_physics_features.py's docstring for that resolution. Requires
+    Clock Angle Change first.
+    """
+    name = f"imf_rotation_rate_{window}h"
+    df[name] = physics_geometry.imf_rotation_rate_series(df[clock_angle_change_col], window)
+    return [name]
+
+
+def add_magnetic_shear(df: pd.DataFrame, columns: tuple = ("bx_gsm", "by_gsm", "bz_gsm")) -> list[str]:
+    """Magnitude of the total IMF vector's hour-to-hour rotation:
+    sqrt(dBx^2 + dBy^2 + dBz^2) — an explicit, disclosed SIMPLIFICATION;
+    see swdss.physics.geometry's module docstring.
+    """
+    name = "magnetic_shear"
+    df[name] = physics_geometry.magnetic_shear_series(df[columns[0]], df[columns[1]], df[columns[2]])
     return [name]
 
 
@@ -223,38 +300,27 @@ def add_clock_angle_persistence(
     df: pd.DataFrame, clock_angle_col: str = "clock_angle_deg", window: int = DEFAULT_WINDOW_HOURS
 ) -> list[str]:
     """Rolling standard deviation of clock angle over `window` hours — a
-    LOW value means the IMF orientation has been stable/persistent; a
-    HIGH value means the field has been rotating/tumbling. Same
-    "persistence via rolling std" pattern as the IMF lab's Bt Persistence.
+    LOW value means the IMF orientation has been stable/persistent.
     """
     name = f"clock_angle_persistence_{window}h_std"
     df[name] = df[clock_angle_col].rolling(window).std()
     return [name]
 
 
-def add_magnetic_shear(df: pd.DataFrame, columns: tuple = ("bx_gsm", "by_gsm", "bz_gsm")) -> list[str]:
-    """Magnitude of the total IMF vector's hour-to-hour rotation:
-    sqrt(dBx^2 + dBy^2 + dBz^2). An explicit, disclosed SIMPLIFICATION —
-    "magnetic shear" properly refers to the angle between the IMF and
-    the magnetospheric field at the magnetopause, which requires a
-    magnetospheric field model this project doesn't have. This is a
-    proxy for "how rapidly is the field direction/structure changing",
-    not a true shear-angle calculation.
-    """
-    name = "magnetic_shear"
-    squared_sum = sum(df[c].diff() ** 2 for c in columns)
-    df[name] = np.sqrt(squared_sum)
-    return [name]
-
-
 def add_solar_wind_persistence(df: pd.DataFrame, speed_col: str = "speed", window: int = DEFAULT_WINDOW_HOURS) -> list[str]:
-    """Rolling standard deviation of Solar Wind Speed over `window` hours
-    — a LOW value means steady driving conditions; a HIGH value means
-    turbulent/variable solar wind (e.g. during a CME passage).
+    """Rolling mean/std/max/min of Solar Wind Speed over `window` hours.
+    Previously std-only in this lab; now the full stat set (a strict
+    superset — the previously-available std column is unchanged, mean/
+    max/min are new additions), matching the Kp Research Laboratory's
+    own Solar Wind Persistence.
     """
-    name = f"solar_wind_persistence_{window}h_std"
-    df[name] = df[speed_col].rolling(window).std()
-    return [name]
+    created = []
+    stats = physics_persistence.persistence_stats_series(df[speed_col], window)
+    for stat, series in stats.items():
+        name = f"solar_wind_persistence_{window}h_{stat}"
+        df[name] = series
+        created.append(name)
+    return created
 
 
 # Display-name -> function registry for the opt-in "Physics Feature
@@ -264,13 +330,35 @@ PHYSICS_FEATURE_FUNCTIONS = {
     "Newell Coupling Function": add_newell_coupling,
     "Akasofu Epsilon Parameter": add_akasofu_epsilon,
     "Boyle Index": add_boyle_index,
+    "Magnetic Pressure": add_magnetic_pressure,
+    "Thermal Pressure": add_thermal_pressure,
+    "Total Pressure": add_total_pressure,
     "Plasma Beta": add_plasma_beta,
+    "Alfven Speed": add_alfven_speed,
     "Alfven Mach Number": add_alfven_mach_number,
     "Magnetopause Stand-off Distance": add_magnetopause_standoff,
+    "Estimated Compression": add_estimated_compression,
     "Integrated Ey": add_integrated_ey,
     "Integrated VBz": add_integrated_vbz,
     "Integrated Energy Input": add_integrated_energy_input,
+    "Clock Angle Change": add_clock_angle_change,
     "Clock Angle Persistence": add_clock_angle_persistence,
+    "IMF Rotation Rate": add_imf_rotation_rate,
     "Magnetic Shear": add_magnetic_shear,
     "Solar Wind Persistence": add_solar_wind_persistence,
+}
+
+# Every entry lists ALL transitively-required upstream features, in the
+# exact order they must run — see kp_physics_features.py's identical
+# note for why this resolver is one level deep by design.
+PHYSICS_FEATURE_DEPENDENCIES = {
+    "Akasofu Epsilon Parameter": [],  # uses clock_angle_deg, always present (core group)
+    "Boyle Index": [],  # uses clock_angle_deg, always present (core group)
+    "Total Pressure": ["Magnetic Pressure", "Thermal Pressure"],
+    "Plasma Beta": ["Magnetic Pressure", "Thermal Pressure"],
+    "Alfven Mach Number": ["Alfven Speed"],
+    "Integrated Energy Input": ["Akasofu Epsilon Parameter"],
+    "Clock Angle Persistence": [],  # uses clock_angle_deg, always present (core group)
+    "IMF Rotation Rate": ["Clock Angle Change"],
+    "Estimated Compression": ["Magnetopause Stand-off Distance"],
 }

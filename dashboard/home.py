@@ -25,6 +25,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from swdss import physics
 from swdss.ingest.kyoto_ae_quicklook import annotate_quicklook_image, fetch_quicklook_image, quicklook_image_url
 from swdss.models.explainability import explain_prediction
 from swdss.models.hypothesis import (
@@ -43,9 +44,11 @@ from swdss.models.hypothesis import (
 from swdss.models.physics_interpretation import physics_interpretation
 from swdss.models.imf_research import (
     ALL_TRAINABLE_MODELS,
+    DEFAULT_FEATURE_SET,
     DEFAULT_GRANULARITY,
     DEFAULT_HORIZON,
     DEFAULT_SEQUENCE_LENGTH,
+    FEATURE_SET_OPTIONS,
     FUTURE_MODELS,
     GRANULARITY_OPTIONS,
     HOURLY_HORIZONS,
@@ -55,14 +58,25 @@ from swdss.models.imf_research import (
     SEQUENCE_MODELS,
     TABULAR_MODELS,
     TARGET_OPTIONS,
+    check_promotion_criteria,
     compare_runs,
+    compute_persistence_benchmark,
+    compute_shap_importance,
     delete_run,
+    get_production_bz_metrics,
     get_run,
+    get_study,
     list_runs,
+    list_studies,
     load_research_frame,
+    mark_study_promoted,
+    mark_study_rejected,
     promote_run,
+    promote_to_production,
+    run_complete_optimization_study,
     train_horizon_sweep,
     train_research_model,
+    train_research_model_exp,
 )
 from swdss.models import ae_research, kp_research
 from swdss.models.jobs import (
@@ -3549,17 +3563,22 @@ def current_analysis_imf(df: pd.DataFrame) -> None:
 
 
 def _add_geospace_derived_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute derived physics columns used by the Geospace scatter explorer."""
+    """Compute derived physics columns used by the Geospace scatter explorer.
+
+    Ey/Dynamic Pressure/Clock Angle are computed via swdss.physics — the
+    Physics Engine and this project's single canonical implementation of
+    these formulas — rather than recomputed inline.
+    """
     d = df.copy().sort_values("timestamp_utc").reset_index(drop=True)
 
     if "solar_wind_speed" in d.columns and "bz" in d.columns:
-        d["ey"] = -d["solar_wind_speed"] * d["bz"] * 1e-3
+        d["ey"] = physics.ey_series(d["solar_wind_speed"], d["bz"])
 
     if "solar_wind_speed" in d.columns and "proton_density" in d.columns:
-        d["dynamic_pressure"] = 1.6726e-6 * d["proton_density"] * d["solar_wind_speed"] ** 2
+        d["dynamic_pressure"] = physics.dynamic_pressure_series(d["proton_density"], d["solar_wind_speed"])
 
     if "by" in d.columns and "bz" in d.columns:
-        d["clock_angle"] = np.degrees(np.arctan2(d["by"], d["bz"]))
+        d["clock_angle"] = physics.clock_angle_series(d["by"], d["bz"])
 
     if "kp" in d.columns:
         d["prev_kp"] = d["kp"].shift(1)
@@ -3577,6 +3596,11 @@ def _add_geospace_derived_cols(df: pd.DataFrame) -> pd.DataFrame:
         d["prev_ae"] = np.nan
 
     if "bz" in d.columns:
+        # Deliberately NOT swdss.physics.core.southward_duration_series
+        # (a consecutive-streak count) — this is a distinct quantity, a
+        # rolling COUNT of southward hours within the trailing 24h
+        # window, regardless of whether they're consecutive. Kept as its
+        # own formula so this column's displayed values don't change.
         d["southward_duration"] = (d["bz"] < 0).astype(float).rolling(24, min_periods=1).sum()
 
     return d
@@ -3855,7 +3879,7 @@ def heliosphere_page(df: pd.DataFrame) -> None:
         st.subheader("Dynamic Pressure")
         if {"proton_density", "solar_wind_speed"}.issubset(df.columns):
             pressure = df.copy()
-            pressure["dynamic_pressure"] = 1.6726e-6 * pressure["proton_density"] * pressure["solar_wind_speed"] ** 2
+            pressure["dynamic_pressure"] = physics.dynamic_pressure_series(pressure["proton_density"], pressure["solar_wind_speed"])
             line_chart(pressure, ["dynamic_pressure"], "Estimated Solar Wind Dynamic Pressure")
         else:
             st.info("Need proton_density and solar_wind_speed columns.")
@@ -6580,7 +6604,11 @@ def render_imf_sequence_models_tab() -> None:
         if lh.get("val_loss"):
             fig.add_trace(go.Scatter(y=lh["val_loss"], mode="lines", name="Validation Loss"))
         fig.update_layout(title="Training / Validation Loss", height=340, xaxis_title="Epoch", yaxis_title="MSE Loss")
-        plot_retro(fig)
+        # Keyed on run_id: without a stable key, two runs whose loss curves
+        # happen to serialize identically (or the same run re-rendered
+        # across the 15s auto-refresh rerun cycle) collide on Streamlit's
+        # auto-generated element ID (element type + params only).
+        plot_retro(fig, key=f"imf_seq_loss_{run['run_id']}")
 
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
     st.markdown("##### All Sequence Model Runs")
@@ -6785,6 +6813,621 @@ def render_imf_horizon_analysis_tab() -> None:
     st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
 
+def _render_automl_section() -> None:
+    """AutoML orchestration layer — automatically runs Experiments 1-10
+    end-to-end (the manual Exp 1-8 tabs below stay untouched; this only
+    sequences the same underlying functions those tabs call). Promotion
+    is never automatic — the study always ends with a leaderboard and a
+    Promote/Keep recommendation for a human to act on.
+    """
+    st.markdown("### 🤖 Automated Optimization (AutoML)")
+    st.caption(
+        "Runs the entire pipeline below — baseline, persistence benchmark, structured feature "
+        "search, full model sweep, feature importance, SHAP, leaderboard, and a production "
+        "recommendation — with a single click and no manual tab-clicking. Every model trained "
+        "here lands in the same registry as the manual experiments and can be inspected there. "
+        "**Promotion always requires your explicit confirmation** at the end."
+    )
+
+    if st.button("🚀 Run Complete Optimization Study", key="automl_run_study", type="primary"):
+        status_box = st.status("Running complete Bz optimization study…", expanded=True)
+
+        def _cb(step, total, msg):
+            status_box.update(label=f"Step {step}/{total} — {msg}")
+            status_box.write(f"**Step {step}/{total}:** {msg}")
+
+        try:
+            study = run_complete_optimization_study(progress_cb=_cb)
+            status_box.update(label="Optimization study complete.", state="complete", expanded=False)
+            st.session_state["automl_last_study_id"] = study["study_id"]
+            st.success(
+                f"Study complete — winner: **{study['winner_model_type']}** "
+                f"(R²={study['winner_metrics']['r2']:.4f}) — recommendation: **{study['recommendation']}**"
+            )
+            st.rerun()
+        except Exception as exc:
+            status_box.update(label="Optimization study failed.", state="error")
+            st.error(f"Study failed: {exc}")
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Study History")
+    studies = list_studies()
+    if not studies:
+        st.info("No optimization studies run yet — click the button above to run the first one.")
+        return
+
+    def _study_label(s):
+        rec_icon = "✅" if s["recommendation"] == "Promote" else "⏸"
+        status_icon = {"pending": "🕓", "promoted": "🚀", "rejected": "❌"}.get(s.get("promotion_status", "pending"), "")
+        return (
+            f"{rec_icon} {pd.Timestamp(s['started_at']).strftime('%Y-%m-%d %H:%M UTC')} · "
+            f"Winner: {s['winner_model_type']} (R²={s['winner_metrics']['r2']:.4f}) · "
+            f"{status_icon} {s.get('promotion_status', 'pending')}"
+        )
+
+    study_labels = [_study_label(s) for s in studies]
+    default_idx = 0
+    last_id = st.session_state.get("automl_last_study_id")
+    if last_id:
+        for i, s in enumerate(studies):
+            if s["study_id"] == last_id:
+                default_idx = i
+                break
+    chosen_label = st.selectbox("Select a study to inspect", study_labels, index=default_idx, key="automl_study_select")
+    study = studies[study_labels.index(chosen_label)]
+    _render_study_detail(study)
+
+
+def _render_study_detail(study: dict) -> None:
+    st.markdown(
+        f"**Study ID:** `{study['study_id'][:8]}…`  ·  "
+        f"**Started:** {pd.Timestamp(study['started_at']).strftime('%Y-%m-%d %H:%M UTC')}  ·  "
+        f"**Completed:** {pd.Timestamp(study['completed_at']).strftime('%Y-%m-%d %H:%M UTC')}"
+    )
+
+    step_cols = st.columns(5)
+    step_cols[0].metric("1. Baseline R²", f"{study['baseline_metrics']['r2']:.4f}")
+    step_cols[1].metric("2. Persistence R²", f"{study['persistence_metrics']['r2']:.4f}")
+    step_cols[2].metric(
+        "3-5. Best Feature Set", study["best_feature_combo"]["name"],
+        help=f"R²={study['best_feature_combo']['r2']:.4f}",
+    )
+    step_cols[3].metric("6. Winner", study["winner_model_type"], help=f"R²={study['winner_metrics']['r2']:.4f}")
+    step_cols[4].metric("10. Recommendation", study["recommendation"])
+
+    detail_tabs = st.tabs(
+        ["Feature Search", "Leaderboard", "Feature Importance", "SHAP", "Production Comparison", "Promotion"]
+    )
+
+    with detail_tabs[0]:
+        st.markdown("**Experiments 3-5 — Structured Feature Search Results**")
+        fs_rows = [
+            {
+                "Combination": r["name"], "R²": round(r["r2"], 4), "MAE": round(r["mae"], 4),
+                "RMSE": round(r["rmse"], 4), "Features": r["feature_count"],
+                "Winner": "⭐" if r["name"] == study["best_feature_combo"]["name"] else "",
+            }
+            for r in study["feature_search_results"]
+        ]
+        st.dataframe(pd.DataFrame(fs_rows), use_container_width=True, hide_index=True)
+
+    with detail_tabs[1]:
+        st.markdown("**Experiment 6 — Model Search Leaderboard**")
+        lb_rows = [
+            {
+                "Rank": r["rank"], "Model": r["model_type"], "Feature Set": r["feature_set_name"],
+                "R²": round(r["r2"], 4), "MAE": round(r["mae"], 4), "RMSE": round(r["rmse"], 4),
+                "MAPE (%)": round(r["mape"], 2) if r["mape"] is not None else None,
+                "Bias": round(r["bias"], 4),
+                "Train Time (s)": round(r["training_time_sec"], 3) if r["training_time_sec"] is not None else None,
+                "Inference (ms/sample)": (
+                    round(r["inference_time_ms_per_sample"], 4) if r["inference_time_ms_per_sample"] is not None else None
+                ),
+                "Model Size (KB)": round(r["model_size_kb"], 1) if r["model_size_kb"] is not None else None,
+                "Features": r["feature_count"],
+            }
+            for r in study["leaderboard"]
+        ]
+        st.dataframe(pd.DataFrame(lb_rows), use_container_width=True, hide_index=True)
+        if study.get("failed_candidates"):
+            with st.expander(f"⚠️ {len(study['failed_candidates'])} candidate(s) failed to train"):
+                for f in study["failed_candidates"]:
+                    st.caption(f"**{f['model_type']}**: {f['error']}")
+
+    with detail_tabs[2]:
+        st.markdown("**Experiment 7 — Feature Importance (winning / best-available candidate)**")
+        if study.get("feature_importance"):
+            fi_df = pd.DataFrame(study["feature_importance"], columns=["Feature", "Importance"]).head(25)
+            fig = go.Figure(go.Bar(x=fi_df["Importance"], y=fi_df["Feature"], orientation="h", marker_color="steelblue"))
+            fig.update_layout(title="Top 25 Features by Importance", height=520, yaxis=dict(autorange="reversed"))
+            plot_retro(fig)
+        else:
+            st.info("Feature importance not available for any candidate in this study.")
+
+    with detail_tabs[3]:
+        st.markdown("**Experiment 8 — SHAP Analysis**")
+        shap_result = study.get("shap_result") or {}
+        if shap_result.get("supported"):
+            shap_df = pd.DataFrame(shap_result["shap_importance"], columns=["Feature", "Mean |SHAP|"]).head(25)
+            fig = go.Figure(go.Bar(x=shap_df["Mean |SHAP|"], y=shap_df["Feature"], orientation="h", marker_color="indianred"))
+            fig.update_layout(title="Top 25 Features by Mean |SHAP Value|", height=520, yaxis=dict(autorange="reversed"))
+            plot_retro(fig)
+        else:
+            st.info(shap_result.get("skipped_reason", "SHAP analysis not available for this study."))
+
+    with detail_tabs[4]:
+        st.markdown("**Production Comparison**")
+        comp = study["production_comparison"]
+        if comp["current"] is None:
+            st.warning("No production Bz model currently on disk to compare against.")
+        else:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.markdown("**Current Production**")
+                st.metric("Algorithm", comp["current"]["algorithm"])
+                st.metric("R²", f"{comp['current']['r2']:.4f}")
+                st.metric("MAE", f"{comp['current']['mae']:.4f} nT")
+                st.metric("RMSE", f"{comp['current']['rmse']:.4f} nT")
+            with c2:
+                st.markdown("**Candidate**")
+                st.metric("Algorithm", comp["candidate"]["algorithm"])
+                st.metric("R²", f"{comp['candidate']['r2']:.4f}", delta=f"{comp['delta_r2']:+.4f}")
+                st.metric("MAE", f"{comp['candidate']['mae']:.4f} nT", delta=f"{comp['delta_mae']:+.4f}", delta_color="inverse")
+                st.metric("RMSE", f"{comp['candidate']['rmse']:.4f} nT", delta=f"{comp['delta_rmse']:+.4f}", delta_color="inverse")
+            with c3:
+                st.markdown("**Verdict**")
+                if study["recommendation"] == "Promote":
+                    st.success("✅ Promote")
+                else:
+                    st.warning("⏸ Keep Current Production")
+
+    with detail_tabs[5]:
+        st.markdown("**Promotion Criteria Checklist**")
+        for item in study["promotion_check"]["checklist"]:
+            icon = "✅" if item["passed"] else "❌"
+            st.markdown(f"{icon} **{item['criterion']}** — {item['detail']}")
+
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+        status = study.get("promotion_status", "pending")
+        if status == "promoted":
+            st.success(
+                f"This study's winning candidate was already promoted to production at "
+                f"{pd.Timestamp(study['promoted_at']).strftime('%Y-%m-%d %H:%M UTC')}."
+            )
+        elif status == "rejected":
+            rejected_at = study.get("rejected_at")
+            st.info(
+                "This study was reviewed and Kept Current Production"
+                + (f" at {pd.Timestamp(rejected_at).strftime('%Y-%m-%d %H:%M UTC')}." if rejected_at else ".")
+            )
+        else:
+            eligible = study["promotion_check"]["eligible"]
+            notes = st.text_area("Promotion notes (optional)", key=f"automl_promo_notes_{study['study_id']}")
+            pc1, pc2 = st.columns(2)
+            with pc1:
+                confirm = st.checkbox(
+                    "I understand this will overwrite the production model (a rollback archive will be created)",
+                    key=f"automl_promo_confirm_{study['study_id']}",
+                    disabled=not eligible,
+                )
+                if st.button(
+                    "🚀 Promote Winning Candidate to Production", key=f"automl_promote_{study['study_id']}",
+                    type="primary", disabled=not (eligible and confirm),
+                ):
+                    with st.spinner("Promoting to production…"):
+                        try:
+                            result = promote_to_production(study["winner_run_id"], notes=notes)
+                            mark_study_promoted(study["study_id"], study["winner_run_id"])
+                            st.success(f"Promoted! Archive: `{result['archive_path']}`")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Promotion failed: {exc}")
+                if not eligible:
+                    st.caption("Promotion disabled — one or more criteria above failed.")
+            with pc2:
+                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                if st.button("⏸ Keep Current Production", key=f"automl_reject_{study['study_id']}"):
+                    mark_study_rejected(study["study_id"], notes=notes)
+                    st.rerun()
+
+
+def render_imf_bz_optimization_study() -> None:
+    """8-experiment structured study to find the best production Bz model.
+
+    Experiments:
+      1  Baseline — reproduce current production model (Hourly, Linear Reg, 1h)
+      2  Persistence Benchmark — naïve lower bound
+      3  Solar Wind Inputs — IMF Only → +Speed → +Speed+Density → +All SW
+      4  Short-term Dynamics — add rolling min/max, slope, acceleration
+      5  Physics Variables — Ey, VBz, DynPressure, ClockAngle, SouthwardHours
+      6  ML Model Sweep — all 12 model types on best feature set
+      7  Feature Importance — tree-based feature ranking
+      8  Promote — archive production, install best model, update metrics.json
+    """
+    st.info(
+        "**Bz Production Model Optimization Study** — 8 structured experiments to answer: "
+        "can the current production Bz 1h model (R²≈0.50, Linear Regression) be improved, "
+        "and if so, what features/model should replace it?  All experiments use Hourly "
+        "granularity and 1h horizon so results are directly comparable to production."
+    )
+
+    _render_automl_section()
+    st.markdown("---")
+    st.markdown(
+        "### 🔬 Manual Experiments — Exp 1 through Exp 8\n"
+        "Run any experiment individually below for hands-on investigation. This is exactly what "
+        "**Run Complete Optimization Study** above orchestrates automatically — nothing here changes."
+    )
+
+    exp_tabs = st.tabs([
+        "Exp 1 · Baseline",
+        "Exp 2 · Persistence",
+        "Exp 3 · Solar Wind Inputs",
+        "Exp 4 · Dynamics Features",
+        "Exp 5 · Physics Variables",
+        "Exp 6 · Model Sweep",
+        "Exp 7 · Feature Importance",
+        "Exp 8 · Promote to Production",
+    ])
+
+    # ── Exp 1 · Baseline ────────────────────────────────────────────────────
+    with exp_tabs[0]:
+        st.markdown("##### Experiment 1 — Reproduce Production Baseline")
+        st.caption(
+            "Train Linear Regression, Hourly, 1h horizon, IMF + All Solar Wind features — "
+            "the exact configuration of the current production bz_gsm_1h.joblib.  "
+            "If this reproduces R²≈0.50, the study is calibrated correctly."
+        )
+        if st.button("▶ Run Baseline", key="opt_exp1_run", type="primary"):
+            with st.spinner("Training baseline (Linear Regression · Hourly · 1h)…"):
+                try:
+                    run = train_research_model_exp(
+                        "Bz", "Linear Regression",
+                        granularity="Hourly", horizon=1,
+                        feature_set="IMF + All Solar Wind",
+                        add_dynamics=False, add_physics=False,
+                        experiment_tag="exp1_baseline",
+                    )
+                    st.success(f"Baseline trained — R²={run['metrics']['r2']:.4f}, MAE={run['metrics']['mae']:.4f} nT")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Training failed: {exc}")
+
+        baseline_runs = [r for r in list_runs("Bz") if r.get("experiment_tag") == "exp1_baseline"]
+        if baseline_runs:
+            st.markdown("**Baseline Runs**")
+            rows = []
+            for r in baseline_runs:
+                m = r["metrics"]
+                rows.append({"Model": r["model_type"], "R²": round(m["r2"], 4), "MAE": round(m["mae"], 4),
+                              "RMSE": round(m["rmse"], 4), "Bias": round(m["bias"], 4),
+                              "Features": len(r["feature_columns"]), "Trained": pd.Timestamp(r["trained_at"]).strftime("%m-%d %H:%M UTC")})
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No baseline runs yet — click Run Baseline above.")
+
+    # ── Exp 2 · Persistence Benchmark ───────────────────────────────────────
+    with exp_tabs[1]:
+        st.markdown("##### Experiment 2 — Persistence Benchmark")
+        st.caption(
+            "Naïve forecast: next Bz = current Bz.  Any real model that cannot beat "
+            "this provides no value.  Stored permanently in the registry."
+        )
+        bench_run = next((r for r in list_runs("Bz") if r.get("experiment_tag") == "persistence_benchmark"), None)
+        if st.button("▶ Compute Persistence Benchmark", key="opt_exp2_run", type="primary"):
+            with st.spinner("Computing persistence benchmark…"):
+                try:
+                    bench_run = compute_persistence_benchmark("Bz", horizon=1, granularity="Hourly")
+                    st.success(f"Persistence baseline — R²={bench_run['metrics']['r2']:.4f}, MAE={bench_run['metrics']['mae']:.4f} nT")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Failed: {exc}")
+        if bench_run:
+            m = bench_run["metrics"]
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("R²", f"{m['r2']:.4f}")
+            c2.metric("MAE (nT)", f"{m['mae']:.4f}")
+            c3.metric("RMSE (nT)", f"{m['rmse']:.4f}")
+            c4.metric("Bias (nT)", f"{m['bias']:.4f}")
+            st.caption(f"Test samples: {bench_run['n_test_samples']:,}  ·  Computed: {pd.Timestamp(bench_run['trained_at']).strftime('%Y-%m-%d %H:%M UTC')}")
+        else:
+            st.info("Click above to compute and store the persistence benchmark.")
+
+    # ── Exp 3 · Solar Wind Inputs ────────────────────────────────────────────
+    with exp_tabs[2]:
+        st.markdown("##### Experiment 3 — Solar Wind Input Investigation")
+        st.caption(
+            "Train Linear Regression four times — adding one solar-wind group at a time — "
+            "to quantify how much each adds over IMF-only features."
+        )
+        col_fs, col_model3 = st.columns(2)
+        with col_fs:
+            fs3 = st.selectbox("Feature Set", list(FEATURE_SET_OPTIONS), key="opt_exp3_fs",
+                               help="Choose which feature group to add next")
+        with col_model3:
+            model3 = st.selectbox("Model", TABULAR_MODELS, key="opt_exp3_model")
+        if st.button("▶ Train This Feature Set", key="opt_exp3_run", type="primary"):
+            with st.spinner(f"Training {model3} with feature set '{fs3}'…"):
+                try:
+                    run = train_research_model_exp(
+                        "Bz", model3, granularity="Hourly", horizon=1,
+                        feature_set=fs3, add_dynamics=False, add_physics=False,
+                        experiment_tag="exp3_solar_wind_inputs",
+                    )
+                    st.success(f"R²={run['metrics']['r2']:.4f}, MAE={run['metrics']['mae']:.4f} nT  ({len(run['feature_columns'])} features)")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Training failed: {exc}")
+
+        exp3_runs = [r for r in list_runs("Bz") if r.get("experiment_tag") == "exp3_solar_wind_inputs"]
+        if exp3_runs:
+            rows3 = []
+            for r in exp3_runs:
+                m = r["metrics"]
+                rows3.append({"Feature Set": r.get("feature_set", "—"), "Model": r["model_type"],
+                               "R²": round(m["r2"], 4), "MAE": round(m["mae"], 4), "RMSE": round(m["rmse"], 4),
+                               "Features": len(r["feature_columns"]), "Trained": pd.Timestamp(r["trained_at"]).strftime("%m-%d %H:%M UTC")})
+            st.dataframe(pd.DataFrame(rows3), use_container_width=True, hide_index=True)
+        else:
+            st.info("No Exp 3 runs yet.")
+
+    # ── Exp 4 · Short-term Dynamics ──────────────────────────────────────────
+    with exp_tabs[3]:
+        st.markdown("##### Experiment 4 — Short-term Dynamics Features")
+        st.caption(
+            "Adds 3h/6h/12h rolling min, max, std; linear slope over last 6h; and second-difference "
+            "acceleration for each base column.  Compare to the best Exp-3 feature set to isolate "
+            "what the dynamics add."
+        )
+        col4a, col4b = st.columns(2)
+        with col4a:
+            fs4 = st.selectbox("Base Feature Set", list(FEATURE_SET_OPTIONS), key="opt_exp4_fs",
+                                index=list(FEATURE_SET_OPTIONS).index(DEFAULT_FEATURE_SET))
+        with col4b:
+            model4 = st.selectbox("Model", TABULAR_MODELS, key="opt_exp4_model")
+        if st.button("▶ Train with Dynamics Features", key="opt_exp4_run", type="primary"):
+            with st.spinner("Training with short-term dynamics…"):
+                try:
+                    run = train_research_model_exp(
+                        "Bz", model4, granularity="Hourly", horizon=1,
+                        feature_set=fs4, add_dynamics=True, add_physics=False,
+                        experiment_tag="exp4_dynamics",
+                    )
+                    st.success(f"R²={run['metrics']['r2']:.4f}, MAE={run['metrics']['mae']:.4f} nT  ({len(run['feature_columns'])} features)")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Training failed: {exc}")
+
+        exp4_runs = [r for r in list_runs("Bz") if r.get("experiment_tag") == "exp4_dynamics"]
+        if exp4_runs:
+            rows4 = []
+            for r in exp4_runs:
+                m = r["metrics"]
+                rows4.append({"Feature Set": r.get("feature_set", "—"), "Model": r["model_type"],
+                               "R²": round(m["r2"], 4), "MAE": round(m["mae"], 4), "RMSE": round(m["rmse"], 4),
+                               "Features": len(r["feature_columns"]), "Trained": pd.Timestamp(r["trained_at"]).strftime("%m-%d %H:%M UTC")})
+            st.dataframe(pd.DataFrame(rows4), use_container_width=True, hide_index=True)
+        else:
+            st.info("No Exp 4 runs yet.")
+
+    # ── Exp 5 · Physics Variables ─────────────────────────────────────────────
+    with exp_tabs[4]:
+        st.markdown("##### Experiment 5 — Physics Variables")
+        st.caption(
+            "Adds hourly-computable physics features: Ey, VBz, Dynamic Pressure, Clock Angle, "
+            "Clock Angle Rate, Southward Hours (24h), Strong Southward Hours (24h), "
+            "Integrated Southward Bz (24h).  Requires 'IMF + All Solar Wind' to unlock Ey/VBz/DynPressure."
+        )
+        col5a, col5b = st.columns(2)
+        with col5a:
+            fs5 = st.selectbox("Base Feature Set", list(FEATURE_SET_OPTIONS), key="opt_exp5_fs",
+                                index=list(FEATURE_SET_OPTIONS).index(DEFAULT_FEATURE_SET))
+        with col5b:
+            model5 = st.selectbox("Model", TABULAR_MODELS, key="opt_exp5_model")
+        add_dyn5 = st.checkbox("Also add Dynamics features (Exp 4)", key="opt_exp5_dyn")
+        if st.button("▶ Train with Physics Variables", key="opt_exp5_run", type="primary"):
+            with st.spinner("Training with physics features…"):
+                try:
+                    run = train_research_model_exp(
+                        "Bz", model5, granularity="Hourly", horizon=1,
+                        feature_set=fs5, add_dynamics=add_dyn5, add_physics=True,
+                        experiment_tag="exp5_physics",
+                    )
+                    st.success(f"R²={run['metrics']['r2']:.4f}, MAE={run['metrics']['mae']:.4f} nT  ({len(run['feature_columns'])} features)")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Training failed: {exc}")
+
+        exp5_runs = [r for r in list_runs("Bz") if r.get("experiment_tag") == "exp5_physics"]
+        if exp5_runs:
+            rows5 = []
+            for r in exp5_runs:
+                m = r["metrics"]
+                rows5.append({"Feature Set": r.get("feature_set", "—"), "Model": r["model_type"],
+                               "+Dynamics": r.get("add_dynamics", False), "+Physics": r.get("add_physics", False),
+                               "R²": round(m["r2"], 4), "MAE": round(m["mae"], 4),
+                               "Features": len(r["feature_columns"]), "Trained": pd.Timestamp(r["trained_at"]).strftime("%m-%d %H:%M UTC")})
+            st.dataframe(pd.DataFrame(rows5), use_container_width=True, hide_index=True)
+        else:
+            st.info("No Exp 5 runs yet.")
+
+    # ── Exp 6 · ML Model Sweep ────────────────────────────────────────────────
+    with exp_tabs[5]:
+        st.markdown("##### Experiment 6 — ML Model Comparison Sweep")
+        st.caption(
+            "Run all available model types with the same feature set.  Use the best configuration "
+            "found in Exp 3–5 to give each model an equal footing."
+        )
+        col6a, col6b = st.columns(2)
+        with col6a:
+            fs6 = st.selectbox("Feature Set", list(FEATURE_SET_OPTIONS), key="opt_exp6_fs",
+                                index=list(FEATURE_SET_OPTIONS).index(DEFAULT_FEATURE_SET))
+        with col6b:
+            add_dyn6 = st.checkbox("Add Dynamics", key="opt_exp6_dyn")
+        add_phys6 = st.checkbox("Add Physics", key="opt_exp6_phys")
+
+        model6 = st.selectbox("Model to train", TABULAR_MODELS, key="opt_exp6_model")
+        if st.button(f"▶ Train {model6}", key="opt_exp6_run", type="primary"):
+            with st.spinner(f"Training {model6}…"):
+                try:
+                    run = train_research_model_exp(
+                        "Bz", model6, granularity="Hourly", horizon=1,
+                        feature_set=fs6, add_dynamics=add_dyn6, add_physics=add_phys6,
+                        experiment_tag="exp6_model_sweep",
+                    )
+                    st.success(f"{model6} — R²={run['metrics']['r2']:.4f}, MAE={run['metrics']['mae']:.4f} nT")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Training failed: {exc}")
+
+        exp6_runs = [r for r in list_runs("Bz") if r.get("experiment_tag") == "exp6_model_sweep"]
+        if exp6_runs:
+            rows6 = []
+            best6_r2 = max(r["metrics"]["r2"] for r in exp6_runs)
+            for r in exp6_runs:
+                m = r["metrics"]
+                label = r["model_type"] + (" ⭐" if abs(m["r2"] - best6_r2) < 1e-6 else "")
+                rows6.append({"Model": label, "Feature Set": r.get("feature_set", "—"),
+                               "+Dyn": r.get("add_dynamics", False), "+Phys": r.get("add_physics", False),
+                               "R²": round(m["r2"], 4), "MAE": round(m["mae"], 4),
+                               "RMSE": round(m["rmse"], 4), "Bias": round(m["bias"], 4),
+                               "Features": len(r["feature_columns"]),
+                               "Trained": pd.Timestamp(r["trained_at"]).strftime("%m-%d %H:%M UTC")})
+            rows6.sort(key=lambda x: -x["R²"])
+            st.dataframe(pd.DataFrame(rows6), use_container_width=True, hide_index=True)
+        else:
+            st.info("No Exp 6 runs yet.")
+
+    # ── Exp 7 · Feature Importance ────────────────────────────────────────────
+    with exp_tabs[6]:
+        st.markdown("##### Experiment 7 — Feature Importance")
+        st.caption(
+            "Select any tree-based run from the study to inspect feature importance.  "
+            "Top features across Exps 3–6 answer 'what should we keep, what can we drop'."
+        )
+        study_runs = [r for r in list_runs("Bz")
+                      if r.get("experiment_tag", "").startswith("exp") and r.get("feature_importance")]
+        if not study_runs:
+            st.info("No tree-based study runs with feature importance yet.  Train Random Forest or XGBoost in Exps 3–6.")
+        else:
+            def _run_lbl(r):
+                tag = r.get("experiment_tag", "")
+                return f"{tag} · {r['model_type']} · R²={r['metrics']['r2']:.4f} · {pd.Timestamp(r['trained_at']).strftime('%m-%d %H:%M')}"
+            run_options = {_run_lbl(r): r for r in study_runs}
+            chosen_lbl = st.selectbox("Run", list(run_options), key="opt_exp7_run")
+            chosen_run = run_options[chosen_lbl]
+            fi_pairs = chosen_run["feature_importance"]
+            fi_df = pd.DataFrame(fi_pairs, columns=["Feature", "Importance"]).head(25)
+            fig = go.Figure(go.Bar(x=fi_df["Importance"], y=fi_df["Feature"], orientation="h",
+                                   marker_color="steelblue"))
+            fig.update_layout(title="Top 25 Features by Importance", height=560,
+                              yaxis=dict(autorange="reversed"), xaxis_title="Importance")
+            plot_retro(fig)
+            st.markdown("**Full feature importance table**")
+            st.dataframe(fi_df, use_container_width=True, hide_index=True)
+
+    # ── Exp 8 · Promote to Production ────────────────────────────────────────
+    with exp_tabs[7]:
+        st.markdown("##### Experiment 8 — Promote Best Model to Production")
+        st.caption(
+            "Archives the current production bz_gsm_1h.joblib, installs the selected research "
+            "model, and updates models/imf/metrics.json.  "
+            "**Irreversible without the archive** — read the steps below before promoting."
+        )
+        st.markdown("""
+**What happens when you promote:**
+1. Current `models/imf/bz_gsm_1h.joblib` → `models/imf/archive/bz_gsm_1h_<timestamp>.joblib`
+2. Research model `.joblib` → `models/imf/bz_gsm_1h.joblib`
+3. `models/imf/metrics.json["bz_gsm_1h"]` updated with new R²/MAE/feature_columns
+4. Run marked `promoted_to_production=True` in registry
+5. **Next prediction job** picks up the new model automatically (no restart needed)
+
+**To roll back:** copy the archived `.joblib` back to `models/imf/bz_gsm_1h.joblib` and restore metrics.json.
+        """)
+
+        # Only show Hourly, Bz, 1h, non-sequence runs
+        promotable = [
+            r for r in list_runs("Bz")
+            if r.get("granularity") == "Hourly"
+            and r.get("horizon") == 1
+            and r.get("model_type") not in SEQUENCE_MODELS
+            and r.get("model_path") is not None
+        ]
+        if not promotable:
+            st.info("No promotable runs yet — train a Hourly · Bz · 1h model in any Exp above.")
+        else:
+            def _promo_lbl(r):
+                tag = r.get("experiment_tag", "")
+                return (f"{tag} · {r['model_type']} · R²={r['metrics']['r2']:.4f} · "
+                        f"MAE={r['metrics']['mae']:.4f} · {pd.Timestamp(r['trained_at']).strftime('%m-%d %H:%M UTC')}")
+            promo_options = {_promo_lbl(r): r for r in sorted(promotable, key=lambda r: -r["metrics"]["r2"])}
+            chosen_promo_lbl = st.selectbox("Select run to promote", list(promo_options), key="opt_exp8_run")
+            chosen_promo = promo_options[chosen_promo_lbl]
+
+            m_p = chosen_promo["metrics"]
+            pc1, pc2, pc3 = st.columns(3)
+            pc1.metric("R²", f"{m_p['r2']:.4f}")
+            pc2.metric("MAE", f"{m_p['mae']:.4f} nT")
+            pc3.metric("Features", len(chosen_promo["feature_columns"]))
+
+            promo_notes = st.text_area("Promotion notes (optional)", key="opt_exp8_notes",
+                                       placeholder="e.g. Exp 6 winner — XGBoost + All SW + Physics, R²=0.62")
+
+            already_promoted = chosen_promo.get("promoted_to_production", False)
+            if already_promoted:
+                st.warning("This run has already been promoted to production.")
+
+            confirm = st.checkbox("I understand this will overwrite the production model (a rollback archive will be created)", key="opt_exp8_confirm")
+            if st.button("🚀 Promote to Production", key="opt_exp8_promote", type="primary", disabled=not confirm):
+                with st.spinner("Promoting to production…"):
+                    try:
+                        result = promote_to_production(chosen_promo["run_id"], notes=promo_notes)
+                        st.success(f"Promoted successfully!  Archive: `{result['archive_path']}`")
+                        if result.get("old_metrics"):
+                            old = result["old_metrics"]
+                            new = result["new_metrics"]
+                            delta_r2 = new["r2"] - old.get("r2", 0)
+                            delta_mae = new["mae"] - old.get("mae", 0)
+                            d1, d2 = st.columns(2)
+                            d1.metric("R² change", f"{new['r2']:.4f}", delta=f"{delta_r2:+.4f}")
+                            d2.metric("MAE change", f"{new['mae']:.4f} nT", delta=f"{delta_mae:+.4f} nT",
+                                      delta_color="inverse")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Promotion failed: {exc}")
+
+        # Study Summary — all study runs ranked
+        st.markdown("---")
+        st.markdown("##### All Study Runs — Ranked by R²")
+        all_study = [r for r in list_runs("Bz")
+                     if r.get("experiment_tag", "").startswith("exp") or r.get("experiment_tag") == "persistence_benchmark"]
+        # Also include persistence benchmark
+        bench = next((r for r in list_runs("Bz") if r.get("experiment_tag") == "persistence_benchmark"), None)
+        if bench and bench not in all_study:
+            all_study.append(bench)
+        if all_study:
+            rows8 = []
+            best8_r2 = max(r["metrics"]["r2"] for r in all_study)
+            for r in sorted(all_study, key=lambda x: -x["metrics"]["r2"]):
+                m = r["metrics"]
+                rows8.append({
+                    "Experiment": r.get("experiment_tag", "—"),
+                    "Model": r["model_type"] + (" ⭐" if abs(m["r2"] - best8_r2) < 1e-6 else ""),
+                    "Feature Set": r.get("feature_set", "—"),
+                    "+Dyn": r.get("add_dynamics", "—"),
+                    "+Phys": r.get("add_physics", "—"),
+                    "R²": round(m["r2"], 4),
+                    "MAE (nT)": round(m["mae"], 4),
+                    "RMSE (nT)": round(m["rmse"], 4),
+                    "Bias (nT)": round(m["bias"], 4),
+                    "Features": len(r.get("feature_columns", [])),
+                    "Promoted": "✅" if r.get("promoted_to_production") else "",
+                })
+            st.dataframe(pd.DataFrame(rows8), use_container_width=True, hide_index=True)
+        else:
+            st.info("Run experiments above to populate this summary.")
+
+
 def render_imf_research_laboratory() -> None:
     hdr_col, pause_col = st.columns([3, 1])
     with hdr_col:
@@ -6804,6 +7447,7 @@ def render_imf_research_laboratory() -> None:
 
     sub = st.tabs(
         [
+            "🔬 Bz Optimization Study",
             "Training Runs",
             "Horizon Analysis",
             "Model Comparison",
@@ -6815,20 +7459,22 @@ def render_imf_research_laboratory() -> None:
         ]
     )
     with sub[0]:
-        render_imf_training_runs_tab()
+        render_imf_bz_optimization_study()
     with sub[1]:
-        render_imf_horizon_analysis_tab()
+        render_imf_training_runs_tab()
     with sub[2]:
-        render_imf_model_comparison_tab()
+        render_imf_horizon_analysis_tab()
     with sub[3]:
-        render_imf_feature_engineering_tab()
+        render_imf_model_comparison_tab()
     with sub[4]:
-        render_imf_physics_experiments_tab()
+        render_imf_feature_engineering_tab()
     with sub[5]:
-        render_imf_sequence_models_tab()
+        render_imf_physics_experiments_tab()
     with sub[6]:
-        render_imf_hyperparameter_tuning_tab()
+        render_imf_sequence_models_tab()
     with sub[7]:
+        render_imf_hyperparameter_tuning_tab()
+    with sub[8]:
         render_imf_hypothesis_testing_tab()
 
 
@@ -7529,6 +8175,686 @@ def render_kp_visualization_tab() -> None:
         plot_retro(fig6, key="kp_viz_loss")
 
 
+def _kp_opt_isolated_toggles(groups: dict) -> dict:
+    """UI-local mirror of kp_research._build_isolated_toggles — builds a
+    feature_toggles dict with everything off except the named columns, so
+    Exp 3/4/5's manual tabs can isolate one input combination exactly like
+    the automated pipeline does.
+    """
+    toggles = {group: {col: False for col in cols} for group, cols in kp_research.FEATURE_GROUP_COLUMNS.items()}
+    for group, cols in groups.items():
+        for col in cols:
+            toggles[group][col] = True
+    return toggles
+
+
+def _kp_opt_latest_baseline_r2() -> float:
+    runs = [r for r in kp_research.list_runs() if r.get("experiment_tag", "").endswith("exp1_baseline")]
+    return runs[0]["metrics"]["r2"] if runs else None
+
+
+def _render_kp_automl_section() -> None:
+    """AutoML orchestration layer for the Kp Optimization Study — mirrors
+    the Bz lab's automation section, adapted for Kp's 10-experiment
+    magnetosphere-coupling-focused pipeline. The manual Exp 1-10 tabs
+    below stay fully intact; this only sequences the same underlying
+    kp_research functions those tabs call.
+    """
+    st.markdown("### 🤖 Automated Optimization (AutoML)")
+    st.caption(
+        "Runs all 10 experiments end-to-end — production baseline, persistence benchmark, Solar "
+        "Wind / IMF / Geomagnetic History input search, the full Physics Optimization sweep (26 "
+        "coupling-function groups), a structured combination of the strongest physics contributors, "
+        "a full model sweep, feature importance, SHAP, and a production recommendation."
+    )
+    st.warning(
+        "⚠️ This runs 45-55+ separate training runs, several on 100+ engineered features across "
+        "~27,000 rows — expect this to take a long time. **Turn on ⏸ Pause Live Refresh above before "
+        "clicking**, or the dashboard's 15-second auto-refresh can interrupt the run partway through."
+    )
+
+    if st.button("🚀 Run Complete Kp Optimization Study", key="kp_automl_run_study", type="primary"):
+        status_box = st.status("Running complete Kp optimization study…", expanded=True)
+
+        def _cb(step, total, msg):
+            status_box.update(label=f"Step {step}/{total} — {msg}")
+            status_box.write(f"**Step {step}/{total}:** {msg}")
+
+        try:
+            study = kp_research.run_complete_kp_optimization_study(progress_cb=_cb)
+            status_box.update(label="Optimization study complete.", state="complete", expanded=False)
+            st.session_state["kp_automl_last_study_id"] = study["study_id"]
+            st.success(
+                f"Study complete — winner: **{study['winner_model_type']}** "
+                f"(R²={study['winner_metrics']['r2']:.4f}) — recommendation: **{study['recommendation']}**"
+            )
+            st.rerun()
+        except Exception as exc:
+            status_box.update(label="Optimization study failed.", state="error")
+            st.error(f"Study failed: {exc}")
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Study History")
+    studies = kp_research.list_kp_studies()
+    if not studies:
+        st.info("No optimization studies run yet — click the button above to run the first one.")
+        return
+
+    def _study_label(s):
+        rec_icon = "✅" if s["recommendation"] == "Promote" else "⏸"
+        status_icon = {"pending": "🕓", "promoted": "🚀", "rejected": "❌"}.get(s.get("promotion_status", "pending"), "")
+        return (
+            f"{rec_icon} {pd.Timestamp(s['started_at']).strftime('%Y-%m-%d %H:%M UTC')} · "
+            f"Winner: {s['winner_model_type']} (R²={s['winner_metrics']['r2']:.4f}) · "
+            f"{status_icon} {s.get('promotion_status', 'pending')}"
+        )
+
+    study_labels = [_study_label(s) for s in studies]
+    default_idx = 0
+    last_id = st.session_state.get("kp_automl_last_study_id")
+    if last_id:
+        for i, s in enumerate(studies):
+            if s["study_id"] == last_id:
+                default_idx = i
+                break
+    chosen_label = st.selectbox("Select a study to inspect", study_labels, index=default_idx, key="kp_automl_study_select")
+    study = studies[study_labels.index(chosen_label)]
+    _render_kp_study_detail(study)
+
+
+def _render_kp_study_detail(study: dict) -> None:
+    st.markdown(
+        f"**Study ID:** `{study['study_id'][:8]}…`  ·  "
+        f"**Started:** {pd.Timestamp(study['started_at']).strftime('%Y-%m-%d %H:%M UTC')}  ·  "
+        f"**Completed:** {pd.Timestamp(study['completed_at']).strftime('%Y-%m-%d %H:%M UTC')}"
+    )
+
+    step_cols = st.columns(5)
+    step_cols[0].metric("1. Baseline R²", f"{study['baseline_metrics']['r2']:.4f}", help=study["baseline_model_type"])
+    step_cols[1].metric("2. Persistence R²", f"{study['persistence_metrics']['r2']:.4f}")
+    step_cols[2].metric(
+        "6. Top Physics", study["physics_results"][0]["name"] if study.get("physics_results") else "—",
+        help=f"ΔR²={study['physics_results'][0]['delta_r2']:+.4f}" if study.get("physics_results") else "",
+    )
+    step_cols[3].metric("7. Winner", study["winner_model_type"], help=f"R²={study['winner_metrics']['r2']:.4f}")
+    step_cols[4].metric("10. Recommendation", study["recommendation"])
+
+    detail_tabs = st.tabs(
+        ["Solar Wind / IMF / Geomag", "Physics Optimization", "Leaderboard", "Feature Importance",
+         "SHAP", "Production Comparison", "Promotion"]
+    )
+
+    with detail_tabs[0]:
+        st.markdown("**Experiment 3 — Solar Wind Inputs**")
+        st.dataframe(
+            pd.DataFrame([
+                {"Combination": r["name"], "R²": round(r["r2"], 4), "MAE": round(r["mae"], 4), "Features": r["feature_count"]}
+                for r in study["solar_wind_results"]
+            ]), use_container_width=True, hide_index=True,
+        )
+        st.markdown("**Experiment 4 — IMF Inputs**")
+        st.dataframe(
+            pd.DataFrame([
+                {"Combination": r["name"], "R²": round(r["r2"], 4), "MAE": round(r["mae"], 4), "Features": r["feature_count"]}
+                for r in study["imf_results"]
+            ]), use_container_width=True, hide_index=True,
+        )
+        st.markdown("**Experiment 5 — Geomagnetic History**")
+        st.dataframe(
+            pd.DataFrame([
+                {"Combination": r["name"], "R²": round(r["r2"], 4), "MAE": round(r["mae"], 4), "Features": r["feature_count"]}
+                for r in study["geomagnetic_results"]
+            ]), use_container_width=True, hide_index=True,
+        )
+
+    with detail_tabs[1]:
+        st.markdown("**Experiment 6 — Physics Optimization (ranked by ΔR² vs. Baseline)**")
+        st.caption(
+            "Positive ΔR² always means the variable helps, whether tested by adding it (physics-"
+            "experiment features) or removing it (Ey/VBz/Dynamic Pressure, already in the baseline)."
+        )
+        phys_rows = [
+            {"Physics Variable": r["name"], "Test": "Add" if r["kind"] == "add_physics" else "Remove-from-baseline",
+             "ΔR²": round(r["delta_r2"], 4), "R²": round(r["r2"], 4), "MAE": round(r["mae"], 4)}
+            for r in study["physics_results"]
+        ]
+        st.dataframe(pd.DataFrame(phys_rows), use_container_width=True, hide_index=True)
+        st.markdown("**Best Combined Feature Set**")
+        combo = study["best_feature_config"]
+        st.write(f"Combined physics groups: {', '.join(combo['combined_physics_names']) or '(none had positive ΔR²)'}")
+        st.caption(f"Combined-set R² = {combo['r2']:.4f} (confirms whether the top contributors combine well, not just individually).")
+
+    with detail_tabs[2]:
+        st.markdown("**Experiment 7 — Model Optimization Leaderboard**")
+        lb_rows = [
+            {
+                "Rank": r["rank"], "Model": r["model_type"], "R²": round(r["r2"], 4), "MAE": round(r["mae"], 4),
+                "RMSE": round(r["rmse"], 4), "MAPE (%)": round(r["mape"], 2) if r["mape"] is not None else None,
+                "Bias": round(r["bias"], 4),
+                "Train Time (s)": round(r["training_time_sec"], 3) if r["training_time_sec"] is not None else None,
+                "Inference (ms/sample)": round(r["inference_time_ms_per_sample"], 4) if r["inference_time_ms_per_sample"] is not None else None,
+                "Model Size (KB)": round(r["model_size_kb"], 1) if r["model_size_kb"] is not None else None,
+                "Features": r["feature_count"],
+            }
+            for r in study["leaderboard"]
+        ]
+        st.dataframe(pd.DataFrame(lb_rows), use_container_width=True, hide_index=True)
+        if study.get("failed_candidates"):
+            with st.expander(f"⚠️ {len(study['failed_candidates'])} candidate(s) failed to train"):
+                for f in study["failed_candidates"]:
+                    st.caption(f"**{f['model_type']}**: {f['error']}")
+
+    with detail_tabs[3]:
+        st.markdown("**Experiment 8 — Feature Importance (winning / best-available candidate)**")
+        if study.get("feature_importance"):
+            fi_df = pd.DataFrame(study["feature_importance"], columns=["Feature", "Importance"]).head(25)
+            fig = go.Figure(go.Bar(x=fi_df["Importance"], y=fi_df["Feature"], orientation="h", marker_color="steelblue"))
+            fig.update_layout(title="Top 25 Features by Importance", height=520, yaxis=dict(autorange="reversed"))
+            plot_retro(fig)
+        else:
+            st.info("Feature importance not available for any candidate in this study.")
+
+    with detail_tabs[4]:
+        st.markdown("**Experiment 9 — SHAP Analysis**")
+        shap_result = study.get("shap_result") or {}
+        if shap_result.get("supported"):
+            shap_df = pd.DataFrame(shap_result["shap_importance"], columns=["Feature", "Mean |SHAP|"]).head(25)
+            fig = go.Figure(go.Bar(x=shap_df["Mean |SHAP|"], y=shap_df["Feature"], orientation="h", marker_color="indianred"))
+            fig.update_layout(title="Top 25 Features by Mean |SHAP Value|", height=520, yaxis=dict(autorange="reversed"))
+            plot_retro(fig)
+        else:
+            st.info(shap_result.get("skipped_reason", "SHAP analysis not available for this study."))
+
+    with detail_tabs[5]:
+        st.markdown("**Production Comparison**")
+        comp = study["production_comparison"]
+        if comp["current"] is None:
+            st.warning("No production Kp model currently on disk to compare against.")
+        else:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.markdown("**Current Production**")
+                st.metric("Algorithm", comp["current"]["algorithm"])
+                st.metric("R²", f"{comp['current']['r2']:.4f}")
+                st.metric("MAE", f"{comp['current']['mae']:.4f}")
+                st.metric("RMSE", f"{comp['current']['rmse']:.4f}")
+            with c2:
+                st.markdown("**Candidate**")
+                st.metric("Algorithm", comp["candidate"]["algorithm"])
+                st.metric("R²", f"{comp['candidate']['r2']:.4f}", delta=f"{comp['delta_r2']:+.4f}")
+                st.metric("MAE", f"{comp['candidate']['mae']:.4f}", delta=f"{comp['delta_mae']:+.4f}", delta_color="inverse")
+                st.metric("RMSE", f"{comp['candidate']['rmse']:.4f}", delta=f"{comp['delta_rmse']:+.4f}", delta_color="inverse")
+            with c3:
+                st.markdown("**Verdict**")
+                if study["recommendation"] == "Promote":
+                    st.success("✅ Promote")
+                else:
+                    st.warning("⏸ Keep Current Production")
+
+    with detail_tabs[6]:
+        st.markdown("**Promotion Criteria Checklist**")
+        for item in study["promotion_check"]["checklist"]:
+            icon = "✅" if item["passed"] else "❌"
+            st.markdown(f"{icon} **{item['criterion']}** — {item['detail']}")
+
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+        status = study.get("promotion_status", "pending")
+        if status == "promoted":
+            st.success(
+                f"This study's winning candidate was already promoted to production at "
+                f"{pd.Timestamp(study['promoted_at']).strftime('%Y-%m-%d %H:%M UTC')}."
+            )
+        elif status == "rejected":
+            rejected_at = study.get("rejected_at")
+            st.info(
+                "This study was reviewed and Kept Current Production"
+                + (f" at {pd.Timestamp(rejected_at).strftime('%Y-%m-%d %H:%M UTC')}." if rejected_at else ".")
+            )
+        else:
+            eligible = study["promotion_check"]["eligible"]
+            notes = st.text_area("Promotion notes (optional)", key=f"kp_automl_promo_notes_{study['study_id']}")
+            pc1, pc2 = st.columns(2)
+            with pc1:
+                confirm = st.checkbox(
+                    "I understand this will overwrite the production Kp model (a rollback archive will be created)",
+                    key=f"kp_automl_promo_confirm_{study['study_id']}",
+                    disabled=not eligible,
+                )
+                if st.button(
+                    "🚀 Promote Winning Candidate to Production", key=f"kp_automl_promote_{study['study_id']}",
+                    type="primary", disabled=not (eligible and confirm),
+                ):
+                    with st.spinner("Promoting to production…"):
+                        try:
+                            result = kp_research.promote_kp_to_production(study["winner_run_id"], notes=notes)
+                            kp_research.mark_kp_study_promoted(study["study_id"], study["winner_run_id"])
+                            st.success(f"Promoted! Archive: `{result['archive_path']}`")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Promotion failed: {exc}")
+                if not eligible:
+                    st.caption("Promotion disabled — one or more criteria above failed.")
+            with pc2:
+                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                if st.button("⏸ Keep Current Production", key=f"kp_automl_reject_{study['study_id']}"):
+                    kp_research.mark_kp_study_rejected(study["study_id"], notes=notes)
+                    st.rerun()
+
+
+def render_kp_optimization_study() -> None:
+    """10-experiment structured study to discover the best scientifically
+    defensible Production Kp forecasting model — NOT simply the highest
+    R². Kp is an Earth-RESPONSE forecasting problem (Solar Wind -> IMF ->
+    magnetosphere-ionosphere coupling -> geomagnetic activity), unlike
+    Bz's upstream-IMF forecasting problem, so this study is structured
+    around validating physical coupling mechanisms before model choice:
+
+      1  Production Baseline — reproduce current production exactly
+      2  Persistence Benchmark — naïve lower bound
+      3  Solar Wind Inputs — Speed/Density/Temperature combinations
+      4  IMF Inputs — Bt/Bx/By/Bz individually and combined
+      5  Geomagnetic History — how much does magnetosphere memory help
+      6  Physics Optimization — 26 coupling-function groups, individually
+      7  Model Optimization — all 12 model types on the winning feature set
+      8  Feature Importance — tree-based ranking
+      9  SHAP Analysis — which variables consistently drive Kp
+      10 Optimization Summary — leaderboard, ranking, recommendation
+    """
+    st.info(
+        "**Kp Production Model Optimization Study** — 10 structured experiments to answer: can the "
+        "current production Kp interval model (R²≈0.6715, XGBoost) be improved, and if so, what "
+        "coupling physics/model should replace it? Unlike Bz (an upstream IMF-forecasting problem), "
+        "Kp is an Earth-RESPONSE forecasting problem — Solar Wind → IMF → magnetosphere-ionosphere "
+        "coupling → geomagnetic activity — so this study emphasizes physical coupling functions and "
+        "geomagnetic memory over raw statistical performance."
+    )
+
+    _render_kp_automl_section()
+    st.markdown("---")
+    st.markdown(
+        "### 🔬 Manual Experiments — Exp 1 through Exp 10\n"
+        "Run any experiment individually below for hands-on investigation. This is exactly what "
+        "**Run Complete Kp Optimization Study** above orchestrates automatically — nothing here changes."
+    )
+
+    exp_tabs = st.tabs([
+        "Exp 1 · Baseline", "Exp 2 · Persistence", "Exp 3 · Solar Wind", "Exp 4 · IMF Inputs",
+        "Exp 5 · Geomag History", "Exp 6 · Physics Optimization", "Exp 7 · Model Optimization",
+        "Exp 8 · Feature Importance", "Exp 9 · SHAP", "Exp 10 · Summary & Promote",
+    ])
+
+    # ── Exp 1 · Production Baseline ─────────────────────────────────────────
+    with exp_tabs[0]:
+        st.markdown("##### Experiment 1 — Reproduce Production Baseline")
+        st.caption(
+            f"Train {kp_research.PRODUCTION_BASELINE_MODEL} with every base feature group and every "
+            "engineered group enabled (no physics-experiment features) — the exact configuration "
+            "production's own train_kp_interval_model uses. Should reproduce R²≈0.6715."
+        )
+        if st.button("▶ Run Baseline", key="kpopt_exp1_run", type="primary"):
+            with st.spinner(f"Training {kp_research.PRODUCTION_BASELINE_MODEL} baseline…"):
+                try:
+                    run = kp_research.train_kp_research_model(
+                        kp_research.PRODUCTION_BASELINE_MODEL,
+                        feature_toggles=kp_research.default_feature_toggles(),
+                        engineered_groups=kp_research.default_engineered_toggles(),
+                        physics_features={},
+                        experiment_tag="exp1_baseline",
+                    )
+                    st.success(f"Baseline trained — R²={run['metrics']['r2']:.4f}, MAE={run['metrics']['mae']:.4f}")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Training failed: {exc}")
+
+        baseline_runs = [r for r in kp_research.list_runs() if r.get("experiment_tag") == "exp1_baseline"]
+        if baseline_runs:
+            st.dataframe(pd.DataFrame([
+                {"Model": r["model_type"], "R²": round(r["metrics"]["r2"], 4), "MAE": round(r["metrics"]["mae"], 4),
+                 "RMSE": round(r["metrics"]["rmse"], 4), "Features": len(r["feature_columns"]),
+                 "Trained": pd.Timestamp(r["trained_at"]).strftime("%m-%d %H:%M UTC")}
+                for r in baseline_runs
+            ]), use_container_width=True, hide_index=True)
+        else:
+            st.info("No baseline runs yet — click Run Baseline above.")
+
+    # ── Exp 2 · Persistence Benchmark ───────────────────────────────────────
+    with exp_tabs[1]:
+        st.markdown("##### Experiment 2 — Persistence Benchmark")
+        st.caption("Naïve forecast: next official Kp interval = current official Kp value. Stored permanently.")
+        bench_run = next((r for r in kp_research.list_runs() if r.get("experiment_tag") == "persistence_benchmark"), None)
+        if st.button("▶ Compute Persistence Benchmark", key="kpopt_exp2_run", type="primary"):
+            with st.spinner("Computing persistence benchmark…"):
+                try:
+                    bench_run = kp_research.compute_kp_persistence_benchmark()
+                    st.success(f"Persistence baseline — R²={bench_run['metrics']['r2']:.4f}, MAE={bench_run['metrics']['mae']:.4f}")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Failed: {exc}")
+        if bench_run:
+            m = bench_run["metrics"]
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("R²", f"{m['r2']:.4f}")
+            c2.metric("MAE", f"{m['mae']:.4f}")
+            c3.metric("RMSE", f"{m['rmse']:.4f}")
+            c4.metric("Bias", f"{m['bias']:.4f}")
+            st.caption(f"Test samples: {bench_run['n_test_samples']:,} · Computed: {pd.Timestamp(bench_run['trained_at']).strftime('%Y-%m-%d %H:%M UTC')}")
+        else:
+            st.info("Click above to compute and store the persistence benchmark.")
+
+    # ── Exp 3 · Solar Wind Inputs ────────────────────────────────────────────
+    with exp_tabs[2]:
+        st.markdown("##### Experiment 3 — Solar Wind Inputs")
+        st.caption("Systematically test Speed/Density/Temperature combinations, isolated against nothing else.")
+        combo_names = [c["name"] for c in kp_research.SOLAR_WIND_INPUT_GRID]
+        col3a, col3b = st.columns(2)
+        with col3a:
+            combo3 = st.selectbox("Combination", combo_names, key="kpopt_exp3_combo")
+        with col3b:
+            model3 = st.selectbox("Model", kp_research.TABULAR_MODELS, key="kpopt_exp3_model")
+        if st.button("▶ Train This Combination", key="kpopt_exp3_run", type="primary"):
+            spec = next(c for c in kp_research.SOLAR_WIND_INPUT_GRID if c["name"] == combo3)
+            with st.spinner(f"Training {model3} on '{combo3}'…"):
+                try:
+                    run = kp_research.train_kp_research_model(
+                        model3, feature_toggles=_kp_opt_isolated_toggles(spec["groups"]),
+                        engineered_groups=kp_research.default_engineered_toggles(), physics_features={},
+                        experiment_tag="exp3_solar_wind_inputs",
+                    )
+                    st.success(f"R²={run['metrics']['r2']:.4f}, MAE={run['metrics']['mae']:.4f} ({len(run['feature_columns'])} features)")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Training failed: {exc}")
+        exp3_runs = [r for r in kp_research.list_runs() if r.get("experiment_tag") == "exp3_solar_wind_inputs"]
+        if exp3_runs:
+            st.dataframe(pd.DataFrame([
+                {"Model": r["model_type"], "R²": round(r["metrics"]["r2"], 4), "MAE": round(r["metrics"]["mae"], 4),
+                 "Features": len(r["feature_columns"]), "Trained": pd.Timestamp(r["trained_at"]).strftime("%m-%d %H:%M UTC")}
+                for r in exp3_runs
+            ]), use_container_width=True, hide_index=True)
+        else:
+            st.info("No Exp 3 runs yet.")
+
+    # ── Exp 4 · IMF Inputs ────────────────────────────────────────────────────
+    with exp_tabs[3]:
+        st.markdown("##### Experiment 4 — IMF Inputs")
+        st.caption("Evaluate Bt/Bx/By/Bz individually and combined, with lags/rolling stats/rate of change.")
+        combo_names4 = [c["name"] for c in kp_research.IMF_INPUT_GRID]
+        col4a, col4b = st.columns(2)
+        with col4a:
+            combo4 = st.selectbox("Combination", combo_names4, key="kpopt_exp4_combo")
+        with col4b:
+            model4 = st.selectbox("Model", kp_research.TABULAR_MODELS, key="kpopt_exp4_model")
+        if st.button("▶ Train This Combination", key="kpopt_exp4_run", type="primary"):
+            spec = next(c for c in kp_research.IMF_INPUT_GRID if c["name"] == combo4)
+            with st.spinner(f"Training {model4} on '{combo4}'…"):
+                try:
+                    run = kp_research.train_kp_research_model(
+                        model4, feature_toggles=_kp_opt_isolated_toggles(spec["groups"]),
+                        engineered_groups=kp_research.default_engineered_toggles(), physics_features={},
+                        experiment_tag="exp4_imf_inputs",
+                    )
+                    st.success(f"R²={run['metrics']['r2']:.4f}, MAE={run['metrics']['mae']:.4f} ({len(run['feature_columns'])} features)")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Training failed: {exc}")
+        exp4_runs = [r for r in kp_research.list_runs() if r.get("experiment_tag") == "exp4_imf_inputs"]
+        if exp4_runs:
+            st.dataframe(pd.DataFrame([
+                {"Model": r["model_type"], "R²": round(r["metrics"]["r2"], 4), "MAE": round(r["metrics"]["mae"], 4),
+                 "Features": len(r["feature_columns"]), "Trained": pd.Timestamp(r["trained_at"]).strftime("%m-%d %H:%M UTC")}
+                for r in exp4_runs
+            ]), use_container_width=True, hide_index=True)
+        else:
+            st.info("No Exp 4 runs yet.")
+
+    # ── Exp 5 · Geomagnetic History ───────────────────────────────────────────
+    with exp_tabs[4]:
+        st.markdown("##### Experiment 5 — Geomagnetic History")
+        st.caption("How much does the magnetosphere's own recent memory (previous Kp/Dst/AE) contribute?")
+        combo_names5 = [c["name"] for c in kp_research.GEOMAGNETIC_HISTORY_GRID]
+        col5a, col5b = st.columns(2)
+        with col5a:
+            combo5 = st.selectbox("Combination", combo_names5, key="kpopt_exp5_combo")
+        with col5b:
+            model5 = st.selectbox("Model", kp_research.TABULAR_MODELS, key="kpopt_exp5_model")
+        if st.button("▶ Train This Combination", key="kpopt_exp5_run", type="primary"):
+            spec = next(c for c in kp_research.GEOMAGNETIC_HISTORY_GRID if c["name"] == combo5)
+            with st.spinner(f"Training {model5} on '{combo5}'…"):
+                try:
+                    run = kp_research.train_kp_research_model(
+                        model5, feature_toggles=_kp_opt_isolated_toggles(spec["groups"]),
+                        engineered_groups=kp_research.default_engineered_toggles(), physics_features={},
+                        experiment_tag="exp5_geomagnetic_history",
+                    )
+                    st.success(f"R²={run['metrics']['r2']:.4f}, MAE={run['metrics']['mae']:.4f} ({len(run['feature_columns'])} features)")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Training failed: {exc}")
+        exp5_runs = [r for r in kp_research.list_runs() if r.get("experiment_tag") == "exp5_geomagnetic_history"]
+        if exp5_runs:
+            st.dataframe(pd.DataFrame([
+                {"Model": r["model_type"], "R²": round(r["metrics"]["r2"], 4), "MAE": round(r["metrics"]["mae"], 4),
+                 "Features": len(r["feature_columns"]), "Trained": pd.Timestamp(r["trained_at"]).strftime("%m-%d %H:%M UTC")}
+                for r in exp5_runs
+            ]), use_container_width=True, hide_index=True)
+        else:
+            st.info("No Exp 5 runs yet.")
+
+    # ── Exp 6 · Physics Optimization ──────────────────────────────────────────
+    with exp_tabs[5]:
+        st.markdown("##### Experiment 6 — Physics Optimization (the primary Kp experiment)")
+        st.caption(
+            "Evaluate each of 26 coupling-physics variables/functions individually against the full "
+            "production baseline — never all at once. Positive ΔR² means the variable helps."
+        )
+        phys_names = [c["name"] for c in kp_research.PHYSICS_OPTIMIZATION_GRID]
+        col6a, col6b = st.columns(2)
+        with col6a:
+            phys6 = st.selectbox("Physics Variable / Coupling Function", phys_names, key="kpopt_exp6_var")
+        with col6b:
+            model6 = st.selectbox("Model", kp_research.TABULAR_MODELS, key="kpopt_exp6_model")
+        if st.button("▶ Train This Physics Group", key="kpopt_exp6_run", type="primary"):
+            entry = next(c for c in kp_research.PHYSICS_OPTIMIZATION_GRID if c["name"] == phys6)
+            if entry["kind"] == "remove_column":
+                toggles = kp_research.default_feature_toggles()
+                toggles[entry["group"]] = dict(toggles[entry["group"]])
+                toggles[entry["group"]][entry["column"]] = False
+                physics_features = {}
+            else:
+                toggles = kp_research.default_feature_toggles()
+                physics_features = {entry.get("physics_name", entry["name"]): True}
+            with st.spinner(f"Training {model6} — {phys6}…"):
+                try:
+                    run = kp_research.train_kp_research_model(
+                        model6, feature_toggles=toggles, engineered_groups=kp_research.default_engineered_toggles(),
+                        physics_features=physics_features, experiment_tag="exp6_physics_optimization",
+                        notes=f"Physics Optimization — {entry['kind']}: {phys6}",
+                    )
+                    baseline_r2 = _kp_opt_latest_baseline_r2()
+                    delta_txt = ""
+                    if baseline_r2 is not None:
+                        delta = (run["metrics"]["r2"] - baseline_r2) if entry["kind"] == "add_physics" else (baseline_r2 - run["metrics"]["r2"])
+                        delta_txt = f" (ΔR² vs. Exp 1 baseline: {delta:+.4f})"
+                    st.success(f"R²={run['metrics']['r2']:.4f}, MAE={run['metrics']['mae']:.4f}{delta_txt}")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Training failed: {exc}")
+
+        exp6_runs = [r for r in kp_research.list_runs() if r.get("experiment_tag") == "exp6_physics_optimization"]
+        if exp6_runs:
+            baseline_r2 = _kp_opt_latest_baseline_r2()
+            rows6 = []
+            for r in exp6_runs:
+                notes = r.get("notes", "")
+                kind = "add_physics" if "add_physics:" in notes else ("remove_column" if "remove_column:" in notes else "?")
+                var_name = notes.split(": ", 1)[-1] if ": " in notes else "?"
+                delta = None
+                if baseline_r2 is not None:
+                    delta = (r["metrics"]["r2"] - baseline_r2) if kind == "add_physics" else (baseline_r2 - r["metrics"]["r2"])
+                rows6.append({
+                    "Physics Variable": var_name, "Model": r["model_type"], "R²": round(r["metrics"]["r2"], 4),
+                    "ΔR² vs Baseline": round(delta, 4) if delta is not None else None,
+                    "MAE": round(r["metrics"]["mae"], 4), "Trained": pd.Timestamp(r["trained_at"]).strftime("%m-%d %H:%M UTC"),
+                })
+            rows6.sort(key=lambda x: -(x["ΔR² vs Baseline"] or -999))
+            st.dataframe(pd.DataFrame(rows6), use_container_width=True, hide_index=True)
+        else:
+            st.info("No Exp 6 runs yet.")
+
+    # ── Exp 7 · Model Optimization ────────────────────────────────────────────
+    with exp_tabs[6]:
+        st.markdown("##### Experiment 7 — Model Optimization")
+        st.caption(
+            "Compare all model types on identical training data/forecast horizon/methodology — the "
+            "full baseline feature set (same as Exp 1), so results are comparable across model types."
+        )
+        model7 = st.selectbox("Model to train", kp_research.TABULAR_MODELS + kp_research.SEQUENCE_MODELS, key="kpopt_exp7_model")
+        seq_len7 = None
+        if model7 in kp_research.SEQUENCE_MODELS:
+            seq_len7 = st.selectbox("Sequence Length (hours)", kp_research.SEQUENCE_LENGTH_OPTIONS,
+                                     index=kp_research.SEQUENCE_LENGTH_OPTIONS.index(kp_research.DEFAULT_SEQUENCE_LENGTH),
+                                     key="kpopt_exp7_seqlen")
+        if st.button(f"▶ Train {model7}", key="kpopt_exp7_run", type="primary"):
+            with st.spinner(f"Training {model7}…"):
+                try:
+                    run = kp_research.train_kp_research_model(
+                        model7, feature_toggles=kp_research.default_feature_toggles(),
+                        engineered_groups=kp_research.default_engineered_toggles(), physics_features={},
+                        sequence_length=seq_len7, experiment_tag="exp7_model_optimization",
+                    )
+                    st.success(f"{model7} — R²={run['metrics']['r2']:.4f}, MAE={run['metrics']['mae']:.4f}")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Training failed: {exc}")
+
+        exp7_runs = [r for r in kp_research.list_runs() if r.get("experiment_tag") == "exp7_model_optimization"]
+        if exp7_runs:
+            best7_r2 = max(r["metrics"]["r2"] for r in exp7_runs)
+            rows7 = []
+            for r in exp7_runs:
+                m = r["metrics"]
+                label = r["model_type"] + (" ⭐" if abs(m["r2"] - best7_r2) < 1e-6 else "")
+                rows7.append({
+                    "Model": label, "R²": round(m["r2"], 4), "MAE": round(m["mae"], 4), "RMSE": round(m["rmse"], 4),
+                    "Bias": round(m["bias"], 4), "Features": len(r["feature_columns"]),
+                    "Trained": pd.Timestamp(r["trained_at"]).strftime("%m-%d %H:%M UTC"),
+                })
+            rows7.sort(key=lambda x: -x["R²"])
+            st.dataframe(pd.DataFrame(rows7), use_container_width=True, hide_index=True)
+        else:
+            st.info("No Exp 7 runs yet.")
+
+    # ── Exp 8 · Feature Importance ────────────────────────────────────────────
+    with exp_tabs[7]:
+        st.markdown("##### Experiment 8 — Feature Importance")
+        study_runs = [
+            r for r in kp_research.list_runs()
+            if r.get("experiment_tag", "").startswith("exp") and r.get("feature_importance")
+        ]
+        if not study_runs:
+            st.info("No tree-based Optimization Study runs with feature importance yet.")
+        else:
+            def _run_lbl(r):
+                return f"{r.get('experiment_tag')} · {r['model_type']} · R²={r['metrics']['r2']:.4f} · {pd.Timestamp(r['trained_at']).strftime('%m-%d %H:%M')}"
+            run_options = {_run_lbl(r): r for r in study_runs}
+            chosen_lbl = st.selectbox("Run", list(run_options), key="kpopt_exp8_run")
+            chosen_run = run_options[chosen_lbl]
+            fi_df = pd.DataFrame(chosen_run["feature_importance"], columns=["Feature", "Importance"]).head(25)
+            fig = go.Figure(go.Bar(x=fi_df["Importance"], y=fi_df["Feature"], orientation="h", marker_color="steelblue"))
+            fig.update_layout(title="Top 25 Features by Importance", height=560, yaxis=dict(autorange="reversed"))
+            plot_retro(fig)
+            st.dataframe(fi_df, use_container_width=True, hide_index=True)
+
+    # ── Exp 9 · SHAP Analysis ──────────────────────────────────────────────────
+    with exp_tabs[8]:
+        st.markdown("##### Experiment 9 — SHAP Analysis")
+        shap_candidates = [
+            r for r in kp_research.list_runs()
+            if r.get("experiment_tag", "").startswith("exp") and r["model_type"] in kp_research.SHAP_SUPPORTED_MODELS
+        ]
+        if not shap_candidates:
+            st.info("No SHAP-supported Optimization Study runs yet (linear or tree/boosting model types).")
+        else:
+            def _shap_lbl(r):
+                return f"{r.get('experiment_tag')} · {r['model_type']} · R²={r['metrics']['r2']:.4f} · {pd.Timestamp(r['trained_at']).strftime('%m-%d %H:%M')}"
+            shap_options = {_shap_lbl(r): r for r in shap_candidates}
+            chosen_shap_lbl = st.selectbox("Run", list(shap_options), key="kpopt_exp9_run")
+            chosen_shap_run = shap_options[chosen_shap_lbl]
+            if st.button("▶ Compute SHAP", key="kpopt_exp9_compute", type="primary"):
+                with st.spinner("Computing SHAP values…"):
+                    try:
+                        result = kp_research.compute_shap_importance_kp(chosen_shap_run["run_id"])
+                        st.session_state["kpopt_exp9_result"] = result
+                    except Exception as exc:
+                        st.error(f"SHAP failed: {exc}")
+            result = st.session_state.get("kpopt_exp9_result")
+            if result and result.get("supported") and result.get("run_id") == chosen_shap_run["run_id"]:
+                shap_df = pd.DataFrame(result["shap_importance"], columns=["Feature", "Mean |SHAP|"]).head(25)
+                fig = go.Figure(go.Bar(x=shap_df["Mean |SHAP|"], y=shap_df["Feature"], orientation="h", marker_color="indianred"))
+                fig.update_layout(title="Top 25 Features by Mean |SHAP Value|", height=560, yaxis=dict(autorange="reversed"))
+                plot_retro(fig)
+                st.dataframe(shap_df, use_container_width=True, hide_index=True)
+
+    # ── Exp 10 · Summary & Promote ────────────────────────────────────────────
+    with exp_tabs[9]:
+        st.markdown("##### Experiment 10 — Optimization Summary & Promotion")
+        st.caption("All Exp 1-9 manual runs ranked by R², compared against current production.")
+
+        all_study_runs = [r for r in kp_research.list_runs() if r.get("experiment_tag", "").startswith("exp") or r.get("experiment_tag") == "persistence_benchmark"]
+        if all_study_runs:
+            best_r2 = max(r["metrics"]["r2"] for r in all_study_runs)
+            rows10 = []
+            for r in sorted(all_study_runs, key=lambda x: -x["metrics"]["r2"]):
+                m = r["metrics"]
+                rows10.append({
+                    "Experiment": r.get("experiment_tag", "—"), "Model": r["model_type"] + (" ⭐" if abs(m["r2"] - best_r2) < 1e-6 else ""),
+                    "R²": round(m["r2"], 4), "MAE": round(m["mae"], 4), "RMSE": round(m["rmse"], 4),
+                    "Features": len(r.get("feature_columns", [])), "Promoted": "✅" if r.get("promoted_to_production") else "",
+                })
+            st.dataframe(pd.DataFrame(rows10), use_container_width=True, hide_index=True)
+        else:
+            st.info("Run experiments above to populate this summary.")
+
+        st.markdown("---")
+        st.markdown("**Promote a manual run to production**")
+        promotable = [
+            r for r in kp_research.list_runs()
+            if r.get("experiment_tag", "").startswith("exp") and r.get("model_type") not in kp_research.SEQUENCE_MODELS
+            and r.get("model_path")
+        ]
+        if not promotable:
+            st.info("No promotable manual runs yet.")
+        else:
+            def _promo_lbl(r):
+                return f"{r.get('experiment_tag')} · {r['model_type']} · R²={r['metrics']['r2']:.4f} · MAE={r['metrics']['mae']:.4f} · {pd.Timestamp(r['trained_at']).strftime('%m-%d %H:%M UTC')}"
+            promo_options = {_promo_lbl(r): r for r in sorted(promotable, key=lambda r: -r["metrics"]["r2"])}
+            chosen_promo_lbl = st.selectbox("Select run to promote", list(promo_options), key="kpopt_exp10_run")
+            chosen_promo = promo_options[chosen_promo_lbl]
+
+            prod_metrics = kp_research.get_production_kp_metrics()
+            check = kp_research.check_promotion_criteria_kp(chosen_promo, prod_metrics)
+            for item in check["checklist"]:
+                icon = "✅" if item["passed"] else "❌"
+                st.markdown(f"{icon} {item['criterion']} — {item['detail']}")
+
+            promo_notes = st.text_area("Promotion notes (optional)", key="kpopt_exp10_notes")
+            confirm10 = st.checkbox(
+                "I understand this will overwrite the production Kp model (a rollback archive will be created)",
+                key="kpopt_exp10_confirm", disabled=not check["eligible"],
+            )
+            if st.button("🚀 Promote to Production", key="kpopt_exp10_promote", type="primary",
+                         disabled=not (check["eligible"] and confirm10)):
+                with st.spinner("Promoting to production…"):
+                    try:
+                        result = kp_research.promote_kp_to_production(chosen_promo["run_id"], notes=promo_notes)
+                        st.success(f"Promoted! Archive: `{result['archive_path']}`")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Promotion failed: {exc}")
+            if not check["eligible"]:
+                st.caption("Promotion disabled — one or more criteria above failed.")
+
+
 def render_kp_research_laboratory() -> None:
     st.markdown("### 🧪 Kp Research Laboratory")
     hdr_col, pause_col = st.columns([3, 1])
@@ -7555,6 +8881,7 @@ def render_kp_research_laboratory() -> None:
 
     sub = st.tabs(
         [
+            "🔬 Kp Optimization Study",
             "Model Comparison",
             "Feature Ablation",
             "Physics Experiments",
@@ -7565,18 +8892,20 @@ def render_kp_research_laboratory() -> None:
         ]
     )
     with sub[0]:
-        render_kp_model_comparison_tab()
+        render_kp_optimization_study()
     with sub[1]:
-        render_kp_feature_ablation_tab()
+        render_kp_model_comparison_tab()
     with sub[2]:
-        render_kp_physics_experiments_tab()
+        render_kp_feature_ablation_tab()
     with sub[3]:
-        render_kp_sequence_models_tab()
+        render_kp_physics_experiments_tab()
     with sub[4]:
-        render_kp_experiment_tracking_tab()
+        render_kp_sequence_models_tab()
     with sub[5]:
-        render_kp_hypothesis_testing_tab()
+        render_kp_experiment_tracking_tab()
     with sub[6]:
+        render_kp_hypothesis_testing_tab()
+    with sub[7]:
         render_kp_visualization_tab()
 
 

@@ -6,29 +6,31 @@ selects) when available, falling back to a model-agnostic zero-out
 sensitivity check otherwise. Purely diagnostic and read-only: never
 retrains, never modifies a model or a live prediction, and has no effect
 on the production or experimental pipelines it inspects.
+
+SHAP is imported lazily, inside explain_prediction, not at module level:
+this module is imported unconditionally by the dashboard on every
+startup (dashboard/home.py imports it at its own top level), and SHAP
+pulls in numba -> llvmlite, whose compiled binding library alone is
+~120MB. Importing it eagerly here would force every dashboard launch to
+pay that cost even when no one ever opens an explainability panel — the
+same lazy-import pattern already used for SHAP in imf_research.py and
+kp_research.py.
 """
 
 import numpy as np
-
-try:
-    import shap
-
-    _SHAP_AVAILABLE = True
-except ImportError:
-    _SHAP_AVAILABLE = False
 
 from swdss.models.predict import _load_kp_interval_model, _load_metrics, _load_model, load_live_features
 
 TOP_N = 8
 
 
-def _select_shap_explainer(model, n_features: int):
+def _select_shap_explainer(shap_module, model, n_features: int):
     model_type = type(model).__name__
     if model_type in ("XGBRegressor", "RandomForestRegressor"):
-        return shap.TreeExplainer(model)
+        return shap_module.TreeExplainer(model)
     if model_type == "LinearRegression":
-        masker = shap.maskers.Independent(np.zeros((1, n_features)))
-        return shap.LinearExplainer(model, masker=masker)
+        masker = shap_module.maskers.Independent(np.zeros((1, n_features)))
+        return shap_module.LinearExplainer(model, masker=masker)
     return None
 
 
@@ -87,8 +89,13 @@ def explain_prediction(dataset: str, variable: str, horizon) -> dict:
     X_row = usable[feature_columns].iloc[[-1]]
     predicted_value = float(model.predict(X_row)[0])
 
-    if _SHAP_AVAILABLE:
-        explainer = _select_shap_explainer(model, len(feature_columns))
+    try:
+        import shap as shap_module
+    except ImportError:
+        shap_module = None
+
+    if shap_module is not None:
+        explainer = _select_shap_explainer(shap_module, model, len(feature_columns))
         if explainer is not None:
             sv = np.asarray(explainer.shap_values(X_row))
             sv_row = sv[0] if sv.ndim > 1 else sv

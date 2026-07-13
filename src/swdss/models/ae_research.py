@@ -50,10 +50,15 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVR
 from xgboost import XGBRegressor
 
-from swdss.models.ae_physics_features import PHYSICS_FEATURE_FUNCTIONS, add_all_core_derived_physics
+from swdss.models.ae_physics_features import (
+    PHYSICS_FEATURE_DEPENDENCIES,
+    PHYSICS_FEATURE_FUNCTIONS,
+    add_all_core_derived_physics,
+)
 from swdss.models.features import add_change_features, add_lag_features
 from swdss.models.registry import DATASETS
 from swdss.paths import DATA_DIR, MODELS_DIR
+from swdss.physics.registry import apply_requested_features
 
 try:
     from lightgbm import LGBMRegressor
@@ -247,10 +252,16 @@ def load_ae_research_frame(
     frame = _load_ae_base_frame()
     add_all_core_derived_physics(frame)
 
-    physics_cols: list[str] = []
-    for name, fn in PHYSICS_FEATURE_FUNCTIONS.items():
-        if physics_features.get(name, False):
-            physics_cols += fn(frame)
+    # Resolves prerequisites (e.g. Total Pressure needs Magnetic + Thermal
+    # Pressure computed first) via the Physics Engine's shared registry
+    # resolver — see swdss.physics.registry and kp_research.py's
+    # identical usage. Previously this loop called each requested
+    # function directly with no dependency resolution at all; that was a
+    # latent gap this lab's earlier, simpler physics features never
+    # exercised, but several features added by the Physics Engine
+    # migration (Total Pressure, Plasma Beta, Estimated Compression, IMF
+    # Rotation Rate) do have real prerequisites.
+    physics_cols = apply_requested_features(frame, physics_features, PHYSICS_FEATURE_FUNCTIONS, PHYSICS_FEATURE_DEPENDENCIES)
 
     base_cols = [
         col

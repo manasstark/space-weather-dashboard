@@ -15,10 +15,20 @@ All functions take a DataFrame indexed by minute-level timestamp_utc with
 at least a "bz_gsm" column (others as needed per function) and add new
 columns in place, returning the list of column names created — same
 convention as swdss.models.features, for a consistent calling style.
+
+Southward Duration, Strong Southward Duration, Integrated Southward Bz,
+Clock Angle, Clock Angle Rate, and Bt Persistence delegate to
+swdss.physics — the Physics Engine and this project's single canonical
+implementation of these formulas — parameterized to this lab's native
+minute cadence. Magnetic Rotation (raw per-component deltas) stays
+local: it isn't one of the canonical quantities migrated into the engine.
 """
 
-import numpy as np
 import pandas as pd
+
+from swdss.physics import core as physics_core
+from swdss.physics import geometry as physics_geometry
+from swdss.physics import persistence as physics_persistence
 
 # Minute-cadence analogs of the production pipeline's hour-cadence lag
 # set ([1,3,6,12,24]h) and rolling window (24h) — adapted to this
@@ -64,16 +74,6 @@ def add_minute_change_features(df: pd.DataFrame, columns: list[str]) -> list[str
     return created
 
 
-def _consecutive_true_run_length(condition: pd.Series) -> pd.Series:
-    """For a boolean series, returns at each row how many consecutive
-    rows up to and including it have been True — resets to 0 the instant
-    the condition is False. This is the "streak length" pattern behind
-    both southward-duration features below.
-    """
-    reset_groups = (~condition).cumsum()
-    return condition.groupby(reset_groups).cumsum()
-
-
 def add_southward_duration(df: pd.DataFrame, bz_col: str = "bz_gsm") -> list[str]:
     """1. Southward Duration — consecutive minutes with Bz < 0 (southward,
     geoeffective orientation), reset to 0 the instant Bz turns northward.
@@ -81,7 +81,7 @@ def add_southward_duration(df: pd.DataFrame, bz_col: str = "bz_gsm") -> list[str
     just a momentary dip.
     """
     name = "southward_duration_min"
-    df[name] = _consecutive_true_run_length(df[bz_col] < 0)
+    df[name] = physics_core.southward_duration_series(df[bz_col])
     return [name]
 
 
@@ -91,7 +91,7 @@ def add_strong_southward_duration(df: pd.DataFrame, bz_col: str = "bz_gsm") -> l
     associated with more intense reconnection than a bare Bz < 0 crossing.
     """
     name = "strong_southward_duration_min"
-    df[name] = _consecutive_true_run_length(df[bz_col] < STRONG_SOUTHWARD_THRESHOLD_NT)
+    df[name] = physics_core.strong_southward_duration_series(df[bz_col], STRONG_SOUTHWARD_THRESHOLD_NT)
     return [name]
 
 
@@ -105,11 +105,10 @@ def add_integrated_southward_bz(
     stretch can integrate to the same total, which a simple instantaneous
     Bz reading can't distinguish but this can.
     """
-    southward_component = df[bz_col].clip(upper=0).abs()
     created = []
     for window in windows:
         name = f"integrated_southward_bz_{window}m"
-        df[name] = southward_component.rolling(window).sum()
+        df[name] = physics_core.integrated_southward_bz_series(df[bz_col], window)
         created.append(name)
     return created
 
@@ -138,8 +137,7 @@ def add_clock_angle(df: pd.DataFrame, by_col: str = "by_gsm", bz_col: str = "bz_
     field magnitude.
     """
     name = "clock_angle_deg"
-    angle = np.degrees(np.arctan2(df[by_col], df[bz_col]))
-    df[name] = angle % 360
+    df[name] = physics_geometry.clock_angle_series(df[by_col], df[bz_col])
     return [name]
 
 
@@ -152,8 +150,7 @@ def add_clock_angle_rate(df: pd.DataFrame, clock_angle_col: str = "clock_angle_d
     Bz's raw value alone looks unremarkable.
     """
     name = "clock_angle_rate_deg"
-    diff = df[clock_angle_col].diff()
-    df[name] = (diff + 180) % 360 - 180
+    df[name] = physics_geometry.clock_angle_rate_series(df[clock_angle_col])
     return [name]
 
 
@@ -166,9 +163,10 @@ def add_bt_persistence(df: pd.DataFrame, bt_col: str = "bt", window: int = MINUT
     same instantaneous Bt reading.
     """
     created = []
-    for stat, fn in (("mean", "mean"), ("std", "std"), ("max", "max"), ("min", "min")):
+    stats = physics_persistence.persistence_stats_series(df[bt_col], window)
+    for stat, series in stats.items():
         name = f"bt_persistence_{window}m_{stat}"
-        df[name] = getattr(df[bt_col].rolling(window), fn)()
+        df[name] = series
         created.append(name)
     return created
 

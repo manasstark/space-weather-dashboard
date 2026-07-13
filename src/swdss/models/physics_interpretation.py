@@ -5,9 +5,14 @@ Burton et al. (1975) VBz coupling function, the interplanetary
 dawn-dusk electric field Ey, and the IMF clock angle. Every statement
 below is a direct, reproducible function of the input numbers — nothing
 here is generated or inferred by a language model.
+
+VBz/Ey/Dynamic Pressure/Clock Angle are computed via swdss.physics —
+the Physics Engine and this project's single canonical implementation
+of these formulas — rather than recomputed inline.
 """
 
-import math
+from swdss.physics.core import dynamic_pressure_scalar, ey_scalar, vbz_scalar
+from swdss.physics.geometry import clock_angle_scalar
 
 VBZ_QUIET_THRESHOLD = 0
 VBZ_WEAK_THRESHOLD = -1000
@@ -40,7 +45,7 @@ def _solar_wind_state(speed, density) -> str:
     else:
         density_label = "very high density (possible shock/CME sheath)"
 
-    dynamic_pressure = 1.6726e-6 * density * speed**2
+    dynamic_pressure = dynamic_pressure_scalar(density, speed)
     return (
         f"{speed_label} ({speed:.0f} km/s) with {density_label} ({density:.1f} p/cm3). "
         f"Dynamic pressure on the magnetopause is approximately {dynamic_pressure:.2f} nPa."
@@ -52,7 +57,13 @@ def _imf_orientation(bt, bx, by, bz) -> str:
         return "Insufficient live IMF data to assess current orientation."
 
     orientation = "southward" if bz < 0 else "northward"
-    clock_angle = math.degrees(math.atan2(by, bz)) if by is not None else None
+    # Wrapped to [0, 360) via the Physics Engine's canonical Clock Angle
+    # convention (this project's every other clock-angle consumer already
+    # used this convention — previously this was the one place using a
+    # raw atan2 result in (-180, 180] instead; e.g. a reading that used
+    # to display "-45 degrees" now displays "315 degrees" — the same
+    # physical angle, just consistent with the rest of the project now).
+    clock_angle = clock_angle_scalar(by, bz) if by is not None else None
     clock_text = f", clock angle {clock_angle:.0f} degrees from north" if clock_angle is not None else ""
     consequence = (
         "Southward orientation favors dayside magnetic reconnection."
@@ -66,8 +77,8 @@ def _magnetic_coupling(speed, bz) -> str:
     if speed is None or bz is None:
         return "Insufficient data to assess magnetic coupling."
 
-    vbz = speed * min(bz, 0)
-    ey = -speed * bz * 1e-3
+    vbz = vbz_scalar(speed, bz)
+    ey = ey_scalar(speed, bz)
 
     if vbz >= VBZ_QUIET_THRESHOLD:
         label = "Minimal coupling — northward IMF blocks efficient reconnection."

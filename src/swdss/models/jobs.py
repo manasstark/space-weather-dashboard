@@ -28,6 +28,8 @@ from contextlib import contextmanager
 import numpy as np
 import pandas as pd
 
+from swdss.physics.core import dynamic_pressure_scalar, ey_scalar, vbz_scalar
+
 from swdss.ingest.kyoto_ae import fetch_kyoto_ae_hour
 from swdss.ingest.kyoto_ae_quicklook import estimate_kyoto_quicklook_ae_full
 from swdss.models.predict import latest_minute_observation, load_live_features, resolve_static_actual
@@ -276,14 +278,15 @@ def _capture_live_inputs(dataset: str) -> dict:
             _, value = latest_minute_observation(dataset, var)
             inputs[var] = value
 
-        # Same formulas as swdss.models.features.add_derived_physics_features,
-        # computed here for a single live reading rather than a dataframe.
+        # Scalar counterparts of swdss.models.features.add_derived_physics_features,
+        # for a single live reading rather than a dataframe — see
+        # swdss.physics.core, the Physics Engine's canonical implementation.
         speed, density, bz = inputs.get("speed"), inputs.get("density"), inputs.get("bz_gsm")
         if speed is not None and bz is not None:
-            inputs["vbz"] = speed * min(bz, 0)
-            inputs["ey"] = -speed * bz * 1e-3
+            inputs["vbz"] = vbz_scalar(speed, bz)
+            inputs["ey"] = ey_scalar(speed, bz)
         if speed is not None and density is not None:
-            inputs["dynamic_pressure"] = 1.6726e-6 * density * speed**2
+            inputs["dynamic_pressure"] = dynamic_pressure_scalar(density, speed)
 
         _, inputs["ae"] = latest_minute_observation(dataset, "ae")
         return inputs
