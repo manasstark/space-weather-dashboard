@@ -307,6 +307,21 @@ def add_clock_angle_persistence(
     return [name]
 
 
+def add_strong_southward_duration(
+    df: pd.DataFrame, bz_col: str = "bz_gsm", threshold: float = physics_core.STRONG_SOUTHWARD_THRESHOLD_NT
+) -> list[str]:
+    """Consecutive HOURS with Bz below -5 nT — a stricter threshold than
+    the always-on Southward Duration core column, associated with more
+    intense reconnection driving. New to this lab (previously only
+    available in the Kp Research Laboratory); added specifically so the
+    AE Optimization Study's Coupling Physics experiment can test it in
+    isolation alongside the other 13 coupling variables.
+    """
+    name = "strong_southward_duration_hr"
+    df[name] = physics_core.strong_southward_duration_series(df[bz_col], threshold)
+    return [name]
+
+
 def add_solar_wind_persistence(df: pd.DataFrame, speed_col: str = "speed", window: int = DEFAULT_WINDOW_HOURS) -> list[str]:
     """Rolling mean/std/max/min of Solar Wind Speed over `window` hours.
     Previously std-only in this lab; now the full stat set (a strict
@@ -346,6 +361,7 @@ PHYSICS_FEATURE_FUNCTIONS = {
     "IMF Rotation Rate": add_imf_rotation_rate,
     "Magnetic Shear": add_magnetic_shear,
     "Solar Wind Persistence": add_solar_wind_persistence,
+    "Strong Southward Duration": add_strong_southward_duration,
 }
 
 # Every entry lists ALL transitively-required upstream features, in the
@@ -361,4 +377,5 @@ PHYSICS_FEATURE_DEPENDENCIES = {
     "Clock Angle Persistence": [],  # uses clock_angle_deg, always present (core group)
     "IMF Rotation Rate": ["Clock Angle Change"],
     "Estimated Compression": ["Magnetopause Stand-off Distance"],
+    "Strong Southward Duration": [],  # uses bz_gsm directly, no prerequisites
 }

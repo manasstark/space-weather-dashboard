@@ -40,7 +40,7 @@ Built as a portfolio project to practice professional software development, data
 **This project is currently in active testing and development.** Core features are functional and working, but the system is still being stress-tested, validated, and refined. If you're reviewing this:
 
 - Live prediction jobs, research labs, and verification pipelines are operational but may have rough edges
-- Some features (AE Quicklook, Kyoto WDC verification, Kp/AE Research Labs) are newly built and under active validation
+- Some features (AE Quicklook, Kyoto WDC verification, Kp/AE Research Labs, and the new Bz/Kp/AE Optimization Studies) are newly built and under active validation
 - Data displayed is real — pulled from NOAA SWPC, NASA DONKI, and Kyoto WDC — not mocked or simulated
 - If something looks off or broken, it is likely being actively worked on
 
@@ -158,6 +158,7 @@ Unlike many machine learning dashboards that treat forecasting as purely a stati
 * **AE Predictor**: AE forecast independently from Solar Wind + IMF + derived physics, with delayed official verification against Kyoto WDC and an approximate, immediate Quicklook cross-check
 * **Experimental (Physics Cascaded) Predictor**: a research-only model that feeds *predicted* AE forward into Kp/Dst as an extra feature, benchmarked live against the production model
 * **Research Lab**: an isolated environment for comparing forecasting architectures, rule-based physics interpretation, model explainability, and formal hypothesis testing
+* **Bz / Kp / AE Optimization Studies**: one-button AutoML pipelines (8-10 structured experiments each, AE run independently across all 5 production horizons) that reproduce the production baseline, benchmark it against persistence, search feature sets and coupling physics, sweep all 12 model types, extract feature importance/SHAP/permutation importance, and issue a guarded, human-confirmed promote-to-production recommendation
 * Retro/vintage UI theme applied consistently across every table, chart, dialog, and button
 
 ---
@@ -212,6 +213,8 @@ authoritative "Verified" result                      non-official "Quicklook" cr
 
 Both branches are read-only verification sources — neither ever feeds into or overwrites the other, and neither is NOAA. See [AE Prediction & Verification Pipeline](#ae-prediction--verification-pipeline) for how this pairs with the live prediction side.
 
+**Minute-resolution AE archival (additive, non-production).** Every Kyoto WDC day-file actually contains 60 one-minute AE values per hour, plus a trailing hourly mean — but until this addition, only that trailing mean was ever kept; the 60 minute values were parsed into memory and discarded the instant the parser moved to the next line, so every day that passed before this change is lost permanently (Kyoto's real-time page is continuously overwritten, not a permanent archive). `swdss.ingest.kyoto_ae` now also archives, on every fetch: the raw day-file text verbatim (`data/raw/kyoto_ae_minute/`) and a parsed, deduplicated minute-resolution parquet (`data/processed/kyoto_ae_minute/`), via the same append-and-deduplicate convention already used for Solar Events/CME. This is purely additive — `fetch_kyoto_ae_hour()`'s return value, used by the AE verification workflow above, is completely unchanged, and any failure while archiving minute data is swallowed rather than raised, so it can never break hourly verification. Nothing in Production or any Research Lab Optimization Study reads this archive yet; it exists so a genuinely different future research question — substorm onset timing, minute-scale AE dynamics, event detection — is *answerable* later, without deciding now whether minute-scale AE forecasting is even worthwhile.
+
 ### Live Prediction Pipeline
 
 ```text
@@ -260,7 +263,8 @@ Space Weather Dashboard V2/
 │
 ├── data/
 │   ├── raw/                            # Exact NOAA / DONKI API responses, one file per dataset per fetch
-│   │   └── omni_refresh_2026.csv       # Parsed NASA OMNI2 2026 hourly data (Jan–Jun); input to the refresh pipeline
+│   │   ├── omni_refresh_2026.csv       # Parsed NASA OMNI2 2026 hourly data (Jan–Jun); input to the refresh pipeline
+│   │   └── kyoto_ae_minute/            # Raw Kyoto WDC day-file text, one file per UT day (verbatim archival copy)
 │   ├── processed/                      # Cleaned per-dataset parquet (minute-level for Solar Wind/IMF,
 │   │   │                               #   native cadence for everything else)
 │   │   ├── solar_wind/
@@ -268,6 +272,8 @@ Space Weather Dashboard V2/
 │   │   ├── kp/
 │   │   ├── dst/
 │   │   ├── ae/                         # Historical AE from Kyoto WDC — no live NOAA feed exists
+│   │   ├── kyoto_ae_minute/            # NEW: parsed minute-resolution AE archive (see AE Data Pipeline) —
+│   │   │                               #   purely additive, not read by Production or any Optimization Study
 │   │   ├── f107/
 │   │   ├── cme/
 │   │   ├── solar_events/
@@ -293,14 +299,21 @@ Space Weather Dashboard V2/
 │   │       ├── ae_analytics_features.csv
 │   │       └── experimental_features.csv
 │   ├── predictions/
-│   │   └── predictions.db              # SQLite: live forecast jobs, tick history, hypothesis records
+│   │   ├── predictions.db              # SQLite: live forecast jobs, tick history, hypothesis records
+│   │   ├── imf_research_runs.json / imf_hypothesis_tests.json / imf_optimization_studies.json
+│   │   ├── kp_research_runs.json / kp_hypothesis_tests.json / kp_optimization_studies.json
+│   │   └── ae_research_runs.json / ae_hypothesis_tests.json / ae_optimization_studies.json
+│   │       # Per-lab JSON registries for the Research Lab engines and their Optimization Study
+│   │       # runs — entirely separate from models/{dataset}/metrics.json; created on first use
 │   └── saved_events.json / library_index.json
 │
 ├── src/swdss/
 │   ├── paths.py                        # Centralized path constants
 │   ├── ingest/
 │   │   ├── noaa_client.py              # NOAA SWPC + NASA DONKI API client
-│   │   ├── kyoto_ae.py                 # Kyoto WDC official digital AE — the sole authoritative AE verification source
+│   │   ├── kyoto_ae.py                 # Kyoto WDC official digital AE — the sole authoritative AE verification source;
+│   │   │                               #   also archives the full minute-resolution AE data every fetch discards down
+│   │   │                               #   to an hourly mean (raw text + parsed parquet), purely for future research
 │   │   └── kyoto_ae_quicklook.py       # Kyoto WDC real-time graph — pixel-based approximate AE estimate (immediate cross-check)
 │   ├── transform/                      # Per-dataset raw-JSON → cleaned-DataFrame cleaning logic
 │   │   ├── solar_wind.py
@@ -320,13 +333,18 @@ Space Weather Dashboard V2/
 │       ├── explainability.py           # SHAP (TreeExplainer / LinearExplainer) + permutation-sensitivity fallback
 │       ├── physics_interpretation.py   # Rule-based (no LLM) Sun-Earth coupling narrative from live readings
 │       ├── hypothesis.py               # Hypothesis Testing: CRUD, statistics, auto-conclusion engine (Supported/Not Supported/Inconclusive)
-│       ├── imf_research.py             # IMF Research Lab engine: multi-horizon, multi-model, physics experiments, run tracking
+│       ├── imf_research.py             # IMF Research Lab engine: multi-horizon, multi-model, physics experiments, run
+│       │                               #   tracking, + the 8-experiment Bz Optimization Study AutoML orchestrator
 │       ├── imf_research_keras_worker.py  # Isolated subprocess for LSTM/GRU training — prevents scikit-learn / Keras import collision
 │       ├── imf_physics_features.py     # IMF-specific physics features for the Research Lab (Clock Angle, IMF Rotation, etc.)
-│       ├── kp_research.py              # Kp Research Lab engine: model comparison, feature ablation, physics experiments, hypothesis testing
+│       ├── kp_research.py              # Kp Research Lab engine: model comparison, feature ablation, physics experiments,
+│       │                               #   hypothesis testing, + the 10-experiment Kp Optimization Study AutoML orchestrator
 │       ├── kp_physics_features.py      # Kp-specific physics features (Southward Duration, Integrated Ey/VBz, Storm Phase, etc.)
-│       ├── ae_research.py              # AE Research Lab engine: model comparison, multi-horizon, physics experiments, hypothesis testing
-│       └── ae_physics_features.py      # AE-specific physics features (Newell Coupling, Akasofu ε, Boyle Index, Alfvén Mach Number, etc.)
+│       ├── ae_research.py              # AE Research Lab engine: model comparison, multi-horizon, physics experiments,
+│       │                               #   hypothesis testing, + the 10-experiment × 5-horizon AE Optimization Study
+│       │                               #   (the flagship cross-horizon scientific study — see Development Roadmap)
+│       └── ae_physics_features.py      # AE-specific physics features (Newell Coupling, Akasofu ε, Boyle Index, Alfvén Mach Number,
+│                                       #   Strong Southward Duration, etc.)
 │
 ├── dashboard/
 │   ├── home.py                         # Full multi-page Streamlit application (all pages, dialogs, and research lab UIs)
@@ -655,12 +673,22 @@ Kp responds most strongly ~1 hour after a Bz change; Dst responds most strongly 
 
 * **Production Model Refresh — v2 (July 2026)** — first official production model refresh expanding every training dataset from 2023–2025 to 2023–June 2026. A versioned, fully automated pipeline (`scripts/refresh/`) downloads the NASA OMNI2 hourly archive for Jan–Jun 2026, merges it with the existing 3-year historical corpus, rebuilds all training CSVs, retrains all 62 production models (Solar Wind × 3 variables, IMF × 4 variables, Kp, Dst, AE, Analytics, Experimental — all 5 horizons each), benchmarks v2 vs v1, and promotes winners. All 62 models were promoted on the basis that more training data is preferable to retaining stale models on 6-month-old data. Research labs (Kp, AE, IMF) also now train on the extended dataset — the training CSVs they read are the same ones refreshed by this pipeline. v1 model artifacts remain in `models/{dataset}_v2/`. Next refresh scheduled for December 2026.
 
+* **Bz Optimization Study** — an 8-experiment AutoML pipeline (`swdss.models.imf_research.run_complete_optimization_study`) inside the IMF Research Laboratory (`Heliosphere → IMF → Prediction → Research Laboratory → 🔬 Bz Optimization Study`), the first of this project's "one button, full study" research tools: Exp 1 Baseline (reproduce production's Bz 1h Linear Regression exactly), Exp 2 Persistence Benchmark, Exp 3 Solar Wind Inputs (IMF Only → +Speed → +Speed+Density → +All Solar Wind), Exp 4 Short-Term Dynamics (rolling min/max, slope, acceleration), Exp 5 Physics Variables (Ey, VBz, Dynamic Pressure, Clock Angle, Southward Hours), Exp 6 full 12-model sweep on the winning feature set, Exp 7 Feature Importance, and Exp 8 a guarded Promote-to-Production workflow (archive + install + `metrics.json` update + rollback). A dual-layer UI sits alongside the automated run: the same button-driven study, plus 8 manual Exp tabs calling the identical underlying functions for hands-on investigation. Every run is tracked in `data/predictions/imf_research_runs.json`; every full study run in `imf_optimization_studies.json`. Establishes the template the Kp and AE Optimization Studies below both extend.
+
+* **Kp Optimization Study** — a 10-experiment AutoML pipeline (`swdss.models.kp_research.run_complete_kp_optimization_study`) inside the Kp Research Laboratory (`Analytics → Research & Experiments → Kp Research Laboratory → 🔬 Kp Optimization Study`), extending the Bz study's pattern with Kp's Earth-**response** nature (Solar Wind → IMF → magnetosphere-ionosphere coupling → geomagnetic activity, rather than Bz's upstream-only forecasting problem): Exp 1 Production Baseline, Exp 2 Persistence Benchmark, Exp 3 Solar Wind Inputs, Exp 4 IMF Inputs, Exp 5 Geomagnetic History (Previous Kp/Dst/AE), Exp 6 Physics Optimization (26 coupling-function groups tested individually against the baseline, added or removed depending on whether each is already a production column, so a uniformly-signed ΔR² always means "this variable helps"), Exp 7 Model Optimization (all 12 model types on a structured combination of the top-contributing physics groups), Exp 8 Feature Importance, Exp 9 SHAP Analysis, and Exp 10 an Optimization Summary + guarded Promote-to-Production workflow. Same dual-layer UI (AutoML button + 10 manual Exp tabs), same per-run JSON tracking (`kp_research_runs.json`, `kp_optimization_studies.json`).
+
+* **AE Optimization Study** — the flagship scientific component of the project: a 10-experiment study run **independently at all 5 of AE's production horizons** (1h/3h/6h/12h/24h — AE, unlike Bz/Kp, has 5 separately-trained production models rather than one), inside the AE Research Laboratory (`Analytics → AE Predictions → Research Laboratory → 🔬 AE Optimization Study`, `swdss.models.ae_research.run_complete_ae_optimization_study`). The objective is explicitly not "maximize R²" but to understand *where AE's predictability comes from* and whether that balance shifts as the horizon grows: Exp 1 Production Baseline (reproduced per horizon using a toggle set verified column-for-column against `models/ae/metrics.json` — a real gap was found and fixed here, since this lab's broader default feature toggles include 3 Derived Physics columns Production never actually trained on); Exp 2 Persistence Benchmark per horizon; Exp 3 Solar Wind + IMF Raw Explanatory Floor (no persistence, no coupling, no geomagnetic memory); Exp 4 Coupling Physics — 14 variables (Ey, VBz, Dynamic Pressure, Clock Angle + Rate, Southward/Strong-Southward Duration, Integrated Southward Bz/Ey/VBz/Energy Input, Newell Coupling, Akasofu ε, Boyle Index) each tested fully in isolation; Exp 5 Physics Engine Ablation — a structured *cumulative* addition on top of Production (Production → +Newell → +Newell+Akasofu → +...+Boyle → +...+Dynamic Pressure → +...+Ey → +...+VBz → +All Coupling), deliberately testing "do not assume more variables are better" since several of those steps are provable no-ops; Exp 6 Geomagnetic Memory (Previous AE/Kp/Dst, individually and combined — Kp/Dst merged in from `analytics_features.csv`, the only dataset in this project with Kp, Dst, and AE on the same hourly index, since AE's own training CSV has neither); Exp 7 Best Combined Feature Sets per horizon; Exp 8 a full 12-model comparison on each horizon's winning feature set; Exp 9 Feature Importance, SHAP (with a fix for a known TreeExplainer/RandomForest additivity false-positive), **and** a new model-agnostic Permutation Importance fallback for SVR/MLP (which expose neither `.feature_importances_` nor `.coef_`); and Exp 10 — the centerpiece — a **Cross-Horizon Scientific Synthesis** comparing all 5 horizons together (Persistence Importance vs. Horizon, Physics Importance vs. Horizon, Model Skill vs. Horizon, Feature Group Importance vs. Horizon) that explicitly checks for a measurable persistence→physics crossover as the horizon grows, and reports honestly if none is found rather than forcing one. Promotion is per-horizon (`models/ae/ae_{1,3,6,12,24}h.joblib`, independent archive/install/rollback for each). The complete study trains ~230-250 models across all 5 horizons — realistically **an hour or more** on this project's own hardware, not a quick run. The minute-resolution Kyoto AE archive plays no role anywhere in this study by design (see AE Data Pipeline) — every experiment trains and evaluates against the same hourly `ae_analytics_features.csv` Production itself uses. Runs tracked in `ae_research_runs.json`; full studies (with the per-horizon Cross-Horizon Synthesis and a generated scientific report — experiment summary, physics/geomagnetic-memory rankings, model rankings, production recommendation, scientific conclusions, future work) in `ae_optimization_studies.json`.
+
+* **Kyoto AE minute-resolution archival** — see [AE Data Pipeline](#ae-data-pipeline) above for the full detail: every Kyoto WDC fetch now also permanently archives the complete 60 one-minute AE values per hour (previously parsed and immediately discarded), both as raw day-file text (`data/raw/kyoto_ae_minute/`) and a parsed, deduplicated parquet (`data/processed/kyoto_ae_minute/`). Purely additive — `fetch_kyoto_ae_hour()`'s return value is unchanged, and archival failures are swallowed rather than raised. Intentionally **not** used by Production or any Optimization Study yet; it exists to make a genuinely different future research question (substorm onset timing, minute-scale AE dynamics, event detection) answerable later.
+
 ### In Progress / Next
 
 * **Testing phase** — systematically test every trained model (Solar Wind, IMF, Kp/Dst, AE, Kp Research Lab, AE Research Lab, and the Experimental cascade) and validate all Research Lab workflows end-to-end across real storm and quiet periods
+* **Run the Bz/Kp/AE Optimization Studies at least once each end-to-end** and review their promotion recommendations against production — none have been promoted yet; each is a new, not-yet-battle-tested AutoML pipeline
 * Cross-validation of dashboard-reported extremes and event chains against independent data
 * Multi-day continuous live-updater stress testing
 * Additional derived parameters (IMF clock angle, storm-sudden-commencement flags)
+* A genuine use for the archived minute-resolution Kyoto AE data (substorm onset detection, minute-scale AE dynamics) — currently archived but unread by anything
 * Public deployment
 
 ### AE Index Integration

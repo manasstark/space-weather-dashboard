@@ -8909,6 +8909,756 @@ def render_kp_research_laboratory() -> None:
         render_kp_visualization_tab()
 
 
+def _ae_opt_isolated_toggles(groups: dict) -> dict:
+    return ae_research._build_isolated_toggles(groups)
+
+
+def _render_ae_automl_section() -> None:
+    """AutoML orchestration layer for the AE Optimization Study — the
+    flagship scientific component of this project. Unlike the Bz/Kp
+    studies (a single target, single horizon), this runs the full
+    10-experiment methodology independently at all 5 production horizons
+    (1h/3h/6h/12h/24h), then performs Experiment 10's Cross-Horizon
+    Scientific Synthesis. The manual Exp 1-10 tabs below stay fully
+    intact for hands-on, single-horizon investigation; this only
+    sequences the same underlying ae_research functions those tabs call.
+    """
+    st.markdown("### 🤖 Automated Optimization (AutoML)")
+    st.caption(
+        "Runs all 10 experiments end-to-end, independently at every one of AE's 5 production "
+        "horizons — production baseline reproduction, persistence benchmark, the Solar Wind + IMF "
+        "raw explanatory floor, 14 coupling-physics variables tested individually, a structured "
+        "cumulative Physics Engine ablation, Geomagnetic Memory (Previous AE/Kp/Dst), the best "
+        "combined feature set per horizon, a full 12-model sweep, feature importance/SHAP/"
+        "permutation importance, and — the centerpiece — a Cross-Horizon Scientific Synthesis "
+        "that checks whether AE prediction shifts from persistence-dominated to physics-dominated "
+        "as the horizon grows."
+    )
+    st.warning(
+        "⚠️ This runs roughly 45-50 training runs PER HORIZON (~230-250 total across all 5 "
+        "horizons), including SVR/MLP and a permutation-importance pass at every horizon — measured "
+        "on this project's own hardware, expect **an hour or more** for the complete study, not just "
+        "a few minutes. **Turn on ⏸ Pause Live Refresh above before clicking**, or the dashboard's "
+        "15-second auto-refresh can interrupt the run partway through."
+    )
+    st.caption(
+        "The minute-resolution Kyoto AE archive plays NO role in this study — Production forecasts "
+        "hourly AE, so every experiment here trains and evaluates against the same hourly "
+        "ae_analytics_features.csv Production itself uses."
+    )
+
+    if st.button("🚀 Run Complete AE Optimization Study", key="ae_automl_run_study", type="primary"):
+        status_box = st.status("Running complete AE optimization study across all 5 horizons…", expanded=True)
+
+        def _cb(step, total, msg):
+            status_box.update(label=f"Step {step}/{total} — {msg}")
+            status_box.write(f"**Step {step}/{total}:** {msg}")
+
+        try:
+            study = ae_research.run_complete_ae_optimization_study(progress_cb=_cb)
+            status_box.update(label="Optimization study complete.", state="complete", expanded=False)
+            st.session_state["ae_automl_last_study_id"] = study["study_id"]
+            rec_count = sum(1 for h in study["horizons"] if study["horizon_results"][str(h)]["recommendation"] == "Promote")
+            st.success(f"Study complete across all 5 horizons — {rec_count}/{len(study['horizons'])} horizons recommended for promotion.")
+            st.rerun()
+        except Exception as exc:
+            status_box.update(label="Optimization study failed.", state="error")
+            st.error(f"Study failed: {exc}")
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Study History")
+    studies = ae_research.list_ae_studies()
+    if not studies:
+        st.info("No optimization studies run yet — click the button above to run the first one.")
+        return
+
+    def _study_label(s):
+        rec_count = sum(1 for h in s["horizons"] if s["horizon_results"][str(h)]["recommendation"] == "Promote")
+        promoted_count = sum(1 for v in s.get("promotion_status_by_horizon", {}).values() if v == "promoted")
+        return (
+            f"{pd.Timestamp(s['started_at']).strftime('%Y-%m-%d %H:%M UTC')} · "
+            f"{rec_count}/{len(s['horizons'])} horizons recommended · {promoted_count} promoted"
+        )
+
+    study_labels = [_study_label(s) for s in studies]
+    default_idx = 0
+    last_id = st.session_state.get("ae_automl_last_study_id")
+    if last_id:
+        for i, s in enumerate(studies):
+            if s["study_id"] == last_id:
+                default_idx = i
+                break
+    chosen_label = st.selectbox("Select a study to inspect", study_labels, index=default_idx, key="ae_automl_study_select")
+    study = studies[study_labels.index(chosen_label)]
+    _render_ae_study_detail(study)
+
+
+def _render_ae_study_detail(study: dict) -> None:
+    st.markdown(
+        f"**Study ID:** `{study['study_id'][:8]}…`  ·  "
+        f"**Started:** {pd.Timestamp(study['started_at']).strftime('%Y-%m-%d %H:%M UTC')}  ·  "
+        f"**Completed:** {pd.Timestamp(study['completed_at']).strftime('%Y-%m-%d %H:%M UTC')}"
+    )
+
+    st.markdown("#### Experiment 10 — Cross-Horizon Scientific Synthesis")
+    cross = study["cross_horizon_synthesis"]
+    if cross["crossover_detected"]:
+        st.success(f"✅ {cross['crossover_conclusion']}")
+    else:
+        st.warning(f"⚠️ {cross['crossover_conclusion']}")
+
+    plot_cols = st.columns(2)
+    with plot_cols[0]:
+        pih = cross["persistence_importance_vs_horizon"]
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=[r["horizon"] for r in pih], y=[r["persistence_r2"] for r in pih], mode="lines+markers", name="Persistence R²"))
+        fig.add_trace(go.Scatter(x=[r["horizon"] for r in pih], y=[r["winner_r2"] for r in pih], mode="lines+markers", name="Best Model R²"))
+        fig.add_trace(go.Scatter(x=[r["horizon"] for r in pih], y=[r["production_r2"] for r in pih], mode="lines+markers", name="Production R²"))
+        fig.update_layout(title="Persistence Importance vs. Horizon", xaxis_title="Horizon (h)", yaxis_title="R²", height=380)
+        plot_retro(fig)
+    with plot_cols[1]:
+        piv = cross["physics_importance_vs_horizon"]
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=[r["horizon"] for r in piv], y=[r["raw_floor_r2"] for r in piv], mode="lines+markers", name="Raw Floor R²"))
+        fig.add_trace(go.Scatter(x=[r["horizon"] for r in piv], y=[r["best_single_coupling_variable_r2"] for r in piv], mode="lines+markers", name="Best Single Coupling Var R²"))
+        fig.add_trace(go.Scatter(x=[r["horizon"] for r in piv], y=[r["top_ablation_delta_r2"] for r in piv], mode="lines+markers", name="Top Ablation ΔR²"))
+        fig.update_layout(title="Physics Importance vs. Horizon", xaxis_title="Horizon (h)", yaxis_title="R² / ΔR²", height=380)
+        plot_retro(fig)
+
+    plot_cols2 = st.columns(2)
+    with plot_cols2[0]:
+        msh = cross["model_skill_vs_horizon"]
+        fig = go.Figure(go.Bar(
+            x=[r["horizon"] for r in msh], y=[r["winner_r2"] for r in msh],
+            text=[r["winner_model"] for r in msh], marker_color="steelblue",
+        ))
+        fig.update_layout(title="Model Skill vs. Horizon", xaxis_title="Horizon (h)", yaxis_title="Winner R²", height=380)
+        plot_retro(fig)
+    with plot_cols2[1]:
+        fgih = cross["feature_group_importance_vs_horizon"]
+        all_groups = sorted({g for r in fgih for g in r["group_shares"]})
+        fig = go.Figure()
+        for g in all_groups:
+            fig.add_trace(go.Bar(name=g, x=[r["horizon"] for r in fgih], y=[r["group_shares"].get(g, 0) for r in fgih]))
+        fig.update_layout(barmode="stack", title="Feature Group Importance vs. Horizon", xaxis_title="Horizon (h)", yaxis_title="Share of Importance", height=380)
+        plot_retro(fig)
+
+    st.markdown("#### Per-Horizon Detail (Experiments 1-9 + Promotion)")
+    horizon_tabs = st.tabs([f"{h}h" for h in study["horizons"]])
+    for tab, h in zip(horizon_tabs, study["horizons"]):
+        with tab:
+            _render_ae_study_horizon_detail(study, h)
+
+    st.markdown("#### Scientific Report")
+    report = study["report"]
+    with st.expander("📄 Full Scientific Report", expanded=False):
+        st.markdown("**Scientific Conclusions**")
+        for c in report["scientific_conclusions"]:
+            st.markdown(f"- {c}")
+        st.markdown("**Future Work**")
+        for c in report["future_work"]:
+            st.markdown(f"- {c}")
+        st.markdown("**Best Models by Horizon**")
+        st.json(report["best_models"])
+        st.markdown("**Best Feature Sets by Horizon**")
+        st.json(report["best_feature_sets"])
+
+
+def _render_ae_study_horizon_detail(study: dict, horizon: int) -> None:
+    hr = study["horizon_results"][str(horizon)]
+
+    step_cols = st.columns(5)
+    step_cols[0].metric("1. Baseline R²", f"{hr['baseline']['metrics']['r2']:.4f}", help=hr["baseline"]["model_type"])
+    step_cols[1].metric("2. Persistence R²", f"{hr['persistence']['metrics']['r2']:.4f}")
+    step_cols[2].metric("3. Raw Floor R²", f"{hr['raw_floor']['metrics']['r2']:.4f}")
+    step_cols[3].metric("8. Winner", hr["winner"]["model_type"], help=f"R²={hr['winner']['metrics']['r2']:.4f}")
+    step_cols[4].metric("Recommendation", hr["recommendation"])
+
+    detail_tabs = st.tabs([
+        "Coupling Physics", "Physics Ablation", "Geomagnetic Memory", "Best Feature Sets",
+        "Leaderboard", "Feature Importance", "SHAP / Permutation", "Production Comparison", "Promotion",
+    ])
+
+    with detail_tabs[0]:
+        st.markdown("**Experiment 4 — Coupling Physics (individually, isolated)**")
+        st.caption("Each variable tested ALONE — a pure marginal/standalone-information test, distinct from Experiment 5's baseline-relative ablation.")
+        st.dataframe(pd.DataFrame([
+            {"Variable": r["name"], "R²": round(r["r2"], 4), "MAE": round(r["mae"], 4), "RMSE": round(r["rmse"], 4)}
+            for r in hr["coupling_results"]
+        ]), use_container_width=True, hide_index=True)
+
+    with detail_tabs[1]:
+        st.markdown("**Experiment 5 — Physics Engine Ablation (cumulative from Production)**")
+        st.caption("Do not assume more variables are better — flat/zero ΔR² across a step means that variable was already fully captured by Production.")
+        st.dataframe(pd.DataFrame([
+            {
+                "Step": r["name"], "R²": round(r["r2"], 4), "ΔR² vs Baseline": round(r["delta_r2_from_baseline"], 4),
+                "Already in Baseline": ", ".join(r["already_in_baseline"]) or "—",
+            }
+            for r in hr["ablation_results"]
+        ]), use_container_width=True, hide_index=True)
+
+    with detail_tabs[2]:
+        st.markdown("**Experiment 6 — Geomagnetic Memory**")
+        st.caption("Does Previous Kp/Dst carry information about future AE beyond AE's own persistence?")
+        st.dataframe(pd.DataFrame([
+            {"Combination": r["name"], "R²": round(r["r2"], 4), "MAE": round(r["mae"], 4), "RMSE": round(r["rmse"], 4)}
+            for r in hr["geomag_results"]
+        ]), use_container_width=True, hide_index=True)
+
+    with detail_tabs[3]:
+        st.markdown("**Experiment 7 — Best Combined Feature Sets**")
+        st.dataframe(pd.DataFrame([
+            {"Feature Set": r["name"], "R²": round(r["r2"], 4), "MAE": round(r["mae"], 4), "RMSE": round(r["rmse"], 4)}
+            for r in hr["combo_results"]
+        ]), use_container_width=True, hide_index=True)
+        st.success(f"Best feature set for {horizon}h: **{hr['best_combo']['name']}** (R²={hr['best_combo']['r2']:.4f}) — used for Experiment 8's model sweep below.")
+
+    with detail_tabs[4]:
+        st.markdown("**Experiment 8 — Model Comparison Leaderboard**")
+        lb_rows = [
+            {
+                "Rank": r["rank"], "Model": r["model_type"], "R²": round(r["r2"], 4), "MAE": round(r["mae"], 4),
+                "RMSE": round(r["rmse"], 4), "MAPE (%)": round(r["mape"], 2) if r["mape"] is not None else None,
+                "Bias": round(r["bias"], 4),
+                "Train Time (s)": round(r["training_time_sec"], 3) if r["training_time_sec"] is not None else None,
+                "Inference (ms/sample)": round(r["inference_time_ms_per_sample"], 4) if r["inference_time_ms_per_sample"] is not None else None,
+                "Model Size (KB)": round(r["model_size_kb"], 1) if r["model_size_kb"] is not None else None,
+                "Features": r["feature_count"],
+            }
+            for r in hr["leaderboard"]
+        ]
+        st.dataframe(pd.DataFrame(lb_rows), use_container_width=True, hide_index=True)
+        if hr.get("failed_candidates"):
+            with st.expander(f"⚠️ {len(hr['failed_candidates'])} candidate(s) failed to train"):
+                for f in hr["failed_candidates"]:
+                    st.caption(f"**{f['model_type']}**: {f['error']}")
+
+    with detail_tabs[5]:
+        st.markdown("**Experiment 9 — Feature Importance (winning / best-available candidate)**")
+        if hr.get("feature_importance"):
+            fi_df = pd.DataFrame(hr["feature_importance"], columns=["Feature", "Importance"]).head(25)
+            fig = go.Figure(go.Bar(x=fi_df["Importance"], y=fi_df["Feature"], orientation="h", marker_color="steelblue"))
+            fig.update_layout(title=f"Top 25 Features by Importance ({horizon}h)", height=520, yaxis=dict(autorange="reversed"))
+            plot_retro(fig)
+        else:
+            st.info("Feature importance not available for any candidate at this horizon.")
+
+    with detail_tabs[6]:
+        shap_result = hr.get("shap_result") or {}
+        st.markdown("**SHAP Analysis**")
+        if shap_result.get("supported"):
+            shap_df = pd.DataFrame(shap_result["shap_importance"], columns=["Feature", "Mean |SHAP|"]).head(25)
+            fig = go.Figure(go.Bar(x=shap_df["Mean |SHAP|"], y=shap_df["Feature"], orientation="h", marker_color="indianred"))
+            fig.update_layout(title=f"Top 25 Features by Mean |SHAP| ({horizon}h)", height=520, yaxis=dict(autorange="reversed"))
+            plot_retro(fig)
+        else:
+            st.info(shap_result.get("skipped_reason", "SHAP analysis not available at this horizon."))
+
+        st.markdown("**Permutation Importance (SVR/MLP fallback)**")
+        perm_result = hr.get("permutation_result") or {}
+        if perm_result.get("supported"):
+            perm_df = pd.DataFrame(perm_result["permutation_importance"], columns=["Feature", "Importance (ΔR²)"]).head(25)
+            fig = go.Figure(go.Bar(x=perm_df["Importance (ΔR²)"], y=perm_df["Feature"], orientation="h", marker_color="darkorange"))
+            fig.update_layout(title=f"Top 25 Features by Permutation Importance ({horizon}h)", height=520, yaxis=dict(autorange="reversed"))
+            plot_retro(fig)
+        else:
+            st.info(perm_result.get("skipped_reason", "Permutation importance not available at this horizon."))
+
+    with detail_tabs[7]:
+        st.markdown("**Production Comparison**")
+        comp = hr["production_comparison"]
+        if comp["current"] is None:
+            st.warning(f"No production ae_{horizon}h model currently on disk to compare against.")
+        else:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.markdown("**Current Production**")
+                st.metric("Algorithm", comp["current"]["algorithm"])
+                st.metric("R²", f"{comp['current']['r2']:.4f}")
+                st.metric("MAE", f"{comp['current']['mae']:.4f}")
+                st.metric("RMSE", f"{comp['current']['rmse']:.4f}")
+            with c2:
+                st.markdown("**Candidate**")
+                st.metric("Algorithm", comp["candidate"]["algorithm"])
+                st.metric("R²", f"{comp['candidate']['r2']:.4f}", delta=f"{comp['delta_r2']:+.4f}")
+                st.metric("MAE", f"{comp['candidate']['mae']:.4f}", delta=f"{comp['delta_mae']:+.4f}", delta_color="inverse")
+                st.metric("RMSE", f"{comp['candidate']['rmse']:.4f}", delta=f"{comp['delta_rmse']:+.4f}", delta_color="inverse")
+            with c3:
+                st.markdown("**Verdict**")
+                if hr["recommendation"] == "Promote":
+                    st.success("✅ Promote")
+                else:
+                    st.warning("⏸ Keep Current Production")
+
+    with detail_tabs[8]:
+        st.markdown(f"**Promotion Criteria Checklist — {horizon}h**")
+        for item in hr["promotion_check"]["checklist"]:
+            icon = "✅" if item["passed"] else "❌"
+            st.markdown(f"{icon} **{item['criterion']}** — {item['detail']}")
+
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+        status = study.get("promotion_status_by_horizon", {}).get(str(horizon), "pending")
+        if status == "promoted":
+            promoted_at = study.get("promoted_at_by_horizon", {}).get(str(horizon))
+            st.success(
+                "This horizon's winning candidate was already promoted to production"
+                + (f" at {pd.Timestamp(promoted_at).strftime('%Y-%m-%d %H:%M UTC')}." if promoted_at else ".")
+            )
+        elif status == "rejected":
+            st.info("This horizon was reviewed and Kept Current Production.")
+        else:
+            eligible = hr["promotion_check"]["eligible"]
+            notes = st.text_area("Promotion notes (optional)", key=f"ae_automl_promo_notes_{study['study_id']}_{horizon}")
+            pc1, pc2 = st.columns(2)
+            with pc1:
+                confirm = st.checkbox(
+                    f"I understand this will overwrite the production ae_{horizon}h model (a rollback archive will be created)",
+                    key=f"ae_automl_promo_confirm_{study['study_id']}_{horizon}",
+                    disabled=not eligible,
+                )
+                if st.button(
+                    f"🚀 Promote {horizon}h Candidate to Production", key=f"ae_automl_promote_{study['study_id']}_{horizon}",
+                    type="primary", disabled=not (eligible and confirm),
+                ):
+                    with st.spinner(f"Promoting {horizon}h model to production…"):
+                        try:
+                            result = ae_research.promote_ae_to_production(hr["winner"]["run_id"], horizon, notes=notes)
+                            ae_research.mark_ae_study_promoted(study["study_id"], horizon, hr["winner"]["run_id"])
+                            st.success(f"Promoted! Archive: `{result['archive_path']}`")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Promotion failed: {exc}")
+                if not eligible:
+                    st.caption("Promotion disabled — one or more criteria above failed.")
+            with pc2:
+                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                if st.button(f"⏸ Keep Current Production ({horizon}h)", key=f"ae_automl_reject_{study['study_id']}_{horizon}"):
+                    ae_research.mark_ae_study_rejected(study["study_id"], horizon, notes=notes)
+                    st.rerun()
+
+
+def render_ae_optimization_study() -> None:
+    """10-experiment structured study to discover the best scientifically
+    defensible Production AE forecasting model, INDEPENDENTLY at all 5
+    production horizons (1h/3h/6h/12h/24h) — the flagship scientific
+    component of this project. The objective is NOT simply to maximize
+    R² — it is to understand what fundamentally determines AE
+    predictability across forecast horizons (persistence vs. raw solar
+    wind vs. coupling physics vs. geomagnetic memory) while discovering
+    the strongest defensible Production model per horizon along the way.
+
+      1  Production Baseline — reproduce each horizon's production model exactly
+      2  Persistence Benchmark — naïve lower bound, per horizon
+      3  Solar Wind + IMF Raw Floor — raw explanatory floor, no coupling/memory
+      4  Coupling Physics — 14 variables tested individually, isolated
+      5  Physics Engine Ablation — structured cumulative addition from Production
+      6  Geomagnetic Memory — Previous AE/Kp/Dst, individually and combined
+      7  Best Combined Feature Sets — per horizon
+      8  Model Comparison — all 12 model types on the winning feature set
+      9  Feature Importance / SHAP / Permutation Importance
+      10 Cross-Horizon Scientific Synthesis — persistence vs. physics crossover
+    """
+    st.info(
+        "**AE Production Model Optimization Study** — 10 structured experiments, run independently "
+        "at all 5 production horizons, to answer: how much of AE predictability comes from "
+        "persistence, upstream solar wind, coupling physics, and geomagnetic memory — and does that "
+        "balance shift as the forecast horizon grows? AE has 5 INDEPENDENTLY trained production "
+        "models (ae_1h through ae_24h), unlike Bz/Kp's single target — so every experiment runs once "
+        "per horizon with identical methodology, and Experiment 10 compares all 5 results together."
+    )
+
+    _render_ae_automl_section()
+    st.markdown("---")
+    st.markdown(
+        "### 🔬 Manual Experiments — Exp 1 through Exp 10\n"
+        "Run any experiment individually, at a horizon of your choosing, for hands-on investigation. "
+        "This is exactly what **Run Complete AE Optimization Study** above orchestrates automatically "
+        "at all 5 horizons — nothing here changes."
+    )
+
+    exp_tabs = st.tabs([
+        "Exp 1 · Baseline", "Exp 2 · Persistence", "Exp 3 · Raw Floor", "Exp 4 · Coupling Physics",
+        "Exp 5 · Physics Ablation", "Exp 6 · Geomag Memory", "Exp 7 · Best Feature Sets",
+        "Exp 8 · Model Comparison", "Exp 9 · Importance & SHAP", "Exp 10 · Promote",
+    ])
+
+    # ── Exp 1 · Production Baseline ─────────────────────────────────────────
+    with exp_tabs[0]:
+        st.markdown("##### Experiment 1 — Reproduce Production Baseline")
+        horizon1 = st.selectbox("Horizon", ae_research.HORIZON_OPTIONS, key="aeopt_exp1_horizon")
+        baseline_model = ae_research.PRODUCTION_BASELINE_MODEL_BY_HORIZON[horizon1]
+        st.caption(
+            f"Train {baseline_model} on Solar Wind + IMF + Persistence + Ey/VBz/Dynamic Pressure "
+            f"(verified directly against models/ae/metrics.json's stored feature_columns — NOT this "
+            f"lab's broader default toggles, which also include Clock Angle/Southward Duration/"
+            f"Integrated Southward Bz that production's ae_{horizon1}h model does not actually use) "
+            f"— the exact configuration production trained on."
+        )
+        if st.button("▶ Run Baseline", key="aeopt_exp1_run", type="primary"):
+            with st.spinner(f"Training {baseline_model} baseline at {horizon1}h…"):
+                try:
+                    run = ae_research.train_ae_research_model(
+                        baseline_model, horizon=horizon1,
+                        feature_toggles=ae_research._production_baseline_toggles(),
+                        experiment_tag=f"exp1_baseline_h{horizon1}",
+                        notes=f"Manual Exp 1 — Production Baseline reproduction at {horizon1}h",
+                    )
+                    st.success(f"R²={run['metrics']['r2']:.4f}, MAE={run['metrics']['mae']:.4f}")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Training failed: {exc}")
+        exp1_runs = [r for r in ae_research.list_runs() if r.get("experiment_tag") == f"exp1_baseline_h{horizon1}"]
+        if exp1_runs:
+            st.dataframe(pd.DataFrame([
+                {"R²": round(r["metrics"]["r2"], 4), "MAE": round(r["metrics"]["mae"], 4), "RMSE": round(r["metrics"]["rmse"], 4),
+                 "Trained": pd.Timestamp(r["trained_at"]).strftime("%m-%d %H:%M UTC")}
+                for r in exp1_runs
+            ]), use_container_width=True, hide_index=True)
+
+        prod_metrics1 = ae_research.get_production_ae_metrics(horizon1)
+        if prod_metrics1:
+            st.caption(f"Current production ae_{horizon1}h: {prod_metrics1['algorithm']} · R²={prod_metrics1['r2']:.4f} · MAE={prod_metrics1['mae']:.4f}")
+
+    # ── Exp 2 · Persistence Benchmark ───────────────────────────────────────
+    with exp_tabs[1]:
+        st.markdown("##### Experiment 2 — Persistence Benchmark")
+        horizon2 = st.selectbox("Horizon", ae_research.HORIZON_OPTIONS, key="aeopt_exp2_horizon")
+        st.caption(f"Naïve forecast: AE at t+{horizon2}h = AE now. Stored permanently.")
+        bench_run = next((r for r in ae_research.list_runs() if r.get("run_id") == f"persistence_ae_{horizon2}h"), None)
+        if st.button("▶ Compute Persistence Benchmark", key="aeopt_exp2_run", type="primary"):
+            with st.spinner(f"Computing persistence benchmark at {horizon2}h…"):
+                try:
+                    bench_run = ae_research.compute_ae_persistence_benchmark(horizon2)
+                    st.success(f"Persistence baseline — R²={bench_run['metrics']['r2']:.4f}, MAE={bench_run['metrics']['mae']:.4f}")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Failed: {exc}")
+        if bench_run:
+            m = bench_run["metrics"]
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("R²", f"{m['r2']:.4f}")
+            c2.metric("MAE", f"{m['mae']:.4f}")
+            c3.metric("RMSE", f"{m['rmse']:.4f}")
+            c4.metric("Bias", f"{m['bias']:.4f}")
+            st.caption(f"Test samples: {bench_run['n_test_samples']:,} · Computed: {pd.Timestamp(bench_run['trained_at']).strftime('%Y-%m-%d %H:%M UTC')}")
+        else:
+            st.info("Click above to compute and store the persistence benchmark for this horizon.")
+
+    # ── Exp 3 · Solar Wind + IMF Raw Floor ───────────────────────────────────
+    with exp_tabs[2]:
+        st.markdown("##### Experiment 3 — Solar Wind + IMF Raw Floor")
+        horizon3 = st.selectbox("Horizon", ae_research.HORIZON_OPTIONS, key="aeopt_exp3_horizon")
+        model3 = st.selectbox("Model", ae_research.TABULAR_MODELS, key="aeopt_exp3_model")
+        st.caption(
+            "Only Speed/Density/Temperature/Bt/Bx/By/Bz (+ their lags/rolling/change) — no "
+            "persistence, no Derived Physics, no coupling functions. Establishes the raw "
+            "explanatory floor before any physics or memory is introduced."
+        )
+        if st.button("▶ Train Raw Floor", key="aeopt_exp3_run", type="primary"):
+            with st.spinner(f"Training {model3} raw floor at {horizon3}h…"):
+                try:
+                    run = ae_research.train_ae_research_model(
+                        model3, horizon=horizon3,
+                        feature_toggles=_ae_opt_isolated_toggles(ae_research.SOLAR_WIND_IMF_RAW_FLOOR_GROUPS),
+                        engineered_groups=ae_research.default_engineered_toggles(), physics_features={},
+                        experiment_tag=f"exp3_raw_floor_h{horizon3}",
+                    )
+                    st.success(f"R²={run['metrics']['r2']:.4f}, MAE={run['metrics']['mae']:.4f} ({len(run['feature_columns'])} features)")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Training failed: {exc}")
+        exp3_runs = [r for r in ae_research.list_runs() if r.get("experiment_tag") == f"exp3_raw_floor_h{horizon3}"]
+        if exp3_runs:
+            st.dataframe(pd.DataFrame([
+                {"Model": r["model_type"], "R²": round(r["metrics"]["r2"], 4), "MAE": round(r["metrics"]["mae"], 4),
+                 "Features": len(r["feature_columns"]), "Trained": pd.Timestamp(r["trained_at"]).strftime("%m-%d %H:%M UTC")}
+                for r in exp3_runs
+            ]), use_container_width=True, hide_index=True)
+        else:
+            st.info("No Exp 3 runs yet at this horizon.")
+
+    # ── Exp 4 · Coupling Physics ─────────────────────────────────────────────
+    with exp_tabs[3]:
+        st.markdown("##### Experiment 4 — Coupling Physics (individually, isolated)")
+        st.caption("Each of 14 coupling variables tested ALONE — a pure marginal/standalone-information test.")
+        horizon4 = st.selectbox("Horizon", ae_research.HORIZON_OPTIONS, key="aeopt_exp4_horizon")
+        combo_names4 = [c["name"] for c in ae_research.COUPLING_PHYSICS_GRID]
+        col4a, col4b = st.columns(2)
+        with col4a:
+            combo4 = st.selectbox("Variable", combo_names4, key="aeopt_exp4_combo")
+        with col4b:
+            model4 = st.selectbox("Model", ae_research.TABULAR_MODELS, key="aeopt_exp4_model")
+        if st.button("▶ Train This Variable", key="aeopt_exp4_run", type="primary"):
+            entry = next(c for c in ae_research.COUPLING_PHYSICS_GRID if c["name"] == combo4)
+            if entry["kind"] == "core_column":
+                toggles4 = _ae_opt_isolated_toggles({"Derived Physics": [entry["column"]]})
+                physics4 = {}
+            else:
+                toggles4 = _ae_opt_isolated_toggles({})
+                physics4 = {entry["physics_name"]: True}
+            with st.spinner(f"Training {model4} on '{combo4}' at {horizon4}h…"):
+                try:
+                    run = ae_research.train_ae_research_model(
+                        model4, horizon=horizon4, feature_toggles=toggles4,
+                        engineered_groups=ae_research.default_engineered_toggles(), physics_features=physics4,
+                        experiment_tag=f"exp4_coupling_h{horizon4}",
+                    )
+                    st.success(f"R²={run['metrics']['r2']:.4f}, MAE={run['metrics']['mae']:.4f} ({len(run['feature_columns'])} features)")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Training failed: {exc}")
+        exp4_runs = [r for r in ae_research.list_runs() if r.get("experiment_tag") == f"exp4_coupling_h{horizon4}"]
+        if exp4_runs:
+            st.dataframe(pd.DataFrame([
+                {"Model": r["model_type"], "Features": ", ".join(r["feature_columns"][:2]) + ("…" if len(r["feature_columns"]) > 2 else ""),
+                 "R²": round(r["metrics"]["r2"], 4), "MAE": round(r["metrics"]["mae"], 4),
+                 "Trained": pd.Timestamp(r["trained_at"]).strftime("%m-%d %H:%M UTC")}
+                for r in exp4_runs
+            ]), use_container_width=True, hide_index=True)
+        else:
+            st.info("No Exp 4 runs yet at this horizon.")
+
+    # ── Exp 5 · Physics Engine Ablation ──────────────────────────────────────
+    with exp_tabs[4]:
+        st.markdown("##### Experiment 5 — Physics Engine Ablation (cumulative from Production)")
+        st.caption("Structured cumulative addition from the Production baseline — do not assume more variables are better.")
+        horizon5 = st.selectbox("Horizon", ae_research.HORIZON_OPTIONS, key="aeopt_exp5_horizon")
+        step_names5 = [s["name"] for s in ae_research.PHYSICS_ENGINE_ABLATION_STEPS]
+        col5a, col5b = st.columns(2)
+        with col5a:
+            step5 = st.selectbox("Step", step_names5, key="aeopt_exp5_step")
+        with col5b:
+            model5 = st.selectbox("Model", ae_research.TABULAR_MODELS, key="aeopt_exp5_model")
+        if st.button("▶ Train This Step", key="aeopt_exp5_run", type="primary"):
+            spec = next(s for s in ae_research.PHYSICS_ENGINE_ABLATION_STEPS if s["name"] == step5)
+            with st.spinner(f"Training {model5} on '{step5}' at {horizon5}h…"):
+                try:
+                    run = ae_research.train_ae_research_model(
+                        model5, horizon=horizon5, feature_toggles=ae_research.default_feature_toggles(),
+                        engineered_groups=ae_research.default_engineered_toggles(), physics_features=spec["physics_features"],
+                        experiment_tag=f"exp5_ablation_h{horizon5}",
+                    )
+                    st.success(f"R²={run['metrics']['r2']:.4f}, MAE={run['metrics']['mae']:.4f}")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Training failed: {exc}")
+        exp5_runs = [r for r in ae_research.list_runs() if r.get("experiment_tag") == f"exp5_ablation_h{horizon5}"]
+        if exp5_runs:
+            st.dataframe(pd.DataFrame([
+                {"Model": r["model_type"], "R²": round(r["metrics"]["r2"], 4), "MAE": round(r["metrics"]["mae"], 4),
+                 "Trained": pd.Timestamp(r["trained_at"]).strftime("%m-%d %H:%M UTC")}
+                for r in exp5_runs
+            ]), use_container_width=True, hide_index=True)
+        else:
+            st.info("No Exp 5 runs yet at this horizon.")
+
+    # ── Exp 6 · Geomagnetic Memory ────────────────────────────────────────────
+    with exp_tabs[5]:
+        st.markdown("##### Experiment 6 — Geomagnetic Memory")
+        st.caption("Does Previous Kp/Dst carry information about future AE beyond AE's own persistence?")
+        horizon6 = st.selectbox("Horizon", ae_research.HORIZON_OPTIONS, key="aeopt_exp6_horizon")
+        combo_names6 = [c["name"] for c in ae_research.GEOMAGNETIC_MEMORY_GRID]
+        col6a, col6b = st.columns(2)
+        with col6a:
+            combo6 = st.selectbox("Combination", combo_names6, key="aeopt_exp6_combo")
+        with col6b:
+            model6 = st.selectbox("Model", ae_research.TABULAR_MODELS, key="aeopt_exp6_model")
+        if st.button("▶ Train This Combination", key="aeopt_exp6_run", type="primary"):
+            spec = next(c for c in ae_research.GEOMAGNETIC_MEMORY_GRID if c["name"] == combo6)
+            with st.spinner(f"Training {model6} on '{combo6}' at {horizon6}h…"):
+                try:
+                    run = ae_research.train_ae_research_model(
+                        model6, horizon=horizon6, feature_toggles=_ae_opt_isolated_toggles(spec["groups"]),
+                        engineered_groups=ae_research.default_engineered_toggles(), physics_features={},
+                        include_kp=spec["include_kp"], include_dst=spec["include_dst"],
+                        experiment_tag=f"exp6_geomag_h{horizon6}",
+                    )
+                    st.success(f"R²={run['metrics']['r2']:.4f}, MAE={run['metrics']['mae']:.4f} ({len(run['feature_columns'])} features)")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Training failed: {exc}")
+        exp6_runs = [r for r in ae_research.list_runs() if r.get("experiment_tag") == f"exp6_geomag_h{horizon6}"]
+        if exp6_runs:
+            st.dataframe(pd.DataFrame([
+                {"Model": r["model_type"], "R²": round(r["metrics"]["r2"], 4), "MAE": round(r["metrics"]["mae"], 4),
+                 "Features": len(r["feature_columns"]), "Trained": pd.Timestamp(r["trained_at"]).strftime("%m-%d %H:%M UTC")}
+                for r in exp6_runs
+            ]), use_container_width=True, hide_index=True)
+        else:
+            st.info("No Exp 6 runs yet at this horizon.")
+
+    # ── Exp 7 · Best Combined Feature Sets ───────────────────────────────────
+    with exp_tabs[6]:
+        st.markdown("##### Experiment 7 — Best Combined Feature Sets")
+        horizon7 = st.selectbox("Horizon", ae_research.HORIZON_OPTIONS, key="aeopt_exp7_horizon")
+        combo_grid7 = ae_research._best_combo_grid()
+        combo_names7 = [c["name"] for c in combo_grid7]
+        col7a, col7b = st.columns(2)
+        with col7a:
+            combo7 = st.selectbox("Feature Set", combo_names7, key="aeopt_exp7_combo")
+        with col7b:
+            model7 = st.selectbox("Model", ae_research.TABULAR_MODELS, key="aeopt_exp7_model")
+        if st.button("▶ Train This Feature Set", key="aeopt_exp7_run", type="primary"):
+            spec = next(c for c in combo_grid7 if c["name"] == combo7)
+            with st.spinner(f"Training {model7} on '{combo7}' at {horizon7}h…"):
+                try:
+                    run = ae_research.train_ae_research_model(
+                        model7, horizon=horizon7, feature_toggles=_ae_opt_isolated_toggles(spec["groups"]),
+                        engineered_groups=ae_research.default_engineered_toggles(), physics_features=spec["physics_features"],
+                        include_kp=spec["include_kp"], include_dst=spec["include_dst"],
+                        experiment_tag=f"exp7_bestcombo_h{horizon7}",
+                    )
+                    st.success(f"R²={run['metrics']['r2']:.4f}, MAE={run['metrics']['mae']:.4f} ({len(run['feature_columns'])} features)")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Training failed: {exc}")
+        exp7_runs = [r for r in ae_research.list_runs() if r.get("experiment_tag") == f"exp7_bestcombo_h{horizon7}"]
+        if exp7_runs:
+            st.dataframe(pd.DataFrame([
+                {"Model": r["model_type"], "R²": round(r["metrics"]["r2"], 4), "MAE": round(r["metrics"]["mae"], 4),
+                 "Features": len(r["feature_columns"]), "Trained": pd.Timestamp(r["trained_at"]).strftime("%m-%d %H:%M UTC")}
+                for r in exp7_runs
+            ]), use_container_width=True, hide_index=True)
+        else:
+            st.info("No Exp 7 runs yet at this horizon.")
+
+    # ── Exp 8 · Model Comparison ──────────────────────────────────────────────
+    with exp_tabs[7]:
+        st.markdown("##### Experiment 8 — Model Comparison")
+        st.caption("Compare all 12 model types on one chosen feature set at one horizon.")
+        horizon8 = st.selectbox("Horizon", ae_research.HORIZON_OPTIONS, key="aeopt_exp8_horizon")
+        combo_grid8 = ae_research._best_combo_grid()
+        combo8 = st.selectbox("Feature Set", [c["name"] for c in combo_grid8], key="aeopt_exp8_combo")
+        if st.button("▶ Run Full Model Sweep", key="aeopt_exp8_run", type="primary"):
+            spec = next(c for c in combo_grid8 if c["name"] == combo8)
+            toggles8 = _ae_opt_isolated_toggles(spec["groups"])
+            progress8 = st.progress(0.0, text="Starting model sweep…")
+            models_to_run = ae_research.TABULAR_MODELS + (ae_research.SEQUENCE_MODELS if ae_research.KERAS_AVAILABLE else [])
+            for i, model_type in enumerate(models_to_run):
+                progress8.progress((i + 1) / len(models_to_run), text=f"Training {model_type}…")
+                try:
+                    ae_research.train_ae_research_model(
+                        model_type, horizon=horizon8, feature_toggles=toggles8,
+                        engineered_groups=ae_research.default_engineered_toggles(), physics_features=spec["physics_features"],
+                        include_kp=spec["include_kp"], include_dst=spec["include_dst"],
+                        experiment_tag=f"exp8_modelsweep_h{horizon8}",
+                    )
+                except Exception as exc:
+                    st.warning(f"{model_type} failed: {exc}")
+            progress8.empty()
+            st.rerun()
+        exp8_runs = [r for r in ae_research.list_runs() if r.get("experiment_tag") == f"exp8_modelsweep_h{horizon8}"]
+        if exp8_runs:
+            exp8_runs = sorted(exp8_runs, key=lambda r: -r["metrics"]["r2"])
+            st.dataframe(pd.DataFrame([
+                {"Rank": i + 1, "Model": r["model_type"], "R²": round(r["metrics"]["r2"], 4), "MAE": round(r["metrics"]["mae"], 4),
+                 "RMSE": round(r["metrics"]["rmse"], 4), "Train Time (s)": round(r["training_time_sec"], 3) if r["training_time_sec"] else None}
+                for i, r in enumerate(exp8_runs)
+            ]), use_container_width=True, hide_index=True)
+        else:
+            st.info("No Exp 8 runs yet at this horizon.")
+
+    # ── Exp 9 · Feature Importance / SHAP / Permutation ─────────────────────
+    with exp_tabs[8]:
+        st.markdown("##### Experiment 9 — Feature Importance, SHAP, and Permutation Importance")
+        horizon9 = st.selectbox("Horizon", ae_research.HORIZON_OPTIONS, key="aeopt_exp9_horizon")
+        candidates9 = [r for r in ae_research.list_runs() if r.get("horizon") == horizon9 and r.get("model_path")]
+        if not candidates9:
+            st.info("No trained runs with a saved model exist at this horizon yet — train something in Exp 1-8 first.")
+        else:
+            def _lbl9(r):
+                return f"{r['model_type']} · R²={r['metrics']['r2']:.4f} · {r.get('experiment_tag', '—')} · {pd.Timestamp(r['trained_at']).strftime('%m-%d %H:%M UTC')}"
+            options9 = {_lbl9(r): r for r in sorted(candidates9, key=lambda r: -r["metrics"]["r2"])}
+            chosen_lbl9 = st.selectbox("Run", list(options9), key="aeopt_exp9_run_select")
+            chosen9 = options9[chosen_lbl9]
+
+            if chosen9.get("feature_importance"):
+                st.markdown("**Native Feature Importance**")
+                fi_df = pd.DataFrame(chosen9["feature_importance"], columns=["Feature", "Importance"]).head(25)
+                fig = go.Figure(go.Bar(x=fi_df["Importance"], y=fi_df["Feature"], orientation="h", marker_color="steelblue"))
+                fig.update_layout(title="Top 25 Features by Importance", height=480, yaxis=dict(autorange="reversed"))
+                plot_retro(fig)
+
+            col9a, col9b = st.columns(2)
+            with col9a:
+                if st.button("▶ Compute SHAP", key="aeopt_exp9_shap_btn"):
+                    with st.spinner("Computing SHAP values…"):
+                        try:
+                            st.session_state["aeopt_exp9_shap_result"] = ae_research.compute_shap_importance_ae(chosen9["run_id"])
+                        except Exception as exc:
+                            st.error(f"SHAP failed: {exc}")
+                shap_res9 = st.session_state.get("aeopt_exp9_shap_result")
+                if shap_res9 and shap_res9.get("run_id") == chosen9["run_id"]:
+                    if shap_res9.get("supported"):
+                        shap_df9 = pd.DataFrame(shap_res9["shap_importance"], columns=["Feature", "Mean |SHAP|"]).head(20)
+                        fig = go.Figure(go.Bar(x=shap_df9["Mean |SHAP|"], y=shap_df9["Feature"], orientation="h", marker_color="indianred"))
+                        fig.update_layout(title="Top 20 by Mean |SHAP|", height=440, yaxis=dict(autorange="reversed"))
+                        plot_retro(fig)
+                    else:
+                        st.info(shap_res9["skipped_reason"])
+            with col9b:
+                if st.button("▶ Compute Permutation Importance", key="aeopt_exp9_perm_btn"):
+                    with st.spinner("Computing permutation importance…"):
+                        try:
+                            st.session_state["aeopt_exp9_perm_result"] = ae_research.compute_permutation_importance_ae(chosen9["run_id"])
+                        except Exception as exc:
+                            st.error(f"Permutation importance failed: {exc}")
+                perm_res9 = st.session_state.get("aeopt_exp9_perm_result")
+                if perm_res9 and perm_res9.get("run_id") == chosen9["run_id"]:
+                    if perm_res9.get("supported"):
+                        perm_df9 = pd.DataFrame(perm_res9["permutation_importance"], columns=["Feature", "Importance (ΔR²)"]).head(20)
+                        fig = go.Figure(go.Bar(x=perm_df9["Importance (ΔR²)"], y=perm_df9["Feature"], orientation="h", marker_color="darkorange"))
+                        fig.update_layout(title="Top 20 by Permutation Importance", height=440, yaxis=dict(autorange="reversed"))
+                        plot_retro(fig)
+                    else:
+                        st.info(perm_res9["skipped_reason"])
+
+    # ── Exp 10 · Promote ──────────────────────────────────────────────────────
+    with exp_tabs[9]:
+        st.markdown("##### Experiment 10 — Promote a Manual Run to Production")
+        st.caption(
+            "For the full Cross-Horizon Scientific Synthesis, use the Automated Optimization section "
+            "above — this tab only lets you promote an individual manual run at a chosen horizon."
+        )
+        horizon10 = st.selectbox("Horizon", ae_research.HORIZON_OPTIONS, key="aeopt_exp10_horizon")
+        promotable10 = [
+            r for r in ae_research.list_runs()
+            if r.get("horizon") == horizon10 and r.get("model_type") not in ae_research.SEQUENCE_MODELS and r.get("model_path")
+        ]
+        if not promotable10:
+            st.info("No promotable manual runs yet at this horizon.")
+        else:
+            def _promo_lbl10(r):
+                return f"{r.get('experiment_tag') or '—'} · {r['model_type']} · R²={r['metrics']['r2']:.4f} · MAE={r['metrics']['mae']:.4f} · {pd.Timestamp(r['trained_at']).strftime('%m-%d %H:%M UTC')}"
+            promo_options10 = {_promo_lbl10(r): r for r in sorted(promotable10, key=lambda r: -r["metrics"]["r2"])}
+            chosen_promo_lbl10 = st.selectbox("Select run to promote", list(promo_options10), key="aeopt_exp10_run")
+            chosen_promo10 = promo_options10[chosen_promo_lbl10]
+
+            prod_metrics10 = ae_research.get_production_ae_metrics(horizon10)
+            check10 = ae_research.check_promotion_criteria_ae(chosen_promo10, prod_metrics10, horizon10)
+            for item in check10["checklist"]:
+                icon = "✅" if item["passed"] else "❌"
+                st.markdown(f"{icon} {item['criterion']} — {item['detail']}")
+
+            promo_notes10 = st.text_area("Promotion notes (optional)", key="aeopt_exp10_notes")
+            confirm10 = st.checkbox(
+                f"I understand this will overwrite the production ae_{horizon10}h model (a rollback archive will be created)",
+                key="aeopt_exp10_confirm", disabled=not check10["eligible"],
+            )
+            if st.button("🚀 Promote to Production", key="aeopt_exp10_promote", type="primary",
+                         disabled=not (check10["eligible"] and confirm10)):
+                with st.spinner(f"Promoting {horizon10}h model to production…"):
+                    try:
+                        result = ae_research.promote_ae_to_production(chosen_promo10["run_id"], horizon10, notes=promo_notes10)
+                        st.success(f"Promoted! Archive: `{result['archive_path']}`")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Promotion failed: {exc}")
+            if not check10["eligible"]:
+                st.caption("Promotion disabled — one or more criteria above failed.")
+
+
 # ==================== AE Research Laboratory ====================
 # Fully isolated from the Production Prediction tab — see
 # swdss.models.ae_research module docstring for the production-safety
@@ -9626,6 +10376,7 @@ def render_ae_research_laboratory() -> None:
 
     sub = st.tabs(
         [
+            "🔬 AE Optimization Study",
             "Model Comparison",
             "Feature Ablation",
             "Physics Experiments",
@@ -9636,18 +10387,20 @@ def render_ae_research_laboratory() -> None:
         ]
     )
     with sub[0]:
-        render_ae_model_comparison_tab()
+        render_ae_optimization_study()
     with sub[1]:
-        render_ae_feature_ablation_tab()
+        render_ae_model_comparison_tab()
     with sub[2]:
-        render_ae_physics_experiments_tab()
+        render_ae_feature_ablation_tab()
     with sub[3]:
-        render_ae_sequence_models_tab()
+        render_ae_physics_experiments_tab()
     with sub[4]:
-        render_ae_horizon_analysis_tab()
+        render_ae_sequence_models_tab()
     with sub[5]:
-        render_ae_experiment_tracking_tab()
+        render_ae_horizon_analysis_tab()
     with sub[6]:
+        render_ae_experiment_tracking_tab()
+    with sub[7]:
         render_ae_hypothesis_testing_tab()
 
 
