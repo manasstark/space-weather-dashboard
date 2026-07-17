@@ -139,7 +139,9 @@ from dashboard.lib.shared_ui import (
     open_dialog,
     plot_retro,
     render_dialog_close_button,
+    render_site_header,
     style_retro_dialog,
+    style_top_nav,
 )
 
 
@@ -850,7 +852,7 @@ def date_window_label(df: pd.DataFrame) -> str:
 def render_simple_retro_table(df: pd.DataFrame, display_names: dict | None = None) -> None:
     """Generic retro-styled HTML table for arbitrary dataframes (e.g. the
     'Latest Events' / 'Latest CMEs' tables), matching the same vintage
-    look used by the reference pagers and top_event_table().
+    look used by the reference pagers.
     """
     display_names = display_names or {}
 
@@ -903,362 +905,203 @@ def render_simple_retro_table(df: pd.DataFrame, display_names: dict | None = Non
     st.markdown(html, unsafe_allow_html=True)
 
 
-def top_event_table(df: pd.DataFrame, key_column: str, mode: str, title: str) -> None:
-    if key_column not in df.columns:
-        st.info(f"{key_column} column not available.")
-        return
+PHOTOSPHERE_REFERENCE_TABLES = [
+    {
+        "title": "CME Speed Reference",
+        "columns": ["Speed (km/s)", "Category", "Interpretation"],
+        "data": [
+            ["< 300", "Very Slow", "Usually weak, low impact"],
+            ["300-500", "Slow", "Typical solar wind speed"],
+            ["500-800", "Moderate", "Can produce moderate disturbances"],
+            ["800-1200", "Fast", "Higher chance of geomagnetic effects"],
+            ["1200-1800", "Very Fast", "Potentially geoeffective CME"],
+            ["> 1800", "Extreme", "Major space weather event possible"],
+        ],
+    },
+    {
+        "title": "CME Longitude Reference",
+        "columns": ["Longitude", "Interpretation"],
+        "data": [
+            ["-30° to +30°", "Near Earth-directed (highest concern)"],
+            ["±30° to ±60°", "Possible Earth impact"],
+            ["±60° to ±120°", "Unlikely Earth impact"],
+            ["> ±120°", "Usually away from Earth"],
+        ],
+    },
+    {
+        "title": "CME Half Angle (Width)",
+        "columns": ["Half Angle", "Category", "Interpretation"],
+        "data": [
+            ["< 20°", "Narrow", "Usually localized"],
+            ["20°-40°", "Moderate", "Medium-sized CME"],
+            ["40°-60°", "Wide", "Greater chance of Earth impact"],
+            ["> 60°", "Halo / Very Wide", "Potentially Earth-directed"],
+        ],
+    },
+    {
+        "title": "Solar Flare Classification",
+        "columns": ["Flare Class", "Peak X-ray Flux (W/m²)", "Interpretation"],
+        "data": [
+            ["A", "< 10⁻⁷", "Very weak"],
+            ["B", "10⁻⁷ - 10⁻⁶", "Weak"],
+            ["C", "10⁻⁶ - 10⁻⁵", "Minor"],
+            ["M", "10⁻⁵ - 10⁻⁴", "Strong"],
+            ["X", "> 10⁻⁴", "Extreme"],
+        ],
+    },
+    {
+        "title": "Radio Burst Reference",
+        "columns": ["Type", "Meaning", "Importance"],
+        "data": [
+            ["Type II", "Shock wave", "Strong CME indicator"],
+            ["Type III", "Fast electron beams", "Flare indicator"],
+            ["Type IV", "Large magnetic structure", "Major eruption"],
+        ],
+    },
+    {
+        "title": "F10.7 Solar Flux",
+        "columns": ["Flux (SFU)", "Solar Activity"],
+        "data": [
+            ["< 70", "Very Low"],
+            ["70-100", "Quiet"],
+            ["100-150", "Moderate"],
+            ["150-200", "Active"],
+            ["200-300", "High"],
+            ["> 300", "Very High"],
+        ],
+    },
+]
 
-    if "timestamp_utc" not in df.columns:
-        st.info("timestamp_utc column not available.")
-        return
+HELIOSPHERE_REFERENCE_TABLES = [
+    {
+        "title": "Speed Reference",
+        "columns": ["Range", "Meaning", "Risk"],
+        "data": [
+            ["< 400 km/s", "Slow solar wind", "Usually quiet"],
+            ["400-500 km/s", "Moderate speed", "Normal/active"],
+            ["500-700 km/s", "Fast solar wind", "Storm possible with southward Bz"],
+            ["> 700 km/s", "Very fast wind", "Enhanced storm potential"],
+        ],
+    },
+    {
+        "title": "Density Reference",
+        "columns": ["Range", "Meaning", "Risk"],
+        "data": [
+            ["< 5 p/cm3", "Low density", "Weak pressure"],
+            ["5-10 p/cm3", "Moderate density", "Normal solar wind"],
+            ["10-30 p/cm3", "High density", "Compression possible"],
+            ["> 30 p/cm3", "Very high density", "Shock/CME sheath possible"],
+        ],
+    },
+    {
+        "title": "Temperature Reference",
+        "columns": ["Range", "Meaning", "Risk"],
+        "data": [
+            ["< 50,000 K", "Cool wind", "Usually quiet"],
+            ["50,000-150,000 K", "Typical wind", "Normal"],
+            ["150,000-500,000 K", "Hot wind", "Disturbed flow possible"],
+            ["> 500,000 K", "Very hot plasma", "Shock/CME heating possible"],
+        ],
+    },
+    {
+        "title": "Bz Reference",
+        "columns": ["Range", "Meaning", "Risk"],
+        "data": [
+            ["Bz > 0 nT", "Northward IMF", "Low coupling"],
+            ["0 to -5 nT", "Weak southward IMF", "Minor activity possible"],
+            ["-5 to -10 nT", "Moderate southward IMF", "Storm possible"],
+            ["-10 to -20 nT", "Strong southward IMF", "Strong storm coupling"],
+            ["< -20 nT", "Extreme southward IMF", "Severe storm potential"],
+        ],
+    },
+]
 
-    clean = df.dropna(subset=[key_column]).copy()
+GEOSPACE_REFERENCE_TABLES = [
+    {
+        "title": "Kp Reference",
+        "columns": ["Range", "Meaning", "Risk"],
+        "data": [
+            ["0-3", "Quiet", "Normal"],
+            ["4", "Active", "Unsettled field"],
+            ["5", "G1 storm", "Minor storm"],
+            ["6", "G2 storm", "Moderate storm"],
+            ["7", "G3 storm", "Strong storm"],
+            ["8-9", "G4-G5 storm", "Severe/extreme storm"],
+        ],
+    },
+    {
+        "title": "Dst Reference",
+        "columns": ["Range", "Meaning", "Risk"],
+        "data": [
+            ["Dst > -30 nT", "Quiet", "Low storm activity"],
+            ["-30 to -50 nT", "Weak storm", "Minor ring current"],
+            ["-50 to -100 nT", "Moderate storm", "Storm underway"],
+            ["-100 to -200 nT", "Intense storm", "Strong disturbance"],
+            ["< -200 nT", "Superstorm", "Extreme disturbance"],
+        ],
+    },
+]
 
-    if clean.empty:
-        st.info(f"No data available for {title}.")
-        return
 
-    ascending = mode == "lowest"
-    top_df = clean.sort_values(key_column, ascending=ascending).head(5).copy()
-
-    top_df["event_time"] = top_df["timestamp_utc"].apply(format_event_time)
-
-    all_columns = [
-        "solar_wind_speed",
-        "proton_density",
-        "temperature",
-        "bz",
-        "kp",
-        "dst",
-    ]
-
-    remaining_columns = [
-        col for col in all_columns
-        if col in top_df.columns and col != key_column
-    ]
-
-    final_columns = ["event_time", key_column, *remaining_columns]
-    top_df = top_df[final_columns]
-
-    display_names = {
-        "event_time": "Time (UTC)",
-        "solar_wind_speed": "Speed",
-        "proton_density": "Density",
-        "temperature": "Temperature",
-        "bz": "Bz",
-        "kp": "Kp",
-        "dst": "Dst",
-    }
-
-    def fmt(col, val):
-        if pd.isna(val):
-            return "N/A"
-        if col == "event_time":
-            return str(val)
-        if col == "temperature":
-            return f"{float(val):.0f}"
-        if col in ["bz", "kp"]:
-            return f"{float(val):.2f}"
-        if col == "dst":
-            return f"{float(val):.0f}"
-        return f"{float(val):.1f}"
-
-    html = """
-    <style>
-    .retro-table {
-        border-collapse: collapse;
-        background: #ffffff;
-        color: #000000;
-        font-family: "MS Sans Serif", Tahoma, sans-serif;
-        font-size: 14px;
-        border-top: 2px solid #808080;
-        border-left: 2px solid #808080;
-        border-right: 2px solid #ffffff;
-        border-bottom: 2px solid #ffffff;
-    }
-    .retro-table th, .retro-table td {
-        border: 1px solid #d0d0d0;
-        padding: 8px 10px;
-        white-space: nowrap;
-    }
-    .retro-table th {
-        background: #efefef;
-        color: #606060;
-        font-weight: 400;
-        text-align: left;
-    }
-    .hover-cell {
-        cursor: help;
-        text-decoration: underline dotted #000080;
-    }
-    </style>
-    <table class="retro-table">
+def _references_terminal_section_html(section_name: str, tables: list[dict]) -> str:
+    """One section's worth of reference tables, formatted as aligned
+    monospace columns (fixed-width padded so the terminal box stays
+    readable without an actual HTML <table>).
     """
-
-    html += "<thead><tr>"
-    for col in final_columns:
-        html += f"<th>{escape(display_names.get(col, col))}</th>"
-    html += "</tr></thead><tbody>"
-
-    for _, row in top_df.iterrows():
-        html += "<tr>"
-        for col in final_columns:
-            value = fmt(col, row[col])
-            tooltip = reference_tooltip(col, row[col]) if col in ["bz", "kp", "dst"] else ""
-            class_name = "hover-cell" if tooltip else ""
-            html += f'<td class="{class_name}" title="{escape(tooltip)}">{escape(value)}</td>'
-        html += "</tr>"
-
-    html += "</tbody></table>"
-
-    st.markdown(f"### {title}")
-    st.markdown(html, unsafe_allow_html=True)
+    html = f'<div style="margin-top:18px; color:#ffcc66; font-weight:800;">=== {escape(section_name)} ===</div>'
+    for table in tables:
+        columns = table["columns"]
+        rows = table["data"]
+        widths = [
+            max(len(str(columns[i])), max((len(str(row[i])) for row in rows), default=0))
+            for i in range(len(columns))
+        ]
+        header_line = "  ".join(str(columns[i]).ljust(widths[i]) for i in range(len(columns)))
+        html += f'<div style="margin-top:10px; color:#9adfff;">&gt; {escape(table["title"])}</div>'
+        html += f"<div>{escape(header_line)}</div>"
+        html += f"<div>{'-' * len(header_line)}</div>"
+        for row in rows:
+            line = "  ".join(str(row[i]).ljust(widths[i]) for i in range(len(columns)))
+            html += f"<div>{escape(line)}</div>"
+    return html
 
 
-def render_paged_reference_table(reference_tables: list[dict], session_key: str, key_prefix: str) -> None:
-    """Shared renderer for the Range/Meaning/Risk-style reference pagers
-    used across Home, Heliosphere, Geospace, and Photosphere. Pads every
-    table to the same row count so switching tables never resizes the
-    panel (no scrolling, no page-shift), and keeps the prev/next buttons
-    below the table instead of overlapping it.
+@st.dialog("References", width="large", dismissible=False)
+def show_references_terminal() -> None:
+    """All Photosphere/Heliosphere/Geospace reference tables in one
+    scrollable terminal window, opened from the "📋 References" toolbar
+    button — replaces the three separate rotating reference-table panels
+    that used to sit inline on those pages (UI simplification, 2026-07).
     """
-    if session_key not in st.session_state:
-        st.session_state[session_key] = 0
+    render_dialog_close_button("close_references")
 
-    idx = st.session_state[session_key]
-    current = reference_tables[idx]
-    columns = current.get("columns", ["Range", "Meaning", "Risk"])
-    max_rows = max(len(t["data"]) for t in reference_tables)
-
-    rows = current["data"]
-    if rows and isinstance(rows[0], dict):
-        rows = [[entry.get(col, "") for col in columns] for entry in rows]
-
-    padded_rows = list(rows)
-    blank_row = ["" for _ in columns]
-    while len(padded_rows) < max_rows:
-        padded_rows.append(blank_row)
-
-    table_html = """
-    <style>
-    .retro-table-photo {
-        border-collapse: collapse;
-        background: #ffffff;
-        color: #000000;
-        font-family: "MS Sans Serif", Tahoma, sans-serif;
-        font-size: 14px;
-        border-top: 2px solid #808080;
-        border-left: 2px solid #808080;
-        border-right: 2px solid #ffffff;
-        border-bottom: 2px solid #ffffff;
-    }
-    .retro-table-photo th, .retro-table-photo td {
-        border: 1px solid #d0d0d0;
-        padding: 5px 10px;
-        white-space: nowrap;
-    }
-    .retro-table-photo td.blank-row {
-        border-color: transparent;
-        background: #ffffff;
-    }
-    .retro-table-photo th {
-        background: #efefef;
-        color: #606060;
-        font-weight: 400;
-        text-align: left;
-    }
-    </style>
-    <table class="retro-table-photo">
-    """
-
-    table_html += "<thead><tr>" + "".join(f"<th>{escape(col)}</th>" for col in columns) + "</tr></thead><tbody>"
-    for row in padded_rows:
-        is_blank = row is blank_row
-        cell_class = ' class="blank-row"' if is_blank else ""
-        table_html += (
-            "<tr>" + "".join(f"<td{cell_class}>{escape(str(cell)) or '&nbsp;'}</td>" for cell in row) + "</tr>"
-        )
-    table_html += "</tbody></table>"
+    body_html = (
+        _references_terminal_section_html("PHOTOSPHERE", PHOTOSPHERE_REFERENCE_TABLES)
+        + _references_terminal_section_html("HELIOSPHERE", HELIOSPHERE_REFERENCE_TABLES)
+        + _references_terminal_section_html("GEOSPACE", GEOSPACE_REFERENCE_TABLES)
+    )
 
     st.markdown(
         f"""
-        <div style="font-size:1.1rem; font-weight:700; color:#ffffff; white-space:nowrap; margin-bottom:2px;">
-            {escape(current['title'])}
+        <style>
+        .references-terminal {{
+            background: #050505;
+            border: 2px solid #ffffff;
+            box-shadow: 3px 3px 0px #808080;
+            padding: 14px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.78rem;
+            color: #00ff88;
+            height: 600px;
+            box-sizing: border-box;
+            overflow-y: auto;
+        }}
+        </style>
+        <div class="references-terminal">
+            {body_html}
         </div>
-        {table_html}
         """,
         unsafe_allow_html=True,
-    )
-
-    prev_col, next_col, _spacer_col = st.columns([0.12, 0.12, 0.76])
-
-    with prev_col:
-        if st.button("‹", key=f"{key_prefix}_prev"):
-            st.session_state[session_key] = (idx - 1) % len(reference_tables)
-            st.rerun()
-
-    with next_col:
-        if st.button("›", key=f"{key_prefix}_next"):
-            st.session_state[session_key] = (idx + 1) % len(reference_tables)
-            st.rerun()
-
-
-def heliosphere_reference_window() -> None:
-    render_paged_reference_table(
-        [
-            {
-                "title": "Speed Reference",
-                "data": [
-                    {"Range": "< 400 km/s", "Meaning": "Slow solar wind", "Risk": "Usually quiet"},
-                    {"Range": "400-500 km/s", "Meaning": "Moderate speed", "Risk": "Normal/active"},
-                    {
-                        "Range": "500-700 km/s",
-                        "Meaning": "Fast solar wind",
-                        "Risk": "Storm possible with southward Bz",
-                    },
-                    {"Range": "> 700 km/s", "Meaning": "Very fast wind", "Risk": "Enhanced storm potential"},
-                ],
-            },
-            {
-                "title": "Density Reference",
-                "data": [
-                    {"Range": "< 5 p/cm3", "Meaning": "Low density", "Risk": "Weak pressure"},
-                    {"Range": "5-10 p/cm3", "Meaning": "Moderate density", "Risk": "Normal solar wind"},
-                    {"Range": "10-30 p/cm3", "Meaning": "High density", "Risk": "Compression possible"},
-                    {"Range": "> 30 p/cm3", "Meaning": "Very high density", "Risk": "Shock/CME sheath possible"},
-                ],
-            },
-            {
-                "title": "Temperature Reference",
-                "data": [
-                    {"Range": "< 50,000 K", "Meaning": "Cool wind", "Risk": "Usually quiet"},
-                    {"Range": "50,000-150,000 K", "Meaning": "Typical wind", "Risk": "Normal"},
-                    {"Range": "150,000-500,000 K", "Meaning": "Hot wind", "Risk": "Disturbed flow possible"},
-                    {"Range": "> 500,000 K", "Meaning": "Very hot plasma", "Risk": "Shock/CME heating possible"},
-                ],
-            },
-            {
-                "title": "Bz Reference",
-                "data": [
-                    {"Range": "Bz > 0 nT", "Meaning": "Northward IMF", "Risk": "Low coupling"},
-                    {"Range": "0 to -5 nT", "Meaning": "Weak southward IMF", "Risk": "Minor activity possible"},
-                    {"Range": "-5 to -10 nT", "Meaning": "Moderate southward IMF", "Risk": "Storm possible"},
-                    {
-                        "Range": "-10 to -20 nT",
-                        "Meaning": "Strong southward IMF",
-                        "Risk": "Strong storm coupling",
-                    },
-                    {"Range": "< -20 nT", "Meaning": "Extreme southward IMF", "Risk": "Severe storm potential"},
-                ],
-            },
-        ],
-        session_key="heliosphere_reference_idx",
-        key_prefix="heliosphere_reference",
-    )
-
-
-def geospace_reference_window() -> None:
-    render_paged_reference_table(
-        [
-            {
-                "title": "Kp Reference",
-                "data": [
-                    {"Range": "0-3", "Meaning": "Quiet", "Risk": "Normal"},
-                    {"Range": "4", "Meaning": "Active", "Risk": "Unsettled field"},
-                    {"Range": "5", "Meaning": "G1 storm", "Risk": "Minor storm"},
-                    {"Range": "6", "Meaning": "G2 storm", "Risk": "Moderate storm"},
-                    {"Range": "7", "Meaning": "G3 storm", "Risk": "Strong storm"},
-                    {"Range": "8-9", "Meaning": "G4-G5 storm", "Risk": "Severe/extreme storm"},
-                ],
-            },
-            {
-                "title": "Dst Reference",
-                "data": [
-                    {"Range": "Dst > -30 nT", "Meaning": "Quiet", "Risk": "Low storm activity"},
-                    {"Range": "-30 to -50 nT", "Meaning": "Weak storm", "Risk": "Minor ring current"},
-                    {"Range": "-50 to -100 nT", "Meaning": "Moderate storm", "Risk": "Storm underway"},
-                    {"Range": "-100 to -200 nT", "Meaning": "Intense storm", "Risk": "Strong disturbance"},
-                    {"Range": "< -200 nT", "Meaning": "Superstorm", "Risk": "Extreme disturbance"},
-                ],
-            },
-        ],
-        session_key="geospace_reference_idx",
-        key_prefix="geospace_reference",
-    )
-
-
-def photosphere_reference_window() -> None:
-    reference_tables = [
-        {
-            "title": "CME Speed Reference",
-            "columns": ["Speed (km/s)", "Category", "Interpretation"],
-            "data": [
-                ["< 300", "Very Slow", "Usually weak, low impact"],
-                ["300-500", "Slow", "Typical solar wind speed"],
-                ["500-800", "Moderate", "Can produce moderate disturbances"],
-                ["800-1200", "Fast", "Higher chance of geomagnetic effects"],
-                ["1200-1800", "Very Fast", "Potentially geoeffective CME"],
-                ["> 1800", "Extreme", "Major space weather event possible"],
-            ],
-        },
-        {
-            "title": "CME Longitude Reference",
-            "columns": ["Longitude", "Interpretation"],
-            "data": [
-                ["-30° to +30°", "Near Earth-directed (highest concern)"],
-                ["±30° to ±60°", "Possible Earth impact"],
-                ["±60° to ±120°", "Unlikely Earth impact"],
-                ["> ±120°", "Usually away from Earth"],
-            ],
-        },
-        {
-            "title": "CME Half Angle (Width)",
-            "columns": ["Half Angle", "Category", "Interpretation"],
-            "data": [
-                ["< 20°", "Narrow", "Usually localized"],
-                ["20°-40°", "Moderate", "Medium-sized CME"],
-                ["40°-60°", "Wide", "Greater chance of Earth impact"],
-                ["> 60°", "Halo / Very Wide", "Potentially Earth-directed"],
-            ],
-        },
-        {
-            "title": "Solar Flare Classification",
-            "columns": ["Flare Class", "Peak X-ray Flux (W/m²)", "Interpretation"],
-            "data": [
-                ["A", "< 10⁻⁷", "Very weak"],
-                ["B", "10⁻⁷ - 10⁻⁶", "Weak"],
-                ["C", "10⁻⁶ - 10⁻⁵", "Minor"],
-                ["M", "10⁻⁵ - 10⁻⁴", "Strong"],
-                ["X", "> 10⁻⁴", "Extreme"],
-            ],
-        },
-        {
-            "title": "Radio Burst Reference",
-            "columns": ["Type", "Meaning", "Importance"],
-            "data": [
-                ["Type II", "Shock wave", "Strong CME indicator"],
-                ["Type III", "Fast electron beams", "Flare indicator"],
-                ["Type IV", "Large magnetic structure", "Major eruption"],
-            ],
-        },
-        {
-            "title": "F10.7 Solar Flux",
-            "columns": ["Flux (SFU)", "Solar Activity"],
-            "data": [
-                ["< 70", "Very Low"],
-                ["70-100", "Quiet"],
-                ["100-150", "Moderate"],
-                ["150-200", "Active"],
-                ["200-300", "High"],
-                ["> 300", "Very High"],
-            ],
-        },
-    ]
-
-    render_paged_reference_table(
-        reference_tables,
-        session_key="photosphere_reference_idx",
-        key_prefix="photosphere_reference",
     )
 
 
@@ -1603,6 +1446,44 @@ def render_prediction_job_tiles(jobs: list[dict], empty_message: str) -> None:
                     open_dialog("prediction_job", job["job_id"])
 
 
+def render_architecture_status_panel(dataset: str) -> None:
+    """Read-only counterpart to prediction_panel(), for the Research Lab's
+    Forecasting Architectures tabs. Those tabs exist to COMPARE
+    architectures using jobs that already exist — not to be a second place
+    to start one. Reusing prediction_panel() there (as this project did
+    before) put the exact same "Start Prediction" control in two separate
+    navigation locations for the same underlying jobs, which read as a
+    duplicated feature rather than a deliberate comparison view. This
+    shows the same live queue stats and job tiles (including the same
+    "Open" dialog every other job view uses) without a second Start
+    Prediction button — new jobs are always started from Analytics/
+    Heliosphere, and appear here automatically since it's the same
+    dataset/job data underneath.
+    """
+    poll_jobs(dataset)
+
+    if dataset == "ae":
+        st.caption(
+            "This forecast estimates the auroral electrojet activity expected during the next hour "
+            "based on the upstream solar wind and interplanetary magnetic field conditions available "
+            "at the time the forecast is issued. Differences from subsequent observations may reflect "
+            "evolving solar wind conditions, the nonlinear response of Earth's magnetosphere, or model "
+            "limitations."
+        )
+
+    render_prediction_queue_stats(dataset)
+    st.caption(
+        "Start new predictions from the Analytics page — jobs started there appear below "
+        "automatically, for comparison against the other architecture."
+    )
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    st.markdown("#### Running Predictions")
+    render_prediction_job_tiles(
+        get_running_jobs(dataset),
+        "No predictions running for this architecture right now.",
+    )
+
+
 @st.dialog("Saved Predictions", width="large", dismissible=False)
 def show_saved_predictions(dataset: str) -> None:
     render_dialog_close_button("close_saved_predictions")
@@ -1693,6 +1574,23 @@ def render_explainability_section(dataset: str, variable: str, horizon) -> None:
         )
 
 
+def _cv_terminal_line(metrics: dict, unit: str = "") -> str:
+    """One extra terminal-style line for the live job-terminal blocks
+    (render_*_forecast_dialog / show_prediction_job) showing walk-forward
+    CV stability alongside the single-holdout R²/MAE/RMSE line those
+    already print — empty string (no line at all) for any model trained
+    before this field existed, so old jobs render exactly as before.
+    """
+    if metrics.get("cv_r2_mean") is None:
+        return ""
+    unit_suffix = f" {escape(unit)}" if unit else ""
+    return (
+        f"<div>CV R&sup2;: {metrics['cv_r2_mean']:.4f} &plusmn; {metrics['cv_r2_std']:.4f} "
+        f"({metrics.get('cv_n_folds')} folds) &nbsp;|&nbsp; CV MAE: {metrics['cv_mae_mean']:.3f}{unit_suffix} "
+        f"&plusmn; {metrics['cv_mae_std']:.3f}{unit_suffix}</div>"
+    )
+
+
 def render_kp_forecast_dialog(job: dict) -> None:
     """Kp on the Analytics page runs TWO independent products from one job
     record — see predict.predict_kp_interval / predict_kp_rolling for the
@@ -1771,6 +1669,7 @@ def render_kp_forecast_dialog(job: dict) -> None:
             <div>MODEL: {escape(job['model_name'])}</div>
             <div>R&sup2;: {metrics.get('r2', float('nan')):.4f} &nbsp;|&nbsp; MAE: {metrics.get('mae', float('nan')):.3f}
             &nbsp;|&nbsp; RMSE: {metrics.get('rmse', float('nan')):.3f}</div>
+            {_cv_terminal_line(metrics)}
         </div>
         """,
         unsafe_allow_html=True,
@@ -2024,6 +1923,13 @@ def render_kp_forecast_dialog(job: dict) -> None:
             metric_card("MAE", f"{metrics.get('mae', float('nan')):.3f}", "Model's typical training error")
         with m3:
             metric_card("RMSE", f"{metrics.get('rmse', float('nan')):.3f}", "")
+        if metrics.get("cv_r2_mean") is not None:
+            st.caption(
+                f"🔁 Walk-forward CV ({metrics.get('cv_n_folds')} folds): "
+                f"R² = {metrics['cv_r2_mean']:.3f} ± {metrics['cv_r2_std']:.3f} · "
+                f"MAE = {metrics['cv_mae_mean']:.3f} ± {metrics['cv_mae_std']:.3f} — "
+                "a stability check across several time periods, not just one holdout split."
+            )
 
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
     render_explainability_section(job["dataset"], "kp", "interval")
@@ -2091,6 +1997,7 @@ def render_dst_forecast_dialog(job: dict) -> None:
             <div>MODEL: {escape(job['model_name'])}</div>
             <div>R&sup2;: {metrics.get('r2', float('nan')):.4f} &nbsp;|&nbsp; MAE: {metrics.get('mae', float('nan')):.3f} nT
             &nbsp;|&nbsp; RMSE: {metrics.get('rmse', float('nan')):.3f} nT</div>
+            {_cv_terminal_line(metrics, "nT")}
         </div>
         """,
         unsafe_allow_html=True,
@@ -2278,6 +2185,13 @@ def render_dst_forecast_dialog(job: dict) -> None:
             metric_card("MAE", f"{metrics.get('mae', float('nan')):.3f} nT", "Model's typical training error")
         with s12:
             metric_card("RMSE", f"{metrics.get('rmse', float('nan')):.3f} nT", "")
+        if metrics.get("cv_r2_mean") is not None:
+            st.caption(
+                f"🔁 Walk-forward CV ({metrics.get('cv_n_folds')} folds): "
+                f"R² = {metrics['cv_r2_mean']:.3f} ± {metrics['cv_r2_std']:.3f} · "
+                f"MAE = {metrics['cv_mae_mean']:.3f} ± {metrics['cv_mae_std']:.3f} nT — "
+                "a stability check across several time periods, not just one holdout split."
+            )
 
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
     render_explainability_section(job["dataset"], "dst", job["horizon"])
@@ -2366,6 +2280,7 @@ def render_ae_forecast_dialog(job: dict) -> None:
             <div>MODEL: {escape(job['model_name'])}</div>
             <div>R&sup2;: {metrics.get('r2', float('nan')):.4f} &nbsp;|&nbsp; MAE: {metrics.get('mae', float('nan')):.3f} nT
             &nbsp;|&nbsp; RMSE: {metrics.get('rmse', float('nan')):.3f} nT</div>
+            {_cv_terminal_line(metrics, "nT")}
         </div>
         """,
         unsafe_allow_html=True,
@@ -2599,7 +2514,16 @@ def render_ae_forecast_dialog(job: dict) -> None:
                 "Kyoto WDC digital AE" if verification_status == "verified" else "Checked ~daily",
             )
         with s16:
-            st.empty()
+            cv_r2_mean = metrics.get("cv_r2_mean")
+            if cv_r2_mean is not None:
+                metric_card(
+                    "Walk-Forward CV",
+                    f"R² = {cv_r2_mean:.3f} ± {metrics['cv_r2_std']:.3f}",
+                    f"{metrics.get('cv_n_folds')} folds",
+                    tooltip="Stability across several time periods, not just one holdout split.",
+                )
+            else:
+                st.empty()
 
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
     render_explainability_section("ae", "ae", job["horizon"])
@@ -2665,6 +2589,13 @@ def render_experimental_forecast_dialog(job: dict) -> None:
         f"**Horizon:** {'Next official NOAA interval' if is_kp_interval else f'{horizon}h'}  \n"
         f"**Model Quality:** {model_quality_label(metrics.get('r2'))}"
     )
+    if metrics.get("cv_r2_mean") is not None:
+        st.caption(
+            f"🔁 Walk-forward CV ({metrics.get('cv_n_folds')} folds): "
+            f"R² = {metrics['cv_r2_mean']:.3f} ± {metrics['cv_r2_std']:.3f} · "
+            f"MAE = {metrics['cv_mae_mean']:.3f} ± {metrics['cv_mae_std']:.3f} — "
+            "a stability check across several time periods, not just one holdout split."
+        )
     st.markdown(status_badge_html(job["status"]), unsafe_allow_html=True)
     st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
 
@@ -2685,6 +2616,7 @@ def render_experimental_forecast_dialog(job: dict) -> None:
             <div>EXPERIMENTAL MODEL: {escape(job['model_name'])}</div>
             <div>R&sup2;: {metrics.get('r2', float('nan')):.4f} &nbsp;|&nbsp; MAE: {metrics.get('mae', float('nan')):.3f} {escape(unit)}
             &nbsp;|&nbsp; RMSE: {metrics.get('rmse', float('nan')):.3f} {escape(unit)}</div>
+            {_cv_terminal_line(metrics, unit)}
         </div>
         """,
         unsafe_allow_html=True,
@@ -3039,6 +2971,14 @@ def show_prediction_job(job_id: str) -> None:
                 tooltip="How much the prediction has varied across the most recent updates in this session.",
             )
 
+    if metrics.get("cv_r2_mean") is not None:
+        st.caption(
+            f"🔁 Walk-forward CV ({metrics.get('cv_n_folds')} folds): "
+            f"R² = {metrics['cv_r2_mean']:.3f} ± {metrics['cv_r2_std']:.3f} · "
+            f"MAE = {metrics['cv_mae_mean']:.3f} ± {metrics['cv_mae_std']:.3f} — "
+            "a stability check across several time periods, not just one holdout split."
+        )
+
     st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
 
     if job["status"] == "completed" and job["actual_value"] is not None:
@@ -3095,6 +3035,7 @@ def show_prediction_job(job_id: str) -> None:
             <div>MODEL: {escape(job['model_name'])}</div>
             <div>R&sup2;: {metrics.get('r2', float('nan')):.4f} &nbsp;|&nbsp; MAE: {metrics.get('mae', float('nan')):.3f} {escape(unit)}
             &nbsp;|&nbsp; RMSE: {metrics.get('rmse', float('nan')):.3f} {escape(unit)}</div>
+            {_cv_terminal_line(metrics, unit)}
         </div>
         """,
         unsafe_allow_html=True,
@@ -3673,7 +3614,6 @@ def earth_analysis(df: pd.DataFrame) -> None:
 
 
 def home_page(df: pd.DataFrame) -> None:
-    st.title("Space Weather Decision Support System")
     st.caption("7-day NOAA-based summary. Page refreshes every minute.")
 
     speed_row = row_at_extreme_from_source("solar_wind", "solar_wind_speed", "max")
@@ -3755,31 +3695,37 @@ def home_page(df: pd.DataFrame) -> None:
 
     st.divider()
 
-    top5_col, heliomap_col = st.columns(2)
+    # Solar Events and CME heliomaps side by side as two independent
+    # panels (previously two tabs under one "Heliomap" component, in the
+    # column "Top 5 Recorded Conditions" used to occupy — removed
+    # 2026-07 per user request).
+    solar_events_map_col, cme_map_col = st.columns(2)
 
-    with top5_col:
+    with solar_events_map_col:
         with st.container(height=620, border=False):
-            st.subheader("Top 5 Recorded Conditions")
+            st.markdown("#### Heliomap — Solar Events")
+            st.caption("Where on the Sun recent solar events originated.")
+            heliomap_solar_events_tab()
 
-            tab1, tab2, tab3 = st.tabs(["Lowest Bz", "Highest Kp", "Lowest Dst"])
-
-            with tab1:
-                top_event_table(df, "bz", "lowest", "Top 5 Most Negative Bz Events")
-
-            with tab2:
-                top_event_table(df, "kp", "highest", "Top 5 Highest Kp Events")
-
-            with tab3:
-                top_event_table(df, "dst", "lowest", "Top 5 Lowest Dst Events")
-
-    with heliomap_col:
+    with cme_map_col:
         with st.container(height=620, border=False):
-            heliomap_panel()
+            st.markdown("#### Heliomap — CME")
+            st.caption("Where on the Sun recent CMEs originated.")
+            heliomap_cme_tab()
 
 
 def heliosphere_page(df: pd.DataFrame) -> None:
+    """Derived Parameters and Travel Time were removed from this page's
+    tabs (UI audit, 2026-07) — both were permanent stub tabs ("will be
+    added in a future version") with no content behind them at all,
+    which reads as broken rather than "coming soon" when clicked. Dynamic
+    Pressure is fully functional (a real chart) and was kept — it was
+    initially miscategorized as another stub during the audit because its
+    chart renders below the fold on a short viewport, not because it's
+    actually empty.
+    """
     st.title("Heliosphere")
-    tabs = st.tabs(["Solar Wind", "IMF", "Derived Parameters", "Dynamic Pressure", "Travel Time"])
+    tabs = st.tabs(["Solar Wind", "IMF", "Dynamic Pressure"])
 
     with tabs[0]:
         inner = st.tabs(["Current Analysis", "Predictions", "Prediction Statistics"])
@@ -3802,10 +3748,6 @@ def heliosphere_page(df: pd.DataFrame) -> None:
             render_imf_research_laboratory()
 
     with tabs[2]:
-        st.subheader("Derived Parameters")
-        st.info("Derived parameters will use solar wind + IMF features in the next version.")
-
-    with tabs[3]:
         st.subheader("Dynamic Pressure")
         if {"proton_density", "solar_wind_speed"}.issubset(df.columns):
             pressure = df.copy()
@@ -3813,10 +3755,6 @@ def heliosphere_page(df: pd.DataFrame) -> None:
             line_chart(pressure, ["dynamic_pressure"], "Estimated Solar Wind Dynamic Pressure")
         else:
             st.info("Need proton_density and solar_wind_speed columns.")
-
-    with tabs[4]:
-        st.subheader("Travel Time")
-        st.info("Travel time model will be added after CME and L1 propagation logic.")
 
 
 def geospace_page(df: pd.DataFrame) -> None:
@@ -4276,10 +4214,13 @@ def event_title(row: pd.Series) -> str:
     return EVENT_TYPE_CATEGORY.get(event_type, event_type or "Solar Event")
 
 
-@st.dialog("Event Explorer", width="large", dismissible=False)
-def show_event_explorer(event: pd.Series) -> None:
-    render_dialog_close_button("close_event_explorer")
-
+def build_event_chain_steps(event: pd.Series) -> list[tuple[str, list[str]]]:
+    """Builds the Sun-to-Earth causal-chain trace for one solar event —
+    shared by the Event Explorer dialog (grid layout, show_event_explorer)
+    and the News Feed's inline detail panel (single scrollable terminal
+    box, render_event_terminal_panel), so both stay in sync automatically
+    instead of maintaining the trace logic twice.
+    """
     ts = event["timestamp_utc"]
     cme_df = load_processed_data("cme")
 
@@ -4312,8 +4253,7 @@ def show_event_explorer(event: pd.Series) -> None:
         steps.append(("IMF Changes (Bz, Bt)", ["Not applicable."]))
         steps.append(("Kp Response", ["Not applicable."]))
         steps.append(("Dst Response", ["Not applicable."]))
-        render_chain_grid(steps)
-        return
+        return steps
 
     steps.append(
         (
@@ -4336,8 +4276,7 @@ def show_event_explorer(event: pd.Series) -> None:
         steps.append(("IMF Changes (Bz, Bt)", ["Not applicable."]))
         steps.append(("Kp Response", ["Not applicable."]))
         steps.append(("Dst Response", ["Not applicable."]))
-        render_chain_grid(steps)
-        return
+        return steps
 
     steps.append(
         (
@@ -4403,7 +4342,57 @@ def show_event_explorer(event: pd.Series) -> None:
         steps.append(("Kp Response", [not_available_note]))
         steps.append(("Dst Response", [not_available_note]))
 
-    render_chain_grid(steps)
+    return steps
+
+
+@st.dialog("Event Explorer", width="large", dismissible=False)
+def show_event_explorer(event: pd.Series) -> None:
+    render_dialog_close_button("close_event_explorer")
+    render_chain_grid(build_event_chain_steps(event))
+
+
+def render_event_terminal_panel(event: pd.Series, height: int = 560) -> None:
+    """Inline, always-visible counterpart to the Event Explorer dialog —
+    used by the News Feed's detail column so clicking an event updates
+    this panel in place instead of opening a popup. Same underlying
+    trace (build_event_chain_steps) as show_event_explorer, rendered as
+    one scrollable terminal-style box instead of a grid of separate
+    cards, since it has to fit in a single narrow column rather than the
+    full dialog width.
+    """
+    steps = build_event_chain_steps(event)
+
+    lines_html = ""
+    for title, lines in steps:
+        lines_html += f'<div style="margin-top:10px; color:#9adfff;">&gt; {escape(title)}</div>'
+        for line in lines:
+            lines_html += f"<div>&nbsp;&nbsp;{escape(line)}</div>"
+
+    st.markdown(
+        f"""
+        <style>
+        .event-terminal {{
+            background: #050505;
+            border: 2px solid #ffffff;
+            box-shadow: 3px 3px 0px #808080;
+            padding: 12px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.78rem;
+            color: #00ff88;
+            height: {height}px;
+            box-sizing: border-box;
+            overflow-y: auto;
+        }}
+        </style>
+        <div class="event-terminal">
+            <div style="color:#ffffff; font-weight:700;">
+                {escape(event_title(event))} &mdash; {escape(latest_label_time(event["timestamp_utc"]))}
+            </div>
+            {lines_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def pick_anchor_time(*times):
@@ -4747,15 +4736,31 @@ def show_animations_grid() -> None:
                 st.caption(ts.strftime("%d %b %Y, %H:%M UTC"))
 
 
+SEVERITY_BADGES = {3: "🔴", 2: "🟠", 1: "🟡", 0: "⚪"}
+SEVERITY_LABELS = {3: "Severe (X-class / Type II)", 2: "Moderate (M-class)", 1: "Minor (Type III)", 0: "Notable"}
+
+
 def _render_event_buttons(events: pd.DataFrame, key_prefix: str) -> None:
+    """Clicking an event selects it into `news_feed_selected_event`
+    (rendered by render_event_terminal_panel in the News Feed's detail
+    column) rather than opening the Event Explorer popup — this helper
+    is only used by the News Feed's single list now. The Saved Events
+    dialog still uses the popup directly (see show_saved_events).
+    """
     for idx, row in events.iterrows():
         ts = row["timestamp_utc"]
-        label = f"{event_title(row)} - {ts.strftime('%d %b %Y')}"
+        severity = row["severity"] if "severity" in row.index else _event_severity(row)
+        badge = SEVERITY_BADGES.get(severity, "⚪")
+        label = f"{badge} {event_title(row)} - {ts.strftime('%d %b %Y')}"
 
         btn_col, save_col = st.columns([0.85, 0.15])
         with btn_col:
-            if st.button(label, key=f"{key_prefix}_{idx}", use_container_width=True):
-                open_dialog("event_explorer", row)
+            if st.button(
+                label, key=f"{key_prefix}_{idx}", use_container_width=True,
+                help=SEVERITY_LABELS.get(severity, "Notable"),
+            ):
+                st.session_state["news_feed_selected_event"] = row
+                st.rerun()
         with save_col:
             if st.button("💾", key=f"{key_prefix}_save_{idx}", use_container_width=True):
                 if save_event_record(row):
@@ -4899,6 +4904,16 @@ def get_full_chain_events(lookback_days: int = 30, limit: int = 30) -> pd.DataFr
 
 
 def solar_event_news_feed() -> None:
+    """A single chronological list (previously two parallel lists — "By
+    Severity" and "Latest Recorded" — that showed the same underlying
+    events twice, just reordered; UI audit + user request, 2026-07) next
+    to a live detail panel where "By Severity" used to sit. Severity is
+    shown per-event via a colored marker (SEVERITY_BADGES) rather than
+    via a second, separately-sorted list. Clicking an event updates the
+    detail panel in place (render_event_terminal_panel) instead of
+    opening the Event Explorer popup; with nothing selected yet, the
+    panel defaults to the most recent event.
+    """
     st.subheader("Solar Activity News Feed")
 
     notable = get_notable_solar_events()
@@ -4907,39 +4922,31 @@ def solar_event_news_feed() -> None:
         st.info("No notable solar events in the recent window.")
         return
 
-    by_severity = notable.sort_values(["severity", "timestamp_utc"], ascending=[False, False])
     by_latest = notable.sort_values("timestamp_utc", ascending=False)
 
-    if "news_feed_severity_expanded" not in st.session_state:
-        st.session_state.news_feed_severity_expanded = False
-    if "news_feed_latest_expanded" not in st.session_state:
-        st.session_state.news_feed_latest_expanded = False
+    if "news_feed_expanded" not in st.session_state:
+        st.session_state.news_feed_expanded = False
 
-    severity_col, latest_col = st.columns(2)
+    list_col, detail_col = st.columns(2)
 
-    with severity_col:
-        st.markdown("#### By Severity")
-        expanded = st.session_state.news_feed_severity_expanded
-        limit = len(by_severity) if expanded else 5
-        render_event_button_list(by_severity.head(limit), "news_feed_sev", scrollable=expanded)
+    with list_col:
+        st.caption("🔴 Severe (X-class / Type II) · 🟠 Moderate (M-class) · 🟡 Minor (Type III) · ⚪ Notable")
 
-        if len(by_severity) > 5:
-            button_label = "Show fewer" if st.session_state.news_feed_severity_expanded else "More"
-            if st.button(button_label, key="news_feed_severity_more"):
-                st.session_state.news_feed_severity_expanded = not st.session_state.news_feed_severity_expanded
-                st.rerun()
-
-    with latest_col:
-        st.markdown("#### Latest Recorded")
-        expanded = st.session_state.news_feed_latest_expanded
+        expanded = st.session_state.news_feed_expanded
         limit = len(by_latest) if expanded else 5
-        render_event_button_list(by_latest.head(limit), "news_feed_latest", scrollable=expanded)
+        render_event_button_list(by_latest.head(limit), "news_feed", scrollable=expanded)
 
         if len(by_latest) > 5:
-            button_label = "Show fewer" if st.session_state.news_feed_latest_expanded else "More"
-            if st.button(button_label, key="news_feed_latest_more"):
-                st.session_state.news_feed_latest_expanded = not st.session_state.news_feed_latest_expanded
+            button_label = "Show fewer" if st.session_state.news_feed_expanded else "More"
+            if st.button(button_label, key="news_feed_more"):
+                st.session_state.news_feed_expanded = not st.session_state.news_feed_expanded
                 st.rerun()
+
+    with detail_col:
+        selected_event = st.session_state.get("news_feed_selected_event")
+        if selected_event is None:
+            selected_event = by_latest.iloc[0]
+        render_event_terminal_panel(selected_event)
 
 
 def solar_events_analysis() -> None:
@@ -5056,17 +5063,19 @@ def solar_events_analysis() -> None:
             with col:
                 plot_retro(chart_fig)
 
-    st.markdown("### Statistics (7 Days)")
+    # Only the metrics NOT already shown in the cards above (Total Events,
+    # M-Class Count, Avg Events/Day) — this used to be a full second
+    # "Statistics (7 Days)" row that repeated Total Flares/Total Radio
+    # Bursts/X-Class Count/Most Active Region verbatim from the cards
+    # above (UI audit, 2026-07: same numbers shown twice on one tab).
     average_events_per_day = len(recent) / 7 if not recent.empty else 0
-
-    st1, st2, st3, st4, st5, st6, st7 = st.columns(7)
-    st1.metric("Total Events", str(len(recent)))
-    st2.metric("Total Flares", str(total_flares))
-    st3.metric("Total Radio Bursts", str(total_radio_bursts))
-    st4.metric("X-Class Count", str(x_class_count))
-    st5.metric("M-Class Count", str(m_class_count))
-    st6.metric("Most Active Region", str(most_active_region))
-    st7.metric("Avg Events/Day", format_value(average_events_per_day, "", 1))
+    st1, st2, st3 = st.columns(3)
+    with st1:
+        metric_card("Total Events (7d)", str(len(recent)))
+    with st2:
+        metric_card("M-Class Flares (7d)", str(m_class_count))
+    with st3:
+        metric_card("Avg Events/Day (7d)", format_value(average_events_per_day, "", 1))
 
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
 
@@ -5139,15 +5148,19 @@ def cme_analysis() -> None:
 
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
 
-    st.markdown("### CME Statistics (7 Days)")
-    s1, s2, s3, s4, s5, s6 = st.columns(6)
+    # Only the metrics NOT already shown in the cards above (Min/Median
+    # Speed, Std Deviation) — this used to be a full second "CME
+    # Statistics" row that repeated Average Speed/Total CMEs verbatim,
+    # plus a "Max Speed" duplicating "Fastest CME" above in all but name
+    # (UI audit, 2026-07: same numbers shown twice on one tab).
     if not speeds.empty:
-        s1.metric("Max Speed", format_value(speeds.max(), " km/s", 1))
-        s2.metric("Min Speed", format_value(speeds.min(), " km/s", 1))
-        s3.metric("Average Speed", format_value(speeds.mean(), " km/s", 1))
-        s4.metric("Median Speed", format_value(speeds.median(), " km/s", 1))
-        s5.metric("Std Deviation", format_value(speeds.std(), " km/s", 1))
-        s6.metric("Total CMEs", str(total_cmes))
+        s1, s2, s3 = st.columns(3)
+        with s1:
+            metric_card("Min Speed (7d)", format_value(speeds.min(), " km/s", 1))
+        with s2:
+            metric_card("Median Speed (7d)", format_value(speeds.median(), " km/s", 1))
+        with s3:
+            metric_card("Std Deviation (7d)", format_value(speeds.std(), " km/s", 1))
     else:
         st.info("No CME speed data available for statistics.")
 
@@ -5376,17 +5389,6 @@ def heliomap_cme_tab() -> None:
                 st.info("No active region data available for CMEs.")
         else:
             st.info("No active region column available.")
-
-
-def heliomap_panel() -> None:
-    st.markdown("#### Heliomap")
-    st.caption("Where on the Sun recent activity originated.")
-
-    tabs = st.tabs(["Solar Events", "CME"])
-    with tabs[0]:
-        heliomap_solar_events_tab()
-    with tabs[1]:
-        heliomap_cme_tab()
 
 
 def cme_predictions() -> None:
@@ -5808,9 +5810,9 @@ def analytics_page(df: pd.DataFrame) -> None:
 def render_independent_models_tab() -> None:
     """Reproduces the production architecture: each variable predicted
     independently from observed history, never from another model's
-    prediction. Reuses the exact same panels as the Analytics page — same
-    jobs, same models, same data — just surfaced here for architecture
-    comparison purposes.
+    prediction. Shows the same underlying jobs as the Analytics page in
+    read-only form (render_architecture_status_panel) — this tab is for
+    comparing architectures, not a second place to start a job.
     """
     st.markdown(
         "**Architecture:** Live NOAA &rarr; Feature Engineering &rarr; AE Model &rarr; Kp Model &rarr; "
@@ -5820,17 +5822,19 @@ def render_independent_models_tab() -> None:
     )
     st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
     st.markdown("##### AE (independent)")
-    prediction_panel("ae", AE_VARIABLES)
+    render_architecture_status_panel("ae")
     st.divider()
     st.markdown("##### Kp / Dst (independent — combined Sun-Earth model, observed AE)")
-    prediction_panel("analytics", ANALYTICS_VARIABLES)
+    render_architecture_status_panel("analytics")
 
 
 def render_physics_cascaded_tab() -> None:
     """The experimental cascade: Predicted AE (never observed AE) feeds
-    forward into the experimental Kp/Dst models as an extra feature.
-    Reuses the same "experimental" dataset already built for the
-    Analytics page's Experimental Predictions tab.
+    forward into the experimental Kp/Dst models as an extra feature. Shows
+    the same underlying jobs as the Analytics page's Experimental
+    Predictions tab in read-only form (render_architecture_status_panel)
+    — this tab is for comparing architectures, not a second place to
+    start a job.
     """
     st.markdown(_experimental_badge_html(), unsafe_allow_html=True)
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
@@ -5842,7 +5846,7 @@ def render_physics_cascaded_tab() -> None:
         unsafe_allow_html=True,
     )
     st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
-    prediction_panel("experimental", EXPERIMENTAL_VARIABLES)
+    render_architecture_status_panel("experimental")
 
 
 def render_model_comparison_tab() -> None:
@@ -6101,28 +6105,31 @@ if not MASTER_PATH.exists():
 master_df = load_master_data(MASTER_PATH)
 df_7d = seven_day_window(master_df)
 
-nav_col, terminal_col = st.columns([1.15, 1])
+# Site-wide masthead + nav bar (NOAA SWPC-style — 2026-07 redesign):
+# previously the title only appeared on the Home page and navigation was
+# a per-page st.radio with default circular buttons, both inside the
+# main content column. Now both are always visible, above everything
+# else, matching the fixed masthead + nav bar every page of NOAA's own
+# site shares.
+render_site_header()
 
-with nav_col:
-    st.markdown("### Navigation")
+with st.container(key="topnav"):
     page = st.radio(
         "Main sections",
         ["Home Page", "Photosphere", "Heliosphere", "Geospace", "Analytics", "Research Lab"],
         horizontal=True,
         label_visibility="collapsed",
     )
+style_top_nav()
 
-    if page == "Home Page":
-        with st.container(horizontal=True, gap="small"):
-            if st.button("↻ Refresh"):
-                st.cache_data.clear()
-                st.rerun()
-            if st.button("📚 Space Weather Concepts", key="library_open_button"):
-                open_dialog("library", None)
-    else:
-        if st.button("↻ Refresh"):
-            st.cache_data.clear()
-            st.rerun()
+with st.container(horizontal=True, gap="small"):
+    if st.button("↻ Refresh"):
+        st.cache_data.clear()
+        st.rerun()
+    if st.button("📚 Space Weather Concepts", key="library_open_button"):
+        open_dialog("library", None)
+    if st.button("📋 References", key="references_open_button"):
+        open_dialog("references", None)
 
 # Auto-refresh fires on all live-data pages except:
 #  - "Research Lab" top-level page (IMF/Bz lab) — fully user-driven, no feed
@@ -6133,15 +6140,16 @@ _pause = st.session_state.get("pause_autorefresh", False)
 if page != "Research Lab" and not _pause:
     auto_refresh()
 
-with terminal_col:
-    if page == "Home Page":
+# The Photosphere/Heliosphere/Geospace rotating reference-table panels
+# were removed from inline page display (UI simplification, 2026-07) —
+# all of their tables now live in one scrollable terminal window behind
+# the "📋 References" toolbar button above (show_references_terminal).
+# The Home page's live status terminal is unrelated to those reference
+# tables and keeps its original right-hand-column position.
+if page == "Home Page":
+    _, status_col = st.columns([1.15, 1])
+    with status_col:
         status_terminal(df_7d)
-    elif page == "Photosphere":
-        photosphere_reference_window()
-    elif page == "Heliosphere":
-        heliosphere_reference_window()
-    elif page == "Geospace":
-        geospace_reference_window()
 
 st.divider()
 
@@ -6209,6 +6217,8 @@ if active_dialog is not None:
         show_animations_grid()
     elif kind == "library":
         show_space_weather_library()
+    elif kind == "references":
+        show_references_terminal()
     elif kind == "prediction_job":
         show_prediction_job(payload)
     elif kind == "saved_predictions":

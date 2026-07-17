@@ -53,6 +53,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.neural_network import MLPRegressor
+from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVR
 from xgboost import XGBRegressor
@@ -64,6 +65,7 @@ from swdss.models.ae_physics_features import (
 )
 from swdss.models.features import add_change_features, add_lag_features
 from swdss.models.registry import DATASETS, HORIZONS
+from swdss.models.validation import evaluate_walk_forward
 from swdss.paths import DATA_DIR, MODELS_DIR
 from swdss.physics.registry import apply_requested_features
 
@@ -475,6 +477,7 @@ def train_ae_research_model(
     experiment_tag: str = "",
     include_kp: bool = False,
     include_dst: bool = False,
+    run_cv: bool = False,
 ) -> dict:
     """Trains one AE model for one (horizon, feature configuration)
     combination and records a run — never touches models/ae/ or its
@@ -496,6 +499,14 @@ def train_ae_research_model(
     same way kp_research.py corrects it, then engineered the same way
     every other base column is (lags/rolling/change), gated by the same
     engineered_groups toggles.
+
+    `run_cv` additionally benchmarks the model with walk-forward
+    (rolling-origin) cross-validation (swdss.models.validation) — a
+    genuine stability estimate across several time periods, not just the
+    one 80/20 holdout window `metrics` above already reports. Stored in
+    `run_record["cv_metrics"]` (None if run_cv=False). Skipped
+    automatically for LSTM/GRU regardless of run_cv — each fold would
+    mean another full subprocess Keras training run.
     """
     if model_type not in ALL_TRAINABLE_MODELS:
         raise ValueError(f"'{model_type}' is not trainable yet — see FUTURE_MODELS.")
@@ -524,6 +535,12 @@ def train_ae_research_model(
     run_id = str(uuid.uuid4())
     model_dir = RESEARCH_MODELS_DIR / run_id
     model_dir.mkdir(parents=True, exist_ok=True)
+
+    # Walk-forward CV is opt-in and skipped for LSTM/GRU regardless of
+    # run_cv — each fold would mean another full subprocess Keras training
+    # run, and the sequence models already train through a slow isolated
+    # worker (see _run_keras_worker) for the single holdout split alone.
+    cv_metrics = None
 
     if model_type in SEQUENCE_MODELS:
         if not KERAS_AVAILABLE:
@@ -624,6 +641,22 @@ def train_ae_research_model(
         n_train, n_test = len(X_train), len(X_test)
         y_true_out, y_pred_out = y_test.to_numpy(), preds
 
+        if run_cv:
+            # Walk-forward CV always fits fresh, per-fold on the RAW
+            # (unscaled) feature frame — never the X_full scaled above,
+            # whose scaler was fit only on the single 80/20 split's train
+            # rows and would leak that split's statistics into earlier CV
+            # folds' own "unseen" test windows. Scale-sensitive models get
+            # scaling folded into a per-fold Pipeline instead, so each
+            # fold's scaler only ever sees that fold's own training rows.
+            def _cv_factory(_model_type=model_type, _hyperparams=hyperparams, _needs_scaling=needs_scaling):
+                estimator = _build_tabular_model(_model_type, _hyperparams)
+                return make_pipeline(StandardScaler(), estimator) if _needs_scaling else estimator
+
+            cv_metrics = evaluate_walk_forward(_cv_factory, frame[feature_columns], frame["__target__"])
+        else:
+            cv_metrics = None
+
     sample_n = min(300, len(y_true_out))
     prediction_sample = {
         "y_true": [float(v) for v in np.asarray(y_true_out)[-sample_n:]],
@@ -641,6 +674,7 @@ def train_ae_research_model(
         "sequence_length": sequence_length if model_type in SEQUENCE_MODELS else None,
         "hyperparams": hyperparams or {},
         "metrics": metrics,
+        "cv_metrics": cv_metrics,
         "training_time_sec": training_time_sec,
         "prediction_time_sec": prediction_time_sec,
         "feature_columns": feature_columns,

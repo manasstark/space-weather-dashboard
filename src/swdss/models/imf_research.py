@@ -41,6 +41,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.neural_network import MLPRegressor
+from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVR
 from xgboost import XGBRegressor
@@ -53,6 +54,7 @@ from swdss.models.imf_physics_features import (
     add_minute_rolling_features,
 )
 from swdss.models.registry import HORIZONS
+from swdss.models.validation import evaluate_walk_forward
 from swdss.paths import DATA_DIR, MODELS_DIR
 
 try:
@@ -912,6 +914,7 @@ def train_research_model(
     sequence_length: int = None,
     hyperparams: dict = None,
     experiment_tag: str = "",
+    run_cv: bool = False,
 ) -> dict:
     """Trains one model for one (target, granularity, horizon, model_type)
     combination and records a run — never touches the production
@@ -929,6 +932,14 @@ def train_research_model(
     `horizon`: it's how far BACK the model looks (input window), while
     `horizon` is how far AHEAD it predicts (target lead time). Its units
     match `granularity` (minutes or hours) too.
+
+    `run_cv` additionally benchmarks the model with walk-forward
+    (rolling-origin) cross-validation (swdss.models.validation) — a
+    genuine stability estimate across several time periods, not just the
+    one 80/20 holdout window `metrics` above already reports. Stored in
+    `run_record["cv_metrics"]` (None if run_cv=False). Skipped
+    automatically for LSTM/GRU regardless of run_cv — each fold would
+    mean another full subprocess Keras training run.
     """
     if target_label not in TARGET_OPTIONS:
         raise ValueError(f"Unknown target: {target_label}")
@@ -952,6 +963,12 @@ def train_research_model(
     model_dir = RESEARCH_MODELS_DIR / run_id
     model_dir.mkdir(parents=True, exist_ok=True)
     unit = "m" if granularity == "Minute" else "h"
+
+    # Walk-forward CV is opt-in and skipped for LSTM/GRU regardless of
+    # run_cv — each fold would mean another full subprocess Keras training
+    # run, and the sequence models already train through a slow isolated
+    # worker (see _run_keras_worker) for the single holdout split alone.
+    cv_metrics = None
 
     if model_type in SEQUENCE_MODELS:
         if not KERAS_AVAILABLE:
@@ -1061,6 +1078,19 @@ def train_research_model(
         n_train, n_test = len(X_train), len(X_test)
         y_true_out, y_pred_out = y_test.to_numpy(), preds
 
+        if run_cv:
+            # Fresh per-fold fit on the RAW (unscaled) feature frame — never
+            # X_full above, whose scaler was fit only on the single 80/20
+            # split's train rows and would leak that split's statistics
+            # into earlier CV folds' own "unseen" test windows.
+            def _cv_factory(_model_type=model_type, _hyperparams=hyperparams, _needs_scaling=needs_scaling):
+                estimator = _build_tabular_model(_model_type, _hyperparams)
+                return make_pipeline(StandardScaler(), estimator) if _needs_scaling else estimator
+
+            cv_metrics = evaluate_walk_forward(_cv_factory, frame[feature_columns], frame["__target__"])
+        else:
+            cv_metrics = None
+
     sample_n = min(300, len(y_true_out))
     prediction_sample = {
         "y_true": [float(v) for v in np.asarray(y_true_out)[-sample_n:]],
@@ -1078,6 +1108,7 @@ def train_research_model(
         "sequence_length": sequence_length if model_type in SEQUENCE_MODELS else None,
         "hyperparams": hyperparams or {},
         "metrics": metrics,
+        "cv_metrics": cv_metrics,
         "feature_columns": feature_columns,
         "feature_importance": feature_importance,
         "loss_history": loss_history,

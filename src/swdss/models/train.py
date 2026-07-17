@@ -17,6 +17,7 @@ from xgboost import XGBRegressor
 
 from swdss.models.features import add_derived_physics_features, build_feature_frame
 from swdss.models.registry import DATASETS, HORIZONS, kp_interval_model_path, metrics_path, model_path
+from swdss.models.validation import evaluate_walk_forward
 
 CANDIDATE_MODELS = {
     "LinearRegression": lambda: LinearRegression(),
@@ -33,6 +34,7 @@ CANDIDATE_MODELS = {
 }
 
 TEST_FRACTION = 0.2
+CV_FOLDS = 5
 
 
 def evaluate_split(model, X_train, y_train, X_test, y_test) -> dict:
@@ -46,25 +48,45 @@ def evaluate_split(model, X_train, y_train, X_test, y_test) -> dict:
 
 
 def _fit_best(X, y) -> tuple:
-    """Time-ordered train/test split, benchmark all candidate algorithms,
-    refit the winner on the full dataset. Returns (name, test_metrics, model).
+    """Benchmarks every candidate algorithm two ways and refits the winner
+    on the full dataset:
+
+    1. The original single chronological 80/20 holdout split (`evaluate_split`)
+       — kept exactly as before so `metrics["r2"/"mae"/"rmse"]` and every
+       promotion/comparison codepath that already reads those keys sees
+       identical values to before this change.
+    2. Walk-forward (rolling-origin) cross-validation across CV_FOLDS
+       consecutive folds (`swdss.models.validation.evaluate_walk_forward`)
+       — a genuine stability estimate a single split can't provide, since
+       the events that matter most for this domain (geomagnetic storms)
+       are rare enough that a single 20% holdout window may or may not
+       contain one.
+
+    The algorithm is now SELECTED by mean walk-forward CV R² rather than
+    the single-split R² — a more robust criterion, since a candidate that
+    merely got lucky on one holdout window won't out-rank one that's
+    consistently good across several. Returns
+    (name, holdout_metrics, cv_metrics, model, all_candidates) where
+    all_candidates maps every candidate name to its own holdout/cv
+    metrics, for transparency about what was and wasn't selected.
     """
     split_idx = int(len(X) * (1 - TEST_FRACTION))
     X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
     y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
 
-    best_name = None
-    best_metrics = None
-
+    all_candidates = {}
     for name, factory in CANDIDATE_MODELS.items():
-        model = factory()
-        metrics = evaluate_split(model, X_train, y_train, X_test, y_test)
-        if best_metrics is None or metrics["r2"] > best_metrics["r2"]:
-            best_name, best_metrics = name, metrics
+        holdout_metrics = evaluate_split(factory(), X_train, y_train, X_test, y_test)
+        cv_metrics = evaluate_walk_forward(factory, X, y, n_folds=CV_FOLDS)
+        all_candidates[name] = {"holdout": holdout_metrics, "cv": cv_metrics}
+
+    best_name = max(all_candidates, key=lambda n: all_candidates[n]["cv"]["r2_mean"])
+    best_metrics = all_candidates[best_name]["holdout"]
+    best_cv = all_candidates[best_name]["cv"]
 
     final_model = CANDIDATE_MODELS[best_name]()
     final_model.fit(X, y)
-    return best_name, best_metrics, final_model
+    return best_name, best_metrics, best_cv, final_model, all_candidates
 
 
 def _load_base_df(config):
@@ -109,7 +131,7 @@ def train_dataset(dataset_key: str) -> list[dict]:
             X = data[feature_columns]
             y = data["__target__"]
 
-            best_name, best_metrics, final_model = _fit_best(X, y)
+            best_name, best_metrics, best_cv, final_model, all_candidates = _fit_best(X, y)
 
             path = model_path(dataset_key, variable, horizon)
             joblib.dump(final_model, path)
@@ -121,6 +143,16 @@ def train_dataset(dataset_key: str) -> list[dict]:
                 "r2": best_metrics["r2"],
                 "mae": best_metrics["mae"],
                 "rmse": best_metrics["rmse"],
+                "cv_r2_mean": best_cv["r2_mean"],
+                "cv_r2_std": best_cv["r2_std"],
+                "cv_mae_mean": best_cv["mae_mean"],
+                "cv_mae_std": best_cv["mae_std"],
+                "cv_rmse_mean": best_cv["rmse_mean"],
+                "cv_rmse_std": best_cv["rmse_std"],
+                "cv_n_folds": best_cv["n_folds"],
+                "algorithm_candidates_cv_r2": {
+                    name: round(res["cv"]["r2_mean"], 4) for name, res in all_candidates.items()
+                },
                 "feature_columns": feature_columns,
                 "model_path": str(path),
                 "trained_at": datetime.now(timezone.utc).isoformat(),
@@ -129,7 +161,8 @@ def train_dataset(dataset_key: str) -> list[dict]:
             results.append(record)
             print(
                 f"[{dataset_key}] {variable} +{horizon}h -> {best_name} "
-                f"(R2={best_metrics['r2']:.4f} MAE={best_metrics['mae']:.3f} RMSE={best_metrics['rmse']:.3f})"
+                f"(R2={best_metrics['r2']:.4f} MAE={best_metrics['mae']:.3f} RMSE={best_metrics['rmse']:.3f} | "
+                f"CV R2={best_cv['r2_mean']:.4f}+/-{best_cv['r2_std']:.4f})"
             )
 
     metrics_doc_path = metrics_path(dataset_key)
@@ -178,7 +211,7 @@ def train_kp_interval_model(dataset: str = "analytics") -> dict:
     X = data[feature_columns]
     y = data["__target__"]
 
-    best_name, best_metrics, final_model = _fit_best(X, y)
+    best_name, best_metrics, best_cv, final_model, all_candidates = _fit_best(X, y)
 
     path = kp_interval_model_path(dataset)
     joblib.dump(final_model, path)
@@ -190,6 +223,16 @@ def train_kp_interval_model(dataset: str = "analytics") -> dict:
         "r2": best_metrics["r2"],
         "mae": best_metrics["mae"],
         "rmse": best_metrics["rmse"],
+        "cv_r2_mean": best_cv["r2_mean"],
+        "cv_r2_std": best_cv["r2_std"],
+        "cv_mae_mean": best_cv["mae_mean"],
+        "cv_mae_std": best_cv["mae_std"],
+        "cv_rmse_mean": best_cv["rmse_mean"],
+        "cv_rmse_std": best_cv["rmse_std"],
+        "cv_n_folds": best_cv["n_folds"],
+        "algorithm_candidates_cv_r2": {
+            name: round(res["cv"]["r2_mean"], 4) for name, res in all_candidates.items()
+        },
         "feature_columns": feature_columns,
         "model_path": str(path),
         "trained_at": datetime.now(timezone.utc).isoformat(),
@@ -207,7 +250,8 @@ def train_kp_interval_model(dataset: str = "analytics") -> dict:
 
     print(
         f"[{dataset}] kp +next-interval -> {best_name} "
-        f"(R2={best_metrics['r2']:.4f} MAE={best_metrics['mae']:.3f} RMSE={best_metrics['rmse']:.3f})"
+        f"(R2={best_metrics['r2']:.4f} MAE={best_metrics['mae']:.3f} RMSE={best_metrics['rmse']:.3f} | "
+        f"CV R2={best_cv['r2_mean']:.4f}+/-{best_cv['r2_std']:.4f})"
     )
     return record
 

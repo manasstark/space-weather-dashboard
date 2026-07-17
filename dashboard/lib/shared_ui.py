@@ -9,6 +9,7 @@ UI/dialog helpers and constants they and home.py both depend on.
 
 from html import escape
 
+import pandas as pd
 import streamlit as st
 
 try:
@@ -90,7 +91,7 @@ def metric_card(label: str, value: str, caption: str = "", tooltip: str = "", va
             border-right: 2px solid #808080;
             border-bottom: 2px solid #808080;
             padding: 14px 16px;
-            height: 158px;
+            min-height: 158px;
             box-sizing: border-box;
             background: #dcdcdc;
             color: #000000;
@@ -98,13 +99,14 @@ def metric_card(label: str, value: str, caption: str = "", tooltip: str = "", va
             display: flex;
             flex-direction: column;
         ">
-            <div style="font-size: 0.85rem; color: #000080; line-height: 1.2;">{label}{info_icon}</div>
+            <div style="font-size: 0.85rem; color: #000080; line-height: 1.2; flex-shrink: 0;">{label}{info_icon}</div>
             <div style="
                 font-size: 1.6rem;
                 font-weight: 700;
                 color: {value_color};
                 line-height: 1.15;
                 min-height: 2.3em;
+                flex-shrink: 0;
                 display: flex;
                 align-items: center;
                 overflow-wrap: break-word;
@@ -183,3 +185,92 @@ def render_dialog_close_button(key: str) -> None:
     with close_col:
         if st.button("✕", key=key, use_container_width=True):
             close_active_dialog()
+
+
+def render_site_header() -> None:
+    """NOAA Space Weather Prediction Center-style masthead — white
+    background, project title + one-line subtitle on the left, current
+    UTC date/time on the right. Shown once, site-wide, above the top
+    navigation bar (style_top_nav) rather than per-page inside home_page()
+    — matching NOAA SWPC's own site layout, where the masthead and nav
+    bar appear identically on every page (2026-07 redesign).
+    """
+    now = pd.Timestamp.now(tz="UTC")
+    time_text = now.strftime("%A, %B ") + str(now.day) + now.strftime(", %Y at %H:%M:%S UTC")
+    st.markdown(
+        f"""
+        <div style="
+            background:#ffffff;
+            padding:16px 28px;
+            display:flex;
+            justify-content:space-between;
+            align-items:center;
+            flex-wrap:wrap;
+            gap:8px;
+            border-bottom:4px solid #0a2a5e;
+            border-radius:4px 4px 0 0;
+        ">
+            <div>
+                <div style="font-size:1.55rem; font-weight:800; letter-spacing:0.3px; line-height:1.15; color:#0a2a5e;">
+                    SPACE WEATHER DECISION SUPPORT SYSTEM
+                </div>
+                <div style="font-size:0.82rem; color:#4a5568; margin-top:2px;">
+                    Physics-Informed Sun-to-Earth Forecasting, Research &amp; Verification Platform
+                </div>
+            </div>
+            <div style="font-size:0.85rem; color:#333333; white-space:nowrap;">
+                {escape(time_text)}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def style_top_nav() -> None:
+    """CSS turning the st.radio wrapped in st.container(key="topnav")
+    into a flat, dark-blue horizontal nav bar (NOAA SWPC style) instead
+    of Streamlit's default circular radio buttons. Hides each option's
+    circle indicator and restyles its label as a nav-bar item; the
+    currently-selected page is detected via the CSS :has()/:checked
+    combinator rather than any Streamlit-internal class name, since
+    those are auto-generated and not a stable thing to depend on.
+    """
+    st.markdown(
+        """
+        <style>
+        div[class*="st-key-topnav"] div[data-testid="stRadio"] > div[role="radiogroup"] {
+            background:#0a2a5e;
+            display:flex;
+            flex-wrap:wrap;
+            gap:0;
+            padding:0 8px;
+        }
+        div[class*="st-key-topnav"] label[data-baseweb="radio"] {
+            margin:0 !important;
+            padding:13px 22px !important;
+            border-radius:0 !important;
+            cursor:pointer;
+        }
+        div[class*="st-key-topnav"] label[data-baseweb="radio"] > div:first-child {
+            display:none !important;
+        }
+        div[class*="st-key-topnav"] label[data-baseweb="radio"] div[data-testid="stMarkdownContainer"] p {
+            color:#ffffff !important;
+            font-weight:600;
+            text-transform:uppercase;
+            font-size:0.82rem;
+            letter-spacing:0.4px;
+            margin:0;
+        }
+        div[class*="st-key-topnav"] label[data-baseweb="radio"]:hover {
+            background:#13396e;
+        }
+        div[class*="st-key-topnav"] label[data-baseweb="radio"]:has(input:checked) {
+            background:#1c56a3;
+            box-shadow: inset 0 -3px 0 0 #ffffff;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )

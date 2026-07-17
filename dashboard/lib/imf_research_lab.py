@@ -157,6 +157,12 @@ def _imf_research_run_row(run: dict, best_run_id: str = None, key_prefix: str = 
                 f"{run['target']} · {granularity} · +{horizon_label}{seq_note} · "
                 f"{pd.Timestamp(run['trained_at']).strftime('%Y-%m-%d %H:%M UTC')}"
             )
+            cv = run.get("cv_metrics")
+            if cv:
+                st.caption(
+                    f"🔁 Walk-forward CV ({cv['n_folds']} folds): R²={cv['r2_mean']:.3f} ± {cv['r2_std']:.3f} · "
+                    f"MAE={cv['mae_mean']:.3f} ± {cv['mae_std']:.3f}"
+                )
         with c2:
             metric_card("R²", f"{m['r2']:.4f}", "")
         with c3:
@@ -221,6 +227,7 @@ def render_imf_training_runs_tab() -> None:
                     horizon=horizon,
                     sequence_length=sequence_length,
                     hyperparams=hyperparams,
+                    run_cv=True,
                 )
                 st.toast(f"Trained {model_type} — R²={run['metrics']['r2']:.4f}")
                 st.rerun()

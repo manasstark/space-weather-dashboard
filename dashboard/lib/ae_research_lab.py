@@ -149,6 +149,12 @@ def _ae_research_run_row(run: dict, best_run_id: str = None, key_prefix: str = "
             st.markdown(f"**{star}{run['model_type']}**{promoted_tag}")
             seq_note = f" · seq={run['sequence_length']}h" if run.get("sequence_length") else ""
             st.caption(f"AE +{run.get('horizon', 1)}h{seq_note} · {pd.Timestamp(run['trained_at']).strftime('%Y-%m-%d %H:%M UTC')}")
+            cv = run.get("cv_metrics")
+            if cv:
+                st.caption(
+                    f"🔁 Walk-forward CV ({cv['n_folds']} folds): R²={cv['r2_mean']:.3f} ± {cv['r2_std']:.3f} · "
+                    f"MAE={cv['mae_mean']:.3f} ± {cv['mae_std']:.3f}"
+                )
         with c2:
             metric_card("R²", f"{m['r2']:.4f}", "")
         with c3:
@@ -246,6 +252,7 @@ def render_ae_model_comparison_tab() -> None:
                     sequence_length=sequence_length,
                     hyperparams=hyperparams,
                     notes=notes,
+                    run_cv=True,
                 )
                 st.toast(f"Trained {model_type} — R²={run['metrics']['r2']:.4f}")
                 st.rerun()
