@@ -2,4 +2,22 @@ venv/
 .DS_Store
 .vscode/
 __pycache__/
+*.pyc
 .ipynb_checkpoints/
+
+# Secrets
+.env
+
+# Generated data, trained models, and training-run scratch output —
+# reproducible from src/swdss/features/build_master.py and
+# src/swdss/models/train.py, not source. See README "Running the Project".
+data/
+models/
+catboost_info/
+
+# Test / lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage

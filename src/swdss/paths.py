@@ -1,6 +1,14 @@
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+if load_dotenv is not None:
+    load_dotenv(PROJECT_ROOT / ".env")
 
 DATA_DIR = PROJECT_ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"
