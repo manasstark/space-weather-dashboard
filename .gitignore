@@ -11,9 +11,13 @@ __pycache__/
 # Generated data, trained models, and training-run scratch output —
 # reproducible from src/swdss/features/build_master.py and
 # src/swdss/models/train.py, not source. See README "Running the Project".
-data/
-models/
-catboost_info/
+# Anchored to the repo root (leading slash) — a bare "models/" pattern
+# also matches src/swdss/models/ (same directory name, different
+# meaning), which silently excluded a real source file
+# (src/swdss/models/validation.py) from every `git add` until this fix.
+/data/
+/models/
+/catboost_info/
 
 # Test / lint caches
 .pytest_cache/
