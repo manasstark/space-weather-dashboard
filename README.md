@@ -20,6 +20,7 @@ Built as a portfolio project to practice professional software development, data
 * [Architecture](#architecture)
   * [AE Data Pipeline](#ae-data-pipeline)
   * [AE Prediction & Verification Pipeline](#ae-prediction--verification-pipeline)
+  * [Operational Forecast Engine](#operational-forecast-engine)
 * [Project Structure](#project-structure)
 * [Live Prediction Engine](#live-prediction-engine)
   * [Combined Sun-Earth Forecasting (Analytics page)](#combined-sun-earth-forecasting-analytics-page)
@@ -55,8 +56,9 @@ Feedback is welcome. Full public deployment is a planned next step once testing 
 The project tracks the full Sun-to-Earth space weather chain — solar activity, solar wind, the interplanetary magnetic field, and the resulting geomagnetic response — using real NOAA SWPC and NASA DONKI data. It started as a series of exploratory Jupyter notebooks and has since grown into:
 
 1. A **continuous ingestion pipeline** that refreshes seven independent datasets on their own real-world cadences.
-2. A **multi-page Streamlit dashboard** with a deliberate retro/vintage UI, live status terminals, event tracing, and a heliographic event map.
-3. A **live, self-evaluating machine learning forecasting engine** for Solar Wind and IMF variables, with automatic model selection and forecast-vs-actual accuracy tracking.
+2. A **multi-page Streamlit dashboard** with a deliberate retro/vintage UI, event tracing, and a heliographic event map, fronted by a Bloomberg-terminal-style **Operational Command Centre** homepage.
+3. A **live, self-evaluating machine learning forecasting engine** for Solar Wind, IMF, Kp, Dst, and AE, with automatic model selection and forecast-vs-actual accuracy tracking.
+4. An **Operational Forecast Engine** — an orchestration layer that turns those independent forecasts into one continuously-issued, synchronized **Forecast Package**, complete with a rule-based driver explanation and lightweight drift monitoring (see [Operational Forecast Engine](#operational-forecast-engine)).
 
 ---
 
@@ -150,7 +152,8 @@ Unlike many machine learning dashboards that treat forecasting as purely a stati
 
 * Continuous, per-dataset live ingestion from NOAA SWPC and NASA DONKI (own cadence per dataset — see [Architecture](#architecture))
 * Minute-resolution storage for Solar Wind/IMF so true extremes aren't smoothed away by hourly aggregation
-* Live status terminal with plain-language Meaning + Risk per variable
+* **Operational Forecast Engine** — an orchestration layer (not a new model) that turns the dashboard from ten independent prediction jobs into one continuously-issued, synchronized **Forecast Package** — see [Operational Forecast Engine](#operational-forecast-engine)
+* **SW Operational Command Centre** — the homepage's Bloomberg-terminal-style operational console (Forecast / Current / Physics / Timeline / Verification / Logs / Downloads / Alerts / System / Search), reading only pre-computed engine products, never calling a model itself — Current tab carries the plain-language Meaning + Risk per variable that used to be a standalone status terminal
 * Forward + reverse **Event Explorer** tracing a Sun-to-Earth causal chain, plus an auto-playing **Event Storyboard**
 * **Heliomap** — real heliographic Solar Event / CME positions plotted over an NASA SDO solar-disk image
 * 6-panel synced **Sun-to-Earth Overview** chart with click-to-inspect readout
@@ -256,6 +259,42 @@ Percentage Error (authoritative)                     never overwrites the Verifi
 
 Prediction never waits on either verification branch, and the two branches never influence each other — see [AE Data Pipeline](#ae-data-pipeline) and [AE Index Integration](#ae-index-integration) for the data sources and staged rollout behind this.
 
+### Operational Forecast Engine
+
+Everything above (`jobs.py`, `predict.py`) is the prediction *mechanism* — a real, continuously-ticking job per (dataset, variable, horizon). The **Operational Forecast Engine** (`src/swdss/engine/`, 2026-07) is a thin orchestration layer on top of it that turns those independent mechanisms into one issued, synchronized operational product. It changes nothing about how any individual forecast is computed — no production model, physics formula, or evaluation methodology was touched — it only decides what to automatically start, how to package what already exists, and what to show as "the forecast."
+
+```text
+run_forecast_cycle()          — ensures every (dataset, variable, horizon) has an active job
+        ↓                        (no more manual "Start Prediction" click required)
+evaluate_due_forecasts()      — advances every active job (thin wrapper around jobs.tick_all_active_jobs)
+        ↓
+refresh_dashboard_products()  — reads current job state, derives confidence/physics/outlook/
+        ↓                        explanations/drift/package, writes every stored product below
+   ┌────────────────────────────────────────┴────────────────────────────────────────┐
+   ↓                                        ↓                                        ↓
+current/forecast_snapshot.json   current/forecast_package.json         history/*.parquet + logs/engine_log.jsonl
+(per-variable forecast detail)   (the synchronized Forecast Package)   (permanent history, never overwritten)
+```
+
+All three functions are independently callable (manual/dev use) and are also chained once per `live_update.py` loop iteration (~60s) — the same continuous background process that already refreshes live data, with each stage fault-isolated exactly like every ingestion job in that file, so one failing stage never blocks the others.
+
+**Locked forecasts.** `jobs.py`'s tick history is a genuine continuous refinement — right for research and drift-tracking, wrong for an operational display an analyst needs to act on without it silently changing underneath them. The engine shows each forecast exactly as it stood at the moment it was generated (the job's first tick, or for Kp the frozen production value) — never the latest tick — while `jobs.py` itself is completely unchanged and keeps refining internally for the Research Labs and Quicklook tracking.
+
+**Forecast Packages** (`swdss.engine.packages`) bundle the 10 operational headline forecasts (Speed/Density/Temperature/Bt/Bx/By/Bz/Dst/Kp/AE, each at its 1h horizon except Kp's next official NOAA interval) into one issued product with its own identity (`FC-YYYYMMDD-HHMM`), an incrementing cycle counter, and a six-stage lifecycle — `CREATED → LIVE → ACTIVE → WAITING FOR VERIFICATION → VERIFIED → ARCHIVED`. Two physical realities are handled deliberately rather than glossed over:
+
+* **Kp's 3-hour NOAA cadence** can't literally synchronize with the other nine hourly variables — a package's Kp slot is marked `kp_carried_over` on cycles where NOAA hasn't published a new official interval since the last package, and that alone never counts against the package's completeness.
+* **AE's ~10-20 day Kyoto WDC verification lag** means gating the whole package's `VERIFIED` status on AE would leave every package "unverified" for weeks. The package instead verifies on its nine timely core members, with AE's own verification tracked and reported separately (`evaluation_status: "Verified (AE Pending Kyoto Data)"`).
+
+A `PARTIALLY COMPLETE` completeness flag fires only when a headline member is genuinely missing (an errored or not-yet-created job) — never for Kp's normal cadence. A **Package Verification Summary** (Variables Verified, Average Error, Worst/Best Variable, Overall Package Accuracy — reusing the exact "within 1.5x the model's own MAE" success definition already used dataset-wide) is computed and permanently stored the first cycle every core member has a real observation to check against.
+
+**Forecast Explanation Engine** (`swdss.engine.explanation`) connects the Physics Engine's live readings to the Kp/Dst/AE forecasts they drive — until this, the Forecast and Physics tabs were isolated views with no stated causal link. Every physics quantity that can plausibly explain a Kp/Dst/AE forecast (southward IMF, Newell Coupling, Dynamic Pressure, VBz, Ey, Southward Duration, Akasofu ε, Magnetopause Compression) is scored 0-3 against thresholds already established elsewhere in this codebase (`physics_interpretation.py`'s VBz/AE bands, `alerts.py`'s southward-duration/compression thresholds, `swdss.physics.*`'s own documented expected ranges) — never invented for this module — and the top three become a Primary/Secondary/Supporting driver ranking plus a generated sentence (e.g. *"Expected Kp increase primarily driven by elevated Newell Coupling, with increasing dynamic pressure as a secondary factor."*). This is deliberately the honest, ship-now version — true SHAP-based per-forecast attribution against the live deployed model is a real, materially bigger future upgrade (see [Known Limitations](#known-limitations)), not something this rule-based ranking pretends to approximate.
+
+**Drift monitoring** (`swdss.engine.drift`) compares each model's recent live evaluated-forecast error against its own training-time MAE (a minimum of 8 evaluated forecasts required before ever declaring anything, the same "don't guess off a handful of points" discipline used elsewhere in this project) and raises a `MODEL DRIFT DETECTED` alert once recent error sustains at 1.5x or more of the training baseline. Notifies only — nothing in this engine ever retrains a model automatically; that stays a deliberate, human-triggered action in the Research Labs.
+
+**Confidence** (`swdss.engine.confidence`) is a documented, deterministic weighted heuristic — never a fitted model — over the model's own held-out R²/CV stability, forecast horizon, in-session prediction stability, and recent evaluated-forecast error trend, collapsed into five operational categories (Very High → Very Low). Bz and Kp are shown as a range (`predicted_value ± the model's own MAE`) rather than an over-precise decimal, since both are flagged as this project's highest-uncertainty variables. Every evaluated forecast now also logs its confidence score and a coarse Quiet/Active/Storm activity-regime tag (`swdss.engine.outlook.classify_activity_regime`) — collected now, deliberately not yet used to segment anything, so a future version can compute genuinely quiet-time vs. storm-time error bands from real labeled history without redesigning this layer (see [Known Limitations](#known-limitations)).
+
+The **SW Operational Command Centre** (see [Dashboard Pages](#dashboard-pages)) is the sole reader of everything this engine produces — the dashboard itself never calls a prediction model or touches `jobs.py`'s SQLite database directly.
+
 ---
 
 ## Project Structure
@@ -307,6 +346,18 @@ Space Weather Dashboard V2/
 │   │   └── ae_research_runs.json / ae_hypothesis_tests.json / ae_optimization_studies.json
 │   │       # Per-lab JSON registries for the Research Lab engines and their Optimization Study
 │   │       # runs — entirely separate from models/{dataset}/metrics.json; created on first use
+│   ├── forecasts/                      # NEW: Operational Forecast Engine's stored products (swdss.engine.storage) —
+│   │   │                               #   the ONLY thing dashboard/lib/command_centre.py reads
+│   │   ├── current/
+│   │   │   ├── forecast_snapshot.json  # Latest per-variable forecast/physics/outlook/alerts/system-health state
+│   │   │   └── forecast_package.json   # The current synchronized Forecast Package
+│   │   ├── history/                    # Permanent, append-only — never pruned
+│   │   │   ├── forecast_snapshot_history.parquet     # One row per (dataset, variable, horizon) per cycle
+│   │   │   ├── evaluation_history.parquet            # One row per completed, evaluated forecast
+│   │   │   ├── package_history.parquet               # One row per cycle-observation of a Forecast Package
+│   │   │   └── package_verification_history.parquet  # One row per package, once its core members verify
+│   │   └── logs/
+│   │       └── engine_log.jsonl        # Structured per-stage engine log, trimmed to the most recent 5,000 lines
 │   └── saved_events.json / library_index.json
 │
 ├── src/swdss/
@@ -324,13 +375,28 @@ Space Weather Dashboard V2/
 │   │   └── dst.py
 │   ├── features/
 │   │   ├── build_master.py             # One-shot fetch + clean + merge all datasets
-│   │   └── live_update.py              # Continuous per-dataset updater (own cadences); also ticks active prediction jobs
+│   │   └── live_update.py              # Continuous per-dataset updater (own cadences); also runs the Operational
+│   │                                   #   Forecast Engine's 3 stages and ticks active prediction jobs each cycle
+│   ├── engine/                         # NEW: Operational Forecast Engine — orchestration layer, not a new model
+│   │   ├── matrix.py                   # PRODUCTION_MATRIX — the fixed (dataset, variable, horizons) forecast matrix
+│   │   ├── orchestrator.py             # run_forecast_cycle() / evaluate_due_forecasts() / refresh_dashboard_products()
+│   │   ├── storage.py                  # JSON/Parquet/JSONL read-write for every engine-produced product (data/forecasts/)
+│   │   ├── confidence.py               # Deterministic confidence scoring (weighted heuristic, not ML)
+│   │   ├── physics_snapshot.py         # Live Physics Engine snapshot builder for the current forecast cycle
+│   │   ├── outlook.py                  # Overall Space Weather Outlook + Quiet/Active/Storm activity-regime classifier
+│   │   ├── alerts.py                   # Rule-based operational alerts (Physics/Data Feed/CME/Outlook/Drift sourced)
+│   │   ├── labels.py                   # Current-reading Meaning/Risk labels (engine-safe port of home.py's, no Streamlit import)
+│   │   ├── explanation.py              # Forecast Explanation Engine — rule-based physics driver ranking for Kp/Dst/AE
+│   │   ├── drift.py                    # Lightweight model drift monitoring (notify only, never retrains)
+│   │   └── packages.py                 # Forecast Package construction + 6-stage lifecycle — see
+│   │                                   #   Operational Forecast Engine
 │   └── models/                         # Prediction engine — training, inference, research, and job lifecycle
 │       ├── registry.py                 # Shared config: dataset keys, variables, horizons, model paths, scale factors
 │       ├── features.py                 # Lag / rolling-mean / rolling-std / rate-of-change + derived physics feature engineering
 │       ├── train.py                    # Multi-algorithm training (LR / RF / XGBoost) + automatic best-model selection
 │       ├── predict.py                  # Live feature pipeline + single-point inference for all datasets
-│       ├── jobs.py                     # Continuous forecast job lifecycle: create / tick / complete / verify (SQLite-backed)
+│       ├── jobs.py                     # Continuous forecast job lifecycle: create / tick / complete / verify (SQLite-backed);
+│       │                               #   `source` column ('manual' vs 'engine') keeps Production-tab and engine-started jobs separate
 │       ├── experimental.py             # One-time Predicted_AE column generation from frozen AE 1h model (cascade training data)
 │       ├── explainability.py           # SHAP (TreeExplainer / LinearExplainer) + permutation-sensitivity fallback
 │       ├── physics_interpretation.py   # Rule-based (no LLM) Sun-Earth coupling narrative from live readings
@@ -354,6 +420,9 @@ Space Weather Dashboard V2/
 │   ├── lib/                            # Extracted verbatim from home.py (no behavior change) once it passed ~10,900
 │   │   │                               #   lines — isolates the three Research Laboratories from the core dashboard
 │   │   ├── shared_ui.py                # Retro chart/dialog styling + auto-refresh helpers shared by home.py and every lab
+│   │   ├── command_centre.py           # NEW: SW Operational Command Centre — the homepage's terminal-style UI,
+│   │   │                               #   reads ONLY swdss.engine.storage, never calls a model or touches jobs.py's DB;
+│   │   │                               #   Search tab is the one exception, reading data/processed/ parquet directly for the 7-Day Extremes table
 │   │   ├── imf_research_lab.py         # IMF Research Laboratory + Bz Optimization Study
 │   │   ├── kp_research_lab.py          # Kp Research Laboratory + Kp Optimization Study
 │   │   └── ae_research_lab.py          # AE Research Laboratory + AE Optimization Study, Hypothesis Testing tab/dialog
@@ -483,7 +552,7 @@ Both share a dedicated dialog UI distinct from the standalone engine's pipeline-
 
 ## Dashboard Pages
 
-* **Home** — mission-control view: a live status terminal (Speed/Density/Temperature/Bz/Kp/Dst with plain-language Meaning + Risk), six Strongest Value cards (each with a reverse Solar-Event lookup), the Sun-to-Earth Overview chart, a single severity-marked Solar Activity News Feed next to a live event-detail terminal panel, the Event Storyboard, and side-by-side Solar Events / CME Heliomaps.
+* **Home** — the **SW Operational Command Centre** (2026-07 redesign, replacing the previous live status terminal + six Strongest Value cards): one large, always-visible terminal window dominating the page, with a collapsed-by-default **Forecast Package** summary bar directly beneath the header (Package ID, cycle #, issued/valid time, lifecycle status, completeness, confidence — visible with zero scrolling) and ten fixed tabs — **Forecast** (the synchronized Forecast Package report, with rule-based "why" explanations for Kp/Dst/AE), **Current** (live Meaning + Risk per variable, the old status terminal's successor), **Physics** (an engineering-readout view of every live Physics Engine quantity), **Timeline** (forecast lifecycle history), **Verification** (prediction-vs-observed accuracy, including the Package Verification Summary, with its growing tables tucked into labeled expanders), **Logs** (searchable engine journal), **Downloads** (JSON/CSV/Parquet exports of every engine product), **Alerts** (rule-based operational bulletins, including drift warnings), **System** (service health for every upstream data source and internal component, also collapsed into expanders), and **Search** (look up what was forecast for any past date/hour by variable, plus a 7-Day Extremes reference table of the highest/lowest readings recorded across the last week). Below the terminal: the Sun-to-Earth Overview chart, a single severity-marked Solar Activity News Feed next to a live event-detail terminal panel, the Event Storyboard, and side-by-side Solar Events / CME Heliomaps — see [Operational Forecast Engine](#operational-forecast-engine) for the backend this terminal reads from.
 * **Photosphere** — Solar Events / CME / F10.7 tabs, each with Current Analysis + Predictions sub-tabs and an Event Animations grid.
 * **Heliosphere** — Solar Wind and IMF Current Analysis (true-extreme cards) and the **Live Prediction Engine**, plus Dynamic Pressure.
 * **Geospace** — Kp and Dst Current Analysis. (Prediction lives exclusively on the Analytics page now — see below — since the combined model strictly outperforms each variable's standalone, self-referential version.)
@@ -545,7 +614,7 @@ Open two terminal windows from the project root.
 PYTHONPATH=src venv/bin/python3 -m swdss.features.live_update
 ```
 
-Refreshes all 7 datasets on their own cadences (Solar Wind/IMF every 60s, Dst every 5 min, Kp every 15 min, Solar Events every 30 min, CME every 1h, F10.7 every 24h), rebuilds the master feature table, and ticks all active prediction jobs in the background — jobs advance even if the dashboard is on a different page or closed entirely.
+Refreshes all 7 datasets on their own cadences (Solar Wind/IMF every 60s, Dst every 5 min, Kp every 15 min, Solar Events every 30 min, CME every 1h, F10.7 every 24h), rebuilds the master feature table, then runs the **Operational Forecast Engine**'s three stages (`run_forecast_cycle` → `evaluate_due_forecasts` → `refresh_dashboard_products` — see [Operational Forecast Engine](#operational-forecast-engine)) every cycle — jobs advance and the Forecast Package refreshes in the background even if the dashboard is on a different page or closed entirely.
 
 **Terminal 2 — Dashboard**:
 ```bash
@@ -691,6 +760,10 @@ Kp responds most strongly ~1 hour after a Bz change; Dst responds most strongly 
 * Prediction jobs only advance while the dashboard process is open and the relevant page has been rendered; closing the app for an extended period doesn't backfill missed minute-level ticks (checkpoints still fire correctly on resume since they're time-based, not tick-count-based).
 * VBz, Ey, and Dynamic Pressure are standard space-weather coupling formulas (Burton et al. 1975 and conventional solar-wind electrodynamics), but haven't been independently cross-validated against published reference values for this specific dataset.
 * The Kp interval model picks a single best algorithm across the full 1–3 hour variable lookahead inherent in "next official interval" (rather than one model per fixed lookahead, like the discrete-horizon variables) — this is a deliberate simplification, not a bug, but means its accuracy is somewhat coarser than a horizon-matched model would be.
+* The Forecast Explanation Engine's driver ranking (`swdss.engine.explanation`) is a rule-based severity heuristic over Physics Engine outputs, not SHAP-based per-forecast attribution against the live deployed model — a real, planned upgrade, not something the current ranking claims to be.
+* Drift monitoring (`swdss.engine.drift`) is a fixed 1.5x-training-MAE threshold with an 8-sample minimum — a reasonable operational heuristic, not a statistical process-control chart (e.g. CUSUM/EWMA), and hasn't yet been exercised against a real drift event.
+* Every evaluated forecast's activity-regime tag (`swdss.engine.outlook.classify_activity_regime`) reflects the *current* engine cycle's Kp/Dst/AE outlook at logging time, not necessarily the actual conditions when that specific forecast was originally issued — a coarse approximation, collected now specifically so it can be refined later (see [Development Roadmap](#development-roadmap)).
+* A Forecast Package's `VERIFIED` status is gated on its nine timely core members only — AE's own ~10-20 day Kyoto WDC lag means a package can show `VERIFIED` while its AE member is still genuinely pending (surfaced explicitly as `evaluation_status: "Verified (AE Pending Kyoto Data)"`, never hidden).
 
 ---
 
@@ -739,6 +812,19 @@ Kp responds most strongly ~1 hour after a Bz change; Dst responds most strongly 
 
 * **Walk-forward cross-validation** — every model in this project (production, all three Research Laboratories, and the 6-month refresh pipeline) was previously benchmarked with a single chronological 80/20 train/test split — a single number with no way to tell whether it was a stable estimate or an artifact of whatever happened to fall in that one slice, which matters here because the events that actually matter (geomagnetic storms) are rare. A new `swdss.models.validation.evaluate_walk_forward` (rolling-origin, 5 folds, expanding training window, no leakage) is now layered on top of that same split rather than replacing it: `swdss.models.train._fit_best` selects the production algorithm by mean walk-forward CV R² instead of single-split R² (a more robust criterion — a candidate that got lucky on one holdout window no longer out-ranks one that's consistently good across several), and every trained model's `metrics.json` gained `cv_r2_mean`/`cv_r2_std`/`cv_mae_mean`/`cv_mae_std`/`cv_rmse_mean`/`cv_rmse_std`/`cv_n_folds` alongside its unchanged original `r2`/`mae`/`rmse`. All 69 production models were retrained under this criterion; the CV surfaced real, concrete findings a single split had masked — e.g. IMF `bt` at 24h looked weakly predictive on the single split (R²=0.046) but CV revealed R²=-0.001 ± 0.034 (genuinely no skill), while Solar Wind `temperature` at 1h looked worse on the single split (R²=0.571) than its CV mean (R²=0.779 ± 0.155, a wide std flagging real instability either way). The three Research Laboratories gained an opt-in `run_cv` parameter on their core trainers (default off, so the existing Optimization Study orchestrators keep their original runtime; wired to `True` specifically on each lab's Model Comparison "Train Model" button), and `scripts/refresh/03_train_v2.py` (a separate, intentionally-duplicated pipeline — see that script's own docstring) received the identical patch for consistency. Fixed one real gap surfaced along the way: `swdss.models.predict.predict()`/`predict_kp_interval()`/`predict_kp_rolling()` were hand-picking only `r2`/`mae`/`rmse` out of each model's metrics record when snapshotting it onto a live job, which would have silently dropped the new CV fields from every prediction dialog — now passed through via `.get()` so old jobs (predating this field) render exactly as before. CV stability now shows alongside the existing R²/MAE/RMSE line in every production forecast dialog, the standalone Solar Wind/IMF job view, and each Research Lab's run-comparison rows.
 
+* **Operational Forecast Engine** (2026-07) — a new orchestration layer (`src/swdss/engine/`), built specifically NOT to be another prediction model, another dashboard page, or another Research Lab: it's the thin coordination layer that turns the existing per-variable job system (`jobs.py`, unchanged) into a continuously self-refreshing operational product. Three entry points — `run_forecast_cycle()` (starts a job for every production `(dataset, variable, horizon)` combination that doesn't already have one active, using a cheap `jobs.has_active_job()` precheck so the expensive `predict_live()` call only runs when something genuinely needs starting), `evaluate_due_forecasts()` (a thin wrapper around the existing `jobs.tick_all_active_jobs()`), and `refresh_dashboard_products()` (reads current job state, derives confidence/physics/outlook, and writes every stored product the dashboard reads) — are chained once per `live_update.py` loop cycle (~60s), removing the "must click Start Prediction" requirement entirely, while remaining independently callable for manual/dev use. Along the way, a real pre-existing bug was found and fixed in `jobs.py`: AE's live-tick logic always re-predicted with the 1h model after a job's first tick, regardless of the job's actual horizon, so a 24h AE job's final recorded prediction was silently a 1h prediction — now uses the job's own horizon throughout. **Locked forecasts**: every forecast is displayed exactly as it stood at generation time (the job's first tick, or for Kp the frozen production value) rather than the continuously-refining latest tick `jobs.py` tracks internally for research purposes — an operational display needs one stable number to act on, not one that silently changes every cycle. Every forecast now also carries full operational context (current value, forecast, valid period, lead time, a five-stage lifecycle status, model name/training date, confidence category) rather than a bare number, with Bz and Kp shown as a range (`predicted_value ± the model's own MAE`) instead of an over-precise decimal. See [Operational Forecast Engine](#operational-forecast-engine) for the full architecture, including the Forecast Package system, the rule-based Forecast Explanation Engine, and drift monitoring built on top of this same layer.
+
+* **SW Operational Command Centre** (2026-07) — a complete homepage redesign, replacing the previous card-and-KPI-widget dashboard aesthetic with a dense, monospace, terminal-style operational console — no rounded cards, no floating tiles, no oversized widgets, closer in spirit to a Bloomberg Terminal or mission-control console than a SaaS analytics dashboard. The old live status terminal and the six "Highest Values Recorded" extreme cards were removed; in their place, one large terminal window with ten fixed tabs (Forecast / Current / Physics / Timeline / Verification / Logs / Downloads / Alerts / System / Search) reads exclusively from the Operational Forecast Engine's stored products (`dashboard/lib/command_centre.py`) — the dashboard itself never calls a prediction model or touches `jobs.py`'s SQLite database directly. The Timeline tab's chart gained its own dark engineering-workstation Plotly theme (thin grid lines, minimal colors, monospace labels) rather than the rest of the app's light "retro" chart style, since a terminal console calls for a different visual language than the surrounding pages. The existing Sun-to-Earth Overview chart, Solar Activity News Feed, and Solar Events/CME Heliomaps are unchanged and simply render below the new terminal.
+
+* **Forecast Packages, Forecast Explanation Engine, and Drift Monitoring** (2026-07) — the Operational Forecast Engine's second phase, evolving it from independently-completing predictions into one synchronized, professionally-issued forecast product, while deliberately preserving every existing production model, physics formula, Research Lab, and evaluation methodology untouched. **Forecast Packages** (`swdss.engine.packages`) bundle the 10 operational headline forecasts into one issued product (`FC-YYYYMMDD-HHMM`, an incrementing cycle counter, and a six-stage lifecycle `CREATED → LIVE → ACTIVE → WAITING FOR VERIFICATION → VERIFIED → ARCHIVED`), with two physical realities handled explicitly rather than glossed over: Kp's 3-hour NOAA cadence is marked "carried over" on cycles where no new interval has published, never counted against completeness; and AE's ~10-20 day Kyoto WDC verification lag means the package verifies on its nine timely core members, with AE's own verification tracked and reported as a separate async line so packages don't sit "unverified" for weeks. A **Package Verification Summary** (Variables Verified, Average Error, Worst/Best Variable, Overall Package Accuracy) is computed and permanently stored the first cycle every core member has a real observation to check against. The **Forecast Explanation Engine** (`swdss.engine.explanation`) connects the Physics Engine's live readings to the Kp/Dst/AE forecasts they drive — previously two isolated dashboard views with no stated causal link — by scoring every physics quantity that can plausibly explain a forecast (southward IMF, Newell Coupling, Dynamic Pressure, VBz, Ey, Southward Duration, Akasofu ε, Magnetopause Compression) against thresholds already established elsewhere in this codebase, ranking the top three as Primary/Secondary/Supporting drivers, and generating a human-readable sentence — a deliberately honest, rule-based v1, with true SHAP-based per-forecast attribution against the live deployed model flagged as a genuinely bigger future upgrade, not something this ranking pretends to approximate. **Drift monitoring** (`swdss.engine.drift`) compares each model's recent live evaluated-forecast error against its own training-time MAE (an 8-sample minimum before ever declaring anything) and raises a notify-only `MODEL DRIFT DETECTED` alert once sustained error reaches 1.5x the training baseline — never retrains automatically. Every evaluated forecast now also logs its confidence score and a coarse Quiet/Active/Storm activity-regime tag, collected now (not yet used to segment anything) so a future version can compute genuinely quiet-time vs. storm-time error bands without redesigning this layer. The homepage's Command Centre gained a collapsed-by-default Forecast Package summary bar directly beneath the header — Package ID, cycle #, issued/valid time, status, completeness, confidence — visible with zero scrolling, per explicit design feedback that the operational product shouldn't require scrolling into a tab to check.
+
+* **Operational Forecast Engine — production hardening** (2026-07) — a follow-up pass isolating the engine's own automated workload from the dashboard's manually-triggered Production tabs, plus new ways to query the forecast history it has been accumulating:
+  * **Job source separation** — `jobs.py` gained a `source` column (`'manual'` vs `'engine'`). `get_running_jobs` / `get_saved_jobs` / `has_active_job` all filter on it, defaulting to `'manual'` so every existing Production-tab call site needed zero changes, while `run_forecast_cycle()` / `refresh_dashboard_products()` now explicitly pass `source="engine"`. Previously the two shared one growing table with no distinction, so the engine's continuous background churn could eventually crowd a manually-started job out of the visible history window — Production tabs now only ever list what a user actually started, and stay fast regardless of how many jobs the engine itself is running.
+  * **`prune_old_engine_jobs()`** — deletes engine-sourced jobs, and their ticks, once terminal (completed/stopped) and older than 7 days. Manually-started jobs are never touched by this or any other retention policy, however old.
+  * A real bug the separation surfaced was fixed in the same pass: `start_job()`'s own duplicate-job check wasn't filtering by `source`, so a pre-existing manual job occupying the same `(dataset, variable, horizon)` slot could silently absorb the engine's attempt to start its own tracked job for that slot. The engine kept predicting correctly underneath, but its own job bookkeeping came up empty — the Forecast tab briefly showed zero active jobs and every value blank. Fixed by adding `source` to the dedup query.
+  * **Search tab** — a tenth Command Centre tab: choose a variable and a past date/hour, and it surfaces every horizon's forecast whose valid window covered that exact moment, deduped to each horizon's latest logged state, so a 1h-ahead and a 24h-ahead prediction for the same historical event sit side by side for direct comparison. It also carries a **7-Day Extremes** reference table — highest Speed/Density/Temperature/Bt, lowest Bz, highest Kp, lowest Dst, and highest AE, each with its observation timestamp — read directly from the minute-level processed data (not the hourly-merged table) so a genuine spike isn't averaged away.
+  * **Progressive disclosure for growing tables** — Service Status, Data Source Freshness, Model Versions In Use, and the Verification tab's per-forecast and per-package tables are now collapsed `st.expander` sections labeled with their current row count, rather than always-rendered tables, since several of these accumulate rows for as long as the engine keeps running.
+
 ### In Progress / Next
 
 * **Testing phase** — systematically test every trained model (Solar Wind, IMF, Kp/Dst, AE, Kp Research Lab, AE Research Lab, and the Experimental cascade) and validate all Research Lab workflows end-to-end across real storm and quiet periods
@@ -747,6 +833,9 @@ Kp responds most strongly ~1 hour after a Bz change; Dst responds most strongly 
 * Multi-day continuous live-updater stress testing
 * Additional derived parameters (IMF clock angle, storm-sudden-commencement flags)
 * A genuine use for the archived minute-resolution Kyoto AE data (substorm onset detection, minute-scale AE dynamics) — currently archived but unread by anything
+* **Multi-day Operational Forecast Engine soak test** — the engine and Forecast Package system are new (2026-07); the actual Package Verification Summary, drift monitoring, and confidence-calibration evidence collection all need real accumulated history across several days (and ideally a genuine storm period) before their output is meaningfully trustworthy
+* **SHAP-based Forecast Driver Ranking** — the current Forecast Explanation Engine (`swdss.engine.explanation`) is an honest rule-based severity ranking over Physics Engine outputs; true per-forecast SHAP attribution against the live deployed model (reusing the SHAP infrastructure already built for the Research Labs, `swdss.models.explainability`) is a real, planned upgrade, not yet wired to live operational forecasts
+* **Activity-regime-conditioned confidence bands** — every evaluated forecast now logs a coarse Quiet/Active/Storm tag specifically so this becomes possible later; no forecast currently uses anything but one global MAE-derived range
 * Public deployment
 
 ### AE Index Integration
@@ -788,6 +877,8 @@ This staged approach also explains a deliberate non-decision already reflected e
 **Research & Experimentation** — formal hypothesis structuring (motivation, physics background, expected outcome), rule-based (non-LLM) statistical conclusion generation with confidence scoring, architecture-vs-architecture comparison methodology, and reproducible experiment tracking.
 
 **Software & Application Development** — multi-page Streamlit architecture, dialog state management across reruns, SQLite for incremental time-series persistence, custom CSS theming, and iterative UI/UX design driven by direct feedback.
+
+**Operational Systems Design** — orchestration layers built as a thin coordination layer over existing mechanisms rather than a rewrite; a synchronized product (Forecast Package) with an explicit multi-stage lifecycle, completeness tracking, and deliberate handling of asynchronous/mismatched-cadence components (Kp's 3-hour publishing cycle, AE's multi-week verification lag); a locked-vs-continuously-refined display philosophy for operational data; rule-based explainability and lightweight drift monitoring designed to notify, not act autonomously.
 
 **Software Engineering Practice** — automated testing (pytest) of pure domain logic isolated from live data/network/UI, continuous integration (GitHub Actions), repository hygiene (gitignoring generated data/model artifacts, `.env`-based secrets management), and a verified, behavior-preserving decomposition of a 10,900-line monolithic file into cohesive modules.
 

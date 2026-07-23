@@ -20,6 +20,13 @@ MASTER_V1_PATH = FEATURES_DIR / "master_df_v1.parquet"
 
 MODELS_DIR = PROJECT_ROOT / "models"
 
+# Operational Forecast Engine's storage root — see swdss.engine.storage.
+# Kept separate from FEATURES_DIR/MODELS_DIR since these are read/written
+# by the engine's orchestration layer (run_forecast_cycle/evaluate_due_
+# forecasts/refresh_dashboard_products), not by training or live-inference
+# code directly.
+FORECASTS_DIR = DATA_DIR / "forecasts"
+
 
 def ensure_data_dirs() -> None:
     for folder in [
@@ -43,5 +50,8 @@ def ensure_data_dirs() -> None:
         FEATURES_DIR,
         TRAINING_FEATURES_DIR,
         MODELS_DIR,
+        FORECASTS_DIR / "current",
+        FORECASTS_DIR / "history",
+        FORECASTS_DIR / "logs",
     ]:
         folder.mkdir(parents=True, exist_ok=True)

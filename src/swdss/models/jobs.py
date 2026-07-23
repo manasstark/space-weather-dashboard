@@ -221,6 +221,20 @@ def _init_db() -> None:
         # on the dashboard so it's never ambiguous which data window
         # produced the Mode 1 number.
         _ensure_column(conn, "jobs", "production_observed_at", "TEXT")
+        # 'manual' (default — a user's own "Start Prediction" click, meant
+        # to persist and stay visible for study until explicitly deleted)
+        # or 'engine' (created automatically by swdss.engine.orchestrator.
+        # run_forecast_cycle, every ~hour, forever). Existing rows predate
+        # this column and default to 'manual' via the DEFAULT clause,
+        # which is the correct backfill — every job before the Operational
+        # Forecast Engine existed WAS a manual one. get_running_jobs/
+        # get_saved_jobs filter to 'manual' by default so the Production
+        # tabs' study view is never crowded out by the engine's own
+        # continuous job creation; the engine's own internal lookups pass
+        # source='engine' explicitly. See prune_old_engine_jobs — only
+        # 'engine' jobs are ever pruned; a manual job persists exactly as
+        # it always has, forever, until the user deletes it.
+        _ensure_column(conn, "jobs", "source", "TEXT NOT NULL DEFAULT 'manual'")
 
 
 def _ensure_column(conn, table: str, column: str, decl: str) -> None:
@@ -375,10 +389,24 @@ def _tick_reference_variable(dataset: str, variable: str) -> str:
     return "speed" if dataset in ("analytics", "ae", "experimental") else variable
 
 
-def start_job(dataset: str, variable: str, horizon: int) -> tuple:
+def start_job(dataset: str, variable: str, horizon: int, source: str = "manual") -> tuple:
     """Starts a new continuous prediction job, or returns the existing one
     if a job for this exact (dataset, variable, horizon, start_hour) is
     already in progress.
+
+    `source` is 'manual' (a user's own "Start Prediction" click — the
+    default, so every existing call site needs no change) or 'engine'
+    (swdss.engine.orchestrator.run_forecast_cycle, which always passes
+    this explicitly) — see the `source` column's own comment in
+    _init_db for why this distinction exists. The dedup check below is
+    scoped to the SAME source: a manual job can never silently absorb
+    an engine job's slot (or vice versa). This was previously source-
+    agnostic on the theory that sharing one job was more sensible than
+    running the prediction twice — in practice that let a stray manual
+    job permanently block the engine from ever getting its own job for
+    that (dataset, variable, horizon) until the manual one's target hour
+    happened to resolve (up to 24h for the slowest horizon), which is
+    a far worse outcome than the rare extra prediction call.
 
     Returns (job, created) where created=False signals a duplicate.
     """
@@ -393,8 +421,8 @@ def start_job(dataset: str, variable: str, horizon: int) -> tuple:
 
     with _connect() as conn:
         existing = conn.execute(
-            "SELECT * FROM jobs WHERE dataset=? AND variable=? AND horizon=? AND start_hour=? AND status='in_progress'",
-            (dataset, variable, horizon, start_hour_iso),
+            "SELECT * FROM jobs WHERE dataset=? AND variable=? AND horizon=? AND start_hour=? AND status='in_progress' AND source=?",
+            (dataset, variable, horizon, start_hour_iso, source),
         ).fetchone()
         if existing is not None:
             job = _row_to_job(existing)
@@ -422,8 +450,8 @@ def start_job(dataset: str, variable: str, horizon: int) -> tuple:
         conn.execute(
             "INSERT INTO jobs (job_id, dataset, variable, horizon, start_hour, target_hour, model_name, "
             "metrics_json, status, saved, created_at, last_minute_seen, production_prediction, "
-            "production_observed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?)",
+            "production_observed_at, source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?, ?)",
             (
                 job_id,
                 dataset,
@@ -437,6 +465,7 @@ def start_job(dataset: str, variable: str, horizon: int) -> tuple:
                 _to_utc_iso(pd.Timestamp.now(tz="UTC")),
                 result["predicted_value"] if is_kp_interval_job else None,
                 _to_utc_iso(result["observed_at"]) if is_kp_interval_job else None,
+                source,
             ),
         )
         used_horizon = "rolling" if is_kp_interval_job else horizon
@@ -592,19 +621,22 @@ def _advance_predicting(conn, job_row: sqlite3.Row) -> None:
         data_has_reached_target = ref_minute_ts is not None and pd.Timestamp(ref_minute_ts) >= target_hour
         stalled_past_target = now >= target_hour + pd.Timedelta(minutes=10)
 
-        # Always a single horizon=1 model for the variable's whole life —
-        # no discrete-horizon checkpoint switching applies here (that's
-        # what the shared tick logic below is for), so log every new
-        # reference minute directly, right up through the one that first
-        # reaches the target hour.
+        # Always the job's OWN horizon model for its whole life — no
+        # discrete-horizon checkpoint switching applies here (that's what
+        # the shared tick logic below is for), so log every new reference
+        # minute directly, right up through the one that first reaches the
+        # target hour. Must use job_row["horizon"], not a hardcoded 1: a
+        # job started at horizon=24 still needs its final recorded
+        # prediction to come from the 24h model, not silently from the 1h
+        # one.
         if ref_minute_ts is not None:
             minute_iso = _to_utc_iso(ref_minute_ts)
             if minute_iso != job_row["last_minute_seen"]:
                 try:
-                    result = predict_live(dataset, variable, 1)
+                    result = predict_live(dataset, variable, job_row["horizon"])
                     _append_tick(
-                        conn, job_row["job_id"], ref_minute_ts, ref_minute_val, result["predicted_value"], 1,
-                        _capture_live_inputs(dataset),
+                        conn, job_row["job_id"], ref_minute_ts, ref_minute_val, result["predicted_value"],
+                        job_row["horizon"], _capture_live_inputs(dataset),
                     )
                 except Exception:
                     conn.execute(
@@ -876,24 +908,35 @@ def poll_jobs(dataset: str) -> None:
         _auto_refresh_quicklook_jobs(conn, dataset)
 
 
-def get_running_jobs(dataset: str, limit: int = JOB_HISTORY_LIMIT) -> list[dict]:
+def get_running_jobs(dataset: str, limit: int = JOB_HISTORY_LIMIT, source: str | None = "manual") -> list[dict]:
     """Returns this dataset's non-saved jobs (in-progress or completed but
     never saved), newest first, capped at `limit` — except for
     UNCAPPED_HISTORY_DATASETS (currently just "ae"), where every job stays
     visible indefinitely; only an explicit Delete ever removes one. Once a
     (capped-dataset) job is saved it moves out of this list entirely and
     into get_saved_jobs.
+
+    `source` defaults to 'manual' — the Production tabs' "Running
+    Predictions" list (every existing call site) should only ever show a
+    user's own started jobs, never the Operational Forecast Engine's
+    continuous automatic ones, which would otherwise crowd out (or, for
+    capped datasets, eventually push out of the LIMIT window entirely) a
+    job the user started specifically to study. Pass source='engine' or
+    source=None (no filter — every job regardless of source) explicitly
+    where that's genuinely what's wanted (see swdss.engine.orchestrator).
     """
     with _connect() as conn:
+        source_clause = "" if source is None else "AND source=? "
+        source_params = () if source is None else (source,)
         if dataset in UNCAPPED_HISTORY_DATASETS:
             rows = conn.execute(
-                "SELECT * FROM jobs WHERE dataset=? AND saved=0 ORDER BY created_at DESC",
-                (dataset,),
+                f"SELECT * FROM jobs WHERE dataset=? AND saved=0 {source_clause}ORDER BY created_at DESC",
+                (dataset, *source_params),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM jobs WHERE dataset=? AND saved=0 ORDER BY created_at DESC LIMIT ?",
-                (dataset, limit),
+                f"SELECT * FROM jobs WHERE dataset=? AND saved=0 {source_clause}ORDER BY created_at DESC LIMIT ?",
+                (dataset, *source_params, limit),
             ).fetchall()
         jobs = [_row_to_job(r) for r in rows]
         for job in jobs:
@@ -902,14 +945,19 @@ def get_running_jobs(dataset: str, limit: int = JOB_HISTORY_LIMIT) -> list[dict]
         return jobs
 
 
-def get_saved_jobs(dataset: str) -> list[dict]:
+def get_saved_jobs(dataset: str, source: str | None = "manual") -> list[dict]:
     """Returns every saved job for this dataset, newest first, with no cap
-    — saved predictions are meant to stick around indefinitely.
+    — saved predictions are meant to stick around indefinitely. Same
+    source='manual' default as get_running_jobs, for the same reason —
+    saving is a manual-workflow action a user takes from the Production
+    tabs, and an engine job is never exposed to that UI to begin with.
     """
     with _connect() as conn:
+        source_clause = "" if source is None else "AND source=? "
+        source_params = () if source is None else (source,)
         rows = conn.execute(
-            "SELECT * FROM jobs WHERE dataset=? AND saved=1 ORDER BY created_at DESC",
-            (dataset,),
+            f"SELECT * FROM jobs WHERE dataset=? AND saved=1 {source_clause}ORDER BY created_at DESC",
+            (dataset, *source_params),
         ).fetchall()
         jobs = [_row_to_job(r) for r in rows]
         for job in jobs:
@@ -952,6 +1000,30 @@ def find_matching_job(dataset: str, variable: str, target_hour) -> dict:
         return job
 
 
+def has_active_job(dataset: str, variable: str, horizon: int, source: str = "engine") -> bool:
+    """Cheap precheck for the Operational Forecast Engine's run_forecast_
+    cycle(): is there already an in_progress/evaluating job for this exact
+    (dataset, variable, horizon)? A single indexed-ish SQLite read, with no
+    predict_live call — unlike start_job, which always pays the full
+    feature-build + inference cost before it can even check for a
+    duplicate. Steady-state behavior this enables: the engine skips
+    calling start_job() for a combination that's still being tracked, and
+    starts a fresh one within one cycle of the previous one completing —
+    without needing to independently reproduce predict.py's hour/interval
+    resolution logic just to decide whether to bother asking.
+
+    Filtered to source='engine' by default so a user manually starting
+    the identical (dataset, variable, horizon) from a Production tab can
+    never block the engine's own automatic job creation for that slot.
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM jobs WHERE dataset=? AND variable=? AND horizon=? AND status IN ('in_progress', 'evaluating') AND source=? LIMIT 1",
+            (dataset, variable, horizon, source),
+        ).fetchone()
+        return row is not None
+
+
 def save_job(job_id: str) -> bool:
     with _connect() as conn:
         cur = conn.execute("UPDATE jobs SET saved=1 WHERE job_id=?", (job_id,))
@@ -964,6 +1036,37 @@ def delete_job(job_id: str) -> bool:
         conn.execute("DELETE FROM eval_ticks WHERE job_id=?", (job_id,))
         cur = conn.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
         return cur.rowcount > 0
+
+
+PRUNE_RETENTION_DAYS = 7
+
+
+def prune_old_engine_jobs(retention_days: int = PRUNE_RETENTION_DAYS) -> int:
+    """Deletes engine-sourced jobs (and their ticks/eval_ticks) that
+    finished more than `retention_days` ago — the only thing keeping
+    predictions.db from growing forever now that run_forecast_cycle()
+    creates jobs automatically, continuously, with no user ever clicking
+    Delete. Manual jobs are NEVER touched here regardless of age — they
+    persist exactly as they always have, until a user explicitly deletes
+    one (see get_running_jobs/get_saved_jobs' docstrings). Only terminal-
+    state jobs ('completed' or 'stopped') are eligible — an in_progress
+    or evaluating job is never pruned, engine or not.
+
+    Returns the number of jobs deleted, for logging.
+    """
+    cutoff_iso = _to_utc_iso(pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=retention_days))
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT job_id FROM jobs WHERE source='engine' AND status IN ('completed', 'stopped') "
+            "AND completed_at IS NOT NULL AND completed_at < ?",
+            (cutoff_iso,),
+        ).fetchall()
+        job_ids = [r["job_id"] for r in rows]
+        for job_id in job_ids:
+            conn.execute("DELETE FROM ticks WHERE job_id=?", (job_id,))
+            conn.execute("DELETE FROM eval_ticks WHERE job_id=?", (job_id,))
+            conn.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
+        return len(job_ids)
 
 
 def stop_job(job_id: str) -> bool:

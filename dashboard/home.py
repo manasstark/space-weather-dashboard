@@ -125,6 +125,7 @@ from dashboard.lib.ae_research_lab import (
     render_hypothesis_testing_tab,
     show_hypothesis_detail,
 )
+from dashboard.lib.command_centre import render_operational_command_centre
 from dashboard.lib.imf_research_lab import render_imf_research_laboratory
 from dashboard.lib.kp_research_lab import render_kp_research_laboratory
 from dashboard.lib.shared_ui import (
@@ -396,29 +397,6 @@ def seven_day_window(df: pd.DataFrame) -> pd.DataFrame:
     latest_time = df["timestamp_utc"].max()
     start_time = latest_time - pd.Timedelta(days=7)
     return df[df["timestamp_utc"] >= start_time].copy()
-
-
-def freshness_status(df: pd.DataFrame, column: str, max_age_minutes: int) -> tuple[str, str]:
-    if df.empty or column not in df.columns:
-        return "No data", "N/A"
-
-    clean = df.dropna(subset=[column])
-    if clean.empty:
-        return "No data", "N/A"
-
-    latest_time = clean["timestamp_utc"].max()
-    now_utc = pd.Timestamp.now(tz="UTC")
-    age_minutes = (now_utc - latest_time).total_seconds() / 60
-
-    status = "Fresh" if age_minutes <= max_age_minutes else "Stale"
-
-    if age_minutes < 60:
-        age_text = f"{age_minutes:.1f} min old"
-    else:
-        age_text = f"{age_minutes / 60:.1f} hr old"
-
-    return status, age_text
-
 
 
 def format_value(value, suffix: str = "", decimals: int = 2) -> str:
@@ -726,127 +704,10 @@ def variable_meaning_and_risk(column: str, value) -> tuple[str, str]:
     return "", ""
 
 
-def status_terminal(df: pd.DataFrame) -> None:
-    speed, speed_time = latest_value(df, "solar_wind_speed", "solar_wind")
-    density, density_time = latest_value(df, "proton_density", "solar_wind")
-    temperature, temperature_time = latest_value(df, "temperature", "solar_wind")
-    bz, bz_time = latest_value(df, "bz", "imf")
-    kp, kp_time = latest_value(df, "kp", "kp")
-    dst, dst_time = latest_value(df, "dst", "dst")
-
-    rows = [
-        ("Speed", format_value(speed, " km/s", 1), speed_time, "speed", speed),
-        ("Density", format_value(density, " p/cm3", 2), density_time, "density", density),
-        ("Temp", format_value(temperature, " K", 0), temperature_time, "temperature", temperature),
-        ("Bz", format_value(bz, " nT", 2), bz_time, "bz", bz),
-        ("Kp", format_value(kp, "", 1), kp_time, "kp", kp),
-        ("Dst", format_value(dst, " nT", 1), dst_time, "dst", dst),
-    ]
-
-    rows_html = ""
-    for name, value_text, time_value, column, raw_value in rows:
-        meaning, risk = variable_meaning_and_risk(column, raw_value)
-        rows_html += (
-            "<tr>"
-            f"<td>{escape(name)}</td>"
-            f"<td>{escape(value_text)}</td>"
-            f"<td>{escape(latest_label_time(time_value))}</td>"
-            f"<td>{escape(meaning)}</td>"
-            f"<td>{escape(risk)}</td>"
-            "</tr>"
-        )
-
-    st.markdown(
-        f"""
-        <style>
-        .terminal-wrap {{
-            background: #050505;
-            border: 2px solid #ffffff;
-            box-shadow: 3px 3px 0px #808080;
-            padding: 12px;
-            font-family: 'Courier New', monospace;
-            box-sizing: border-box;
-            width: 100%;
-            overflow-x: auto;
-        }}
-        .terminal-wrap .terminal-title {{
-            color: #f2f2f2;
-            font-size: 0.9rem;
-            font-weight: 700;
-            margin-bottom: 4px;
-        }}
-        .terminal-wrap .terminal-window {{
-            color: #9adfff;
-            font-size: 0.78rem;
-            margin-bottom: 10px;
-        }}
-        table.terminal-table {{
-            width: 100%;
-            border-collapse: collapse;
-            table-layout: fixed;
-            font-size: 0.76rem;
-        }}
-        table.terminal-table th,
-        table.terminal-table td {{
-            border: 1px solid #333333;
-            padding: 4px 8px;
-            text-align: left;
-            white-space: normal;
-            word-wrap: break-word;
-            overflow-wrap: break-word;
-            color: #f2f2f2 !important;
-        }}
-        table.terminal-table th:nth-child(1), table.terminal-table td:nth-child(1) {{ width: 9%; }}
-        table.terminal-table th:nth-child(2), table.terminal-table td:nth-child(2) {{ width: 13%; }}
-        table.terminal-table th:nth-child(3), table.terminal-table td:nth-child(3) {{ width: 18%; }}
-        table.terminal-table th:nth-child(4), table.terminal-table td:nth-child(4) {{ width: 28%; }}
-        table.terminal-table th:nth-child(5), table.terminal-table td:nth-child(5) {{ width: 32%; }}
-        table.terminal-table th {{
-            color: #00ff88 !important;
-            font-weight: 700;
-        }}
-        </style>
-        <div class="terminal-wrap">
-            <div class="terminal-title">SW-DSS STATUS TERMINAL</div>
-            <div class="terminal-window">DATASET WINDOW: {escape(date_window_label(df))}</div>
-            <table class="terminal-table">
-                <thead>
-                    <tr>
-                        <th>VAR</th>
-                        <th>VALUE</th>
-                        <th>TIME (UTC)</th>
-                        <th>MEANING</th>
-                        <th>RISK</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {rows_html}
-                </tbody>
-            </table>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    anchor_time = pick_anchor_time(dst_time, kp_time, bz_time)
-    if st.button("🔍 Solar Event", key="terminal_solar_event"):
-        open_dialog("reverse_explorer", (anchor_time, "Current Conditions"))
-
-
 def latest_label_time(value) -> str:
     if value is None or pd.isna(value):
         return "N/A"
     return pd.to_datetime(value, utc=True).strftime("%d %b %H:%M UTC")
-
-
-def date_window_label(df: pd.DataFrame) -> str:
-    if df.empty or "timestamp_utc" not in df.columns:
-        return "No date window"
-
-    start = df["timestamp_utc"].min()
-    end = df["timestamp_utc"].max()
-
-    return f"{start.strftime('%d %b')} to {end.strftime('%d %b')}"
 
 
 def render_simple_retro_table(df: pd.DataFrame, display_names: dict | None = None) -> None:
@@ -3616,77 +3477,6 @@ def earth_analysis(df: pd.DataFrame) -> None:
 def home_page(df: pd.DataFrame) -> None:
     st.caption("7-day NOAA-based summary. Page refreshes every minute.")
 
-    speed_row = row_at_extreme_from_source("solar_wind", "solar_wind_speed", "max")
-    density_row = row_at_extreme_from_source("solar_wind", "proton_density", "max")
-    temp_row = row_at_extreme_from_source("solar_wind", "temperature", "max")
-    bz_row = row_at_extreme_from_source("imf", "bz", "min")
-    kp_row = row_at_extreme(df, "kp", "max")
-    dst_row = row_at_extreme(df, "dst", "min")
-
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    with c1:
-        extreme_card_with_hover(
-            "Highest Speed",
-            format_value(None if speed_row is None else speed_row["solar_wind_speed"], " km/s", 1),
-            time_caption(speed_row),
-            speed_row,
-            skip_field="speed",
-        )
-        if speed_row is not None and st.button("🔍 Solar Event", key="extreme_event_speed", use_container_width=True):
-            open_dialog("reverse_explorer", (speed_row["timestamp_utc"], "Highest Speed"))
-    with c2:
-        extreme_card_with_hover(
-            "Highest Density",
-            format_value(None if density_row is None else density_row["proton_density"], " p/cm3", 2),
-            time_caption(density_row),
-            density_row,
-            skip_field="density",
-        )
-        if density_row is not None and st.button("🔍 Solar Event", key="extreme_event_density", use_container_width=True):
-            open_dialog("reverse_explorer", (density_row["timestamp_utc"], "Highest Density"))
-    with c3:
-        extreme_card_with_hover(
-            "Highest Temperature",
-            format_value(None if temp_row is None else temp_row["temperature"], " K", 0),
-            time_caption(temp_row),
-            temp_row,
-            skip_field="temp",
-        )
-        if temp_row is not None and st.button("🔍 Solar Event", key="extreme_event_temp", use_container_width=True):
-            open_dialog("reverse_explorer", (temp_row["timestamp_utc"], "Highest Temperature"))
-    with c4:
-        extreme_card_with_hover(
-            "Lowest Bz",
-            format_value(None if bz_row is None else bz_row["bz"], " nT", 2),
-            time_caption(bz_row),
-            bz_row,
-            skip_field="bz",
-        )
-        if bz_row is not None and st.button("🔍 Solar Event", key="extreme_event_bz", use_container_width=True):
-            open_dialog("reverse_explorer", (bz_row["timestamp_utc"], "Lowest Bz"))
-    with c5:
-        extreme_card_with_hover(
-            "Highest Kp",
-            format_value(None if kp_row is None else kp_row["kp"], "", 1),
-            time_caption(kp_row),
-            kp_row,
-            skip_field="kp",
-        )
-        if kp_row is not None and st.button("🔍 Solar Event", key="extreme_event_kp", use_container_width=True):
-            open_dialog("reverse_explorer", (kp_row["timestamp_utc"], "Highest Kp"))
-    with c6:
-        extreme_card_with_hover(
-            "Lowest Dst",
-            format_value(None if dst_row is None else dst_row["dst"], " nT", 1),
-            time_caption(dst_row),
-            dst_row,
-            skip_field="dst",
-        )
-        if dst_row is not None and st.button("🔍 Solar Event", key="extreme_event_dst", use_container_width=True):
-            open_dialog("reverse_explorer", (dst_row["timestamp_utc"], "Lowest Dst"))
-
-    st.divider()
-
     render_overview_chart()
 
     st.divider()
@@ -6144,51 +5934,19 @@ if page != "Research Lab" and not _pause:
 # were removed from inline page display (UI simplification, 2026-07) —
 # all of their tables now live in one scrollable terminal window behind
 # the "📋 References" toolbar button above (show_references_terminal).
-# The Home page's live status terminal is unrelated to those reference
-# tables and keeps its original right-hand-column position.
+# The Home page's live status terminal was replaced (2026-07) by the
+# SW Operational Command Centre — a full-width operational terminal
+# reading only from the Operational Forecast Engine's stored snapshot
+# (swdss.engine.storage), never computing anything live itself. Its own
+# System tab now covers what the sidebar "Data Freshness" panel used to
+# show, so that panel was removed rather than kept as a second,
+# potentially-inconsistent source of the same information.
 if page == "Home Page":
-    _, status_col = st.columns([1.15, 1])
-    with status_col:
-        status_terminal(df_7d)
+    render_operational_command_centre()
 
 st.divider()
 
 if page == "Home Page":
-    st.sidebar.subheader("Data Freshness")
-
-    sw_status, sw_age = freshness_status(df_7d, "solar_wind_speed", 90)
-    imf_status, imf_age = freshness_status(df_7d, "bz", 90)
-    kp_status, kp_age = freshness_status(df_7d, "kp", 360)
-    dst_status, dst_age = freshness_status(df_7d, "dst", 120)
-
-    solar_events_df = load_processed_data("solar_events")
-    cme_df_sidebar = load_processed_data("cme")
-    f107_df_sidebar = load_processed_data("f107")
-
-    events_status, events_age = freshness_status(solar_events_df, "event_type", 90)
-    cme_status, cme_age = freshness_status(cme_df_sidebar, "speed", 180)
-    f107_status, f107_age = freshness_status(f107_df_sidebar, "f107_flux", 1500)
-
-    st.sidebar.write(f"Solar Wind: {sw_status} ({sw_age})")
-    st.sidebar.write(f"IMF: {imf_status} ({imf_age})")
-    st.sidebar.write(f"Kp: {kp_status} ({kp_age})")
-    st.sidebar.write(f"Dst: {dst_status} ({dst_age})")
-    st.sidebar.write(f"Solar Events: {events_status} ({events_age})")
-    st.sidebar.write(f"CME: {cme_status} ({cme_age})")
-    st.sidebar.write(f"F10.7: {f107_status} ({f107_age})")
-
-    st.sidebar.divider()
-
-    st.sidebar.caption("Refresh logic")
-    st.sidebar.write("Solar Wind / IMF: every minute")
-    st.sidebar.write("Kp: about every 3 hours")
-    st.sidebar.write("Dst: about every hour")
-    st.sidebar.write("Solar Events: about every 30 minutes")
-    st.sidebar.write("CME: about every hour")
-    st.sidebar.write("F10.7: about every 24 hours")
-
-    st.sidebar.divider()
-
     if st.sidebar.button("📁 Saved Events", key="saved_events_sidebar", use_container_width=True):
         open_dialog("saved_events", None)
 else:

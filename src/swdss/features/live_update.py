@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from swdss.models.jobs import tick_all_active_jobs
+from swdss.engine.orchestrator import evaluate_due_forecasts, refresh_dashboard_products, run_forecast_cycle
 from swdss.features.build_master import (
     clean_cme,
     clean_dst,
@@ -239,13 +239,43 @@ def run_live_update_loop() -> None:
 
         first_run = False
 
-        # Tick all active prediction jobs against the freshest available data.
-        # Runs every loop cycle so jobs advance even when the dashboard is on a
-        # different page, closed, or not open at all.
+        # Operational Forecast Engine — three independent stages, each
+        # fault-isolated the same way every ingestion job above already is
+        # (one stage failing must never block the others or crash the
+        # loop). Runs every loop cycle so forecasts are generated,
+        # evaluated, and refreshed continuously — no user interaction, no
+        # dashboard required to be open — matching every other job in
+        # this file.
+        #
+        # 1. run_forecast_cycle(): ensures every production (dataset,
+        #    variable, horizon) has an active job, starting new ones as
+        #    soon as the previous one completes.
+        # 2. evaluate_due_forecasts(): advances every active job against
+        #    the freshest available data (this replaces the old direct
+        #    tick_all_active_jobs() call — same underlying function,
+        #    called through the engine's own entry point for API
+        #    symmetry with the two calls around it).
+        # 3. refresh_dashboard_products(): reads the current job state,
+        #    derives confidence/physics/outlook/alerts, and writes the
+        #    forecast snapshot + history the dashboard's Operational
+        #    Command Centre reads — the dashboard itself never runs a
+        #    prediction model.
         try:
-            tick_all_active_jobs()
+            run_forecast_cycle()
         except Exception:
-            print(f"[{utc_now().isoformat()}] Failed to tick prediction jobs:")
+            print(f"[{utc_now().isoformat()}] Failed to run forecast cycle:")
+            traceback.print_exc()
+
+        try:
+            evaluate_due_forecasts()
+        except Exception:
+            print(f"[{utc_now().isoformat()}] Failed to evaluate due forecasts:")
+            traceback.print_exc()
+
+        try:
+            refresh_dashboard_products()
+        except Exception:
+            print(f"[{utc_now().isoformat()}] Failed to refresh dashboard products:")
             traceback.print_exc()
 
         elapsed = time.time() - loop_started
