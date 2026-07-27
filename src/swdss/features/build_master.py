@@ -111,11 +111,29 @@ def clean_time_column(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# NOAA's real-time feeds (confirmed here in Solar Wind plasma data —
+# speed/density/temperature all sentineled together on the same row,
+# consistent with a momentary DSCOVR instrument outage) use -9999 as a
+# "no valid measurement" fill value rather than omitting the row
+# entirely. Left unconverted, that literal -9999 gets averaged into
+# hourly means like any other real reading — a proton density of -165
+# p/cm3 (physically impossible) is exactly what that produces, which is
+# also what was surfacing as "invalid value encountered in sqrt"
+# warnings in the Physics Engine's Alfven speed calculation. -9990 is
+# used as the cutoff (not -9999 exactly) purely as a tolerance margin;
+# it is nowhere near any real value for any variable this pipeline
+# handles — Dst's most extreme recorded value is still nowhere close to
+# -9990, so this can never mistake a genuine (and often legitimately
+# negative) reading for a fill value.
+NOAA_FILL_THRESHOLD = -9990
+
+
 def to_numeric(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     df = df.copy()
     for column in columns:
         if column in df.columns:
             df[column] = pd.to_numeric(df[column], errors="coerce")
+            df[column] = df[column].where(df[column] > NOAA_FILL_THRESHOLD)
     return df
 
 

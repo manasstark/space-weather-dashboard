@@ -23,7 +23,8 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from dashboard.lib.shared_ui import open_dialog
-from swdss.engine import storage
+from swdss.engine import calibration, packages, skill, storage
+from swdss.engine.labels import classify_current_reading
 from swdss.paths import PROCESSED_DIR
 
 # ==================== Terminal design tokens ====================
@@ -71,6 +72,16 @@ UNITS = {
     "speed": "km/s", "density": "p/cm3", "temperature": "K",
     "bt": "nT", "bx_gsm": "nT", "by_gsm": "nT", "bz_gsm": "nT",
     "kp": "", "dst": "nT", "ae": "nT",
+}
+# Decimal precision per variable's natural scale — Temperature in
+# particular has no business displaying as "251169.00 K"; a whole-Kelvin
+# reading isn't a rounding of anything more precise the model actually
+# knows. Used everywhere a forecast/current/range value is rendered so
+# precision stays consistent across the Forecast, Current, and Search tabs.
+VARIABLE_DECIMALS = {
+    "speed": 1, "density": 2, "temperature": 0,
+    "bt": 2, "bx_gsm": 2, "by_gsm": 2, "bz_gsm": 2,
+    "kp": 1, "dst": 1, "ae": 1,
 }
 
 
@@ -394,6 +405,9 @@ def _render_package_banner(package: dict) -> None:
     status_color = STATUS_COLORS.get(status, MUTED)
     completeness = package.get("completeness", "—")
     completeness_color = ACCENT if completeness == "COMPLETE" else AMBER
+    variables_complete = package.get("variables_complete")
+    variables_total = package.get("variables_total")
+    completeness_fraction = f"{variables_complete}/{variables_total}" if variables_complete is not None else "—"
     conf = package.get("overall_confidence", {})
 
     st.markdown(
@@ -402,9 +416,10 @@ def _render_package_banner(package: dict) -> None:
             <b style="color:{ACCENT};">{escape(package.get('package_id', '—'))}</b>
             <span>CYCLE #{package.get('forecast_cycle', '—')}</span>
             <span>ISSUED {escape(_fmt_time(package.get('generated_at')))}</span>
+            <span>OBS THROUGH {escape(_fmt_time(package.get('observations_used_through')))}</span>
             <span>VALID {escape(_fmt_period(package.get('valid_start'), package.get('valid_end')))}</span>
             <span style="color:{status_color}; font-weight:700;">[{escape(status)}]</span>
-            <span style="color:{completeness_color};">{escape(completeness)}</span>
+            <span style="color:{completeness_color};">{completeness_fraction} {escape(completeness)}</span>
             <span>CONF {_confidence_span(conf.get('category'))}</span>
         </div>
         """,
@@ -420,9 +435,10 @@ def _render_package_banner(package: dict) -> None:
             ["Package ID", package.get("package_id", "—")],
             ["Forecast Cycle", str(package.get("forecast_cycle", "—"))],
             ["Generated", _fmt_time(package.get("generated_at"))],
+            ["Observations Used Through", _fmt_time(package.get("observations_used_through"))],
             ["Valid Period", _fmt_period(package.get("valid_start"), package.get("valid_end"))],
             ["Status", _status_span(status)],
-            ["Completeness", f'<span style="color:{completeness_color};">{escape(completeness)}</span>'],
+            ["Completeness", f'<span style="color:{completeness_color};">{completeness_fraction} {escape(completeness)}</span>'],
             ["Evaluation Status", escape(package.get("evaluation_status", "—"))],
             ["Overall Confidence", f"{_confidence_span(conf.get('category'))} ({_fmt(conf.get('score'), 2)})"],
             ["Physics Engine Version", escape(package.get("physics_engine_version", "—"))],
@@ -496,21 +512,38 @@ def _headline_horizon_key(dataset: str, variable: str) -> str:
     return "interval" if (dataset == "analytics" and variable == "kp") else "1h"
 
 
+def _activity_badge_html(variable: str, value) -> str:
+    """NOAA-style G-scale / storm-class badge for a predicted Kp/Dst/AE
+    value, reusing swdss.engine.labels.classify_current_reading — the
+    same thresholds already shown for the Current tab's observed values —
+    so a forecast reads as an operator-recognizable storm class, not
+    just a bare decimal.
+    """
+    if variable not in ("kp", "dst", "ae") or value is None:
+        return ""
+    meaning, risk = classify_current_reading(variable, value)
+    if not meaning:
+        return ""
+    color = RISK_COLORS.get(risk, MUTED)
+    return f' <span style="color:{color};">({escape(meaning)})</span>'
+
+
 def _forecast_value_html(entry: dict, variable: str) -> str:
     if entry is None or entry.get("predicted_value") is None:
         return "—"
     unit = UNITS.get(variable, "")
-    decimals = 1 if variable == "kp" else 2
+    decimals = VARIABLE_DECIMALS.get(variable, 2)
+    badge = _activity_badge_html(variable, entry["predicted_value"])
     if entry.get("range_low") is not None and entry.get("range_high") is not None:
-        return f"{entry['range_low']:.{decimals}f} &rarr; {entry['range_high']:.{decimals}f}{(' ' + unit) if unit else ''}"
-    return f"{entry['predicted_value']:.{decimals}f}{(' ' + unit) if unit else ''}"
+        return f"{entry['range_low']:.{decimals}f} &rarr; {entry['range_high']:.{decimals}f}{(' ' + unit) if unit else ''}{badge}"
+    return f"{entry['predicted_value']:.{decimals}f}{(' ' + unit) if unit else ''}{badge}"
 
 
 def _delta_trend_html(entry: dict, variable: str) -> str:
     if entry is None:
         return "—"
     unit = UNITS.get(variable, "")
-    decimals = 1 if variable == "kp" else 2
+    decimals = VARIABLE_DECIMALS.get(variable, 2)
     if variable in ("bz_gsm", "kp"):
         return escape(entry.get("trend", "—"))
     delta = entry.get("delta")
@@ -521,7 +554,7 @@ def _delta_trend_html(entry: dict, variable: str) -> str:
 
 def _forecast_row(variable: str, entry: dict) -> list:
     unit = UNITS.get(variable, "")
-    decimals = 1 if variable == "kp" else 2
+    decimals = VARIABLE_DECIMALS.get(variable, 2)
     current_text = _fmt(entry.get("current_value") if entry else None, decimals, (" " + unit) if unit else "")
     if entry is None:
         return [
@@ -782,6 +815,79 @@ def _verification_status(abs_error, mae) -> tuple:
     return "LARGE DEVIATION", RED
 
 
+# The exact same "10 headline forecasts" definition the Forecast Package
+# itself uses (packages.HEADLINE_KEYS) — reused here so "operational"
+# means the same thing in the Verification tab as it does everywhere
+# else in this app (the Forecast tab, the Package banner, the Package
+# Verification Summary), rather than a second, subtly different
+# definition of "headline" living in just this one tab.
+_HEADLINE_SET = set(packages.HEADLINE_KEYS)
+_OPERATIONAL_LABEL = "Operational (1h / Kp interval)"
+_EXTENDED_LABEL = "Extended Horizons (3h / 6h / 12h / 24h)"
+
+
+def _is_headline(dataset: str, variable: str, horizon) -> bool:
+    return (dataset, variable, horizon) in _HEADLINE_SET
+
+
+def _split_by_headline(df: pd.DataFrame) -> tuple:
+    if df.empty:
+        return df, df
+    mask = df.apply(lambda r: _is_headline(r["dataset"], r["variable"], r["horizon"]), axis=1)
+    return df[mask], df[~mask]
+
+
+def _evaluation_caption(evals: pd.DataFrame) -> str:
+    """The same 'EVALUATED: N · SUCCESS RATE (<=1.5x MAE): P%' summary
+    line, computed for whatever subset is passed in — every sub-table in
+    this tab gets its own honest count rather than inheriting the
+    other's.
+    """
+    if evals.empty:
+        return '<div class="term-root term-caption">No evaluated forecasts in this group yet.</div>'
+    mae_by_key = evals.groupby(["variable", "horizon"])["abs_error"].mean().to_dict()
+    total = len(evals)
+    success = sum(
+        1 for _, r in evals.iterrows()
+        if mae_by_key.get((r["variable"], r["horizon"])) and r.get("abs_error", 1e9) <= 1.5 * mae_by_key[(r["variable"], r["horizon"])]
+    )
+    return (
+        f'<div class="term-root term-caption">EVALUATED: {total}  ·  SUCCESS RATE (≤1.5x MAE): '
+        f'{(success / total * 100):.0f}%</div>'
+    )
+
+
+def _verified_forecasts_subtable(evals: pd.DataFrame, subtitle: str) -> None:
+    st.markdown(f'<div class="term-root term-section">{escape(subtitle)}</div>', unsafe_allow_html=True)
+    st.markdown(_evaluation_caption(evals), unsafe_allow_html=True)
+    if evals.empty:
+        return
+
+    grouped = evals.groupby(["variable", "horizon"])
+    mae_by_key = grouped["abs_error"].mean().to_dict()
+    rmse_by_key = grouped["squared_error"].mean().pow(0.5).to_dict()
+    bias_by_key = grouped["error"].mean().to_dict()
+
+    headers = ["VARIABLE", "HORIZON", "FORECAST", "OBSERVED", "ERROR", "MAE", "RMSE", "BIAS", "STATUS"]
+    rows = []
+    for _, r in evals.sort_values("completed_at", ascending=False).head(60).iterrows():
+        key = (r["variable"], r["horizon"])
+        mae = mae_by_key.get(key)
+        status_text, status_color = _verification_status(r.get("abs_error"), mae)
+        rows.append([
+            f"<b>{escape(r['variable'].upper())}</b>",
+            escape(str(r["horizon"])),
+            f'<span class="num">{_fmt(r.get("final_predicted_value"), 2)}</span>',
+            f'<span class="num">{_fmt(r.get("actual_value"), 2)}</span>',
+            f'<span class="num">{_fmt_signed(r.get("error"), 2)}</span>',
+            f'<span class="num">{_fmt(mae, 3)}</span>',
+            f'<span class="num">{_fmt(rmse_by_key.get(key), 3)}</span>',
+            f'<span class="num">{_fmt_signed(bias_by_key.get(key), 3)}</span>',
+            f'<span style="color:{status_color}; font-weight:700;">{status_text}</span>',
+        ])
+    st.markdown(f'<div class="term-root">{_table(headers, rows, numeric_cols={2,3,4,5,6,7})}</div>', unsafe_allow_html=True)
+
+
 def _render_verification_tab(snapshot: dict) -> None:
     evaluations = storage.load_evaluation_history()
     if evaluations.empty:
@@ -797,39 +903,20 @@ def _render_verification_tab(snapshot: dict) -> None:
     if "squared_error" not in evaluations.columns:
         evaluations["squared_error"] = evaluations["abs_error"] ** 2
 
-    mae_by_var = evaluations.groupby("variable")["abs_error"].mean().to_dict()
-    rmse_by_var = {v: (evaluations.loc[evaluations["variable"] == v, "squared_error"].mean() ** 0.5) for v in mae_by_var}
-    bias_by_var = evaluations.groupby("variable")["error"].mean().to_dict()
+    st.markdown(_evaluation_caption(evaluations), unsafe_allow_html=True)
 
-    total = len(evaluations)
-    success = sum(1 for _, r in evaluations.iterrows() if mae_by_var.get(r["variable"]) and r.get("abs_error", 1e9) <= 1.5 * mae_by_var[r["variable"]])
-    st.markdown(
-        f'<div class="term-root term-caption">EVALUATED: {total}  ·  SUCCESS RATE (≤1.5x MAE): '
-        f'{(success / total * 100):.0f}%</div>',
-        unsafe_allow_html=True,
-    )
+    headline_evals, extended_evals = _split_by_headline(evaluations)
 
-    with st.expander(f"▸ Verified Forecasts (showing up to 60 of {total})", expanded=False):
-        headers = ["VARIABLE", "FORECAST", "OBSERVED", "ERROR", "MAE", "RMSE", "BIAS", "STATUS"]
-        rows = []
-        for _, r in evaluations.sort_values("completed_at", ascending=False).head(60).iterrows():
-            variable = r["variable"]
-            mae = mae_by_var.get(variable)
-            status_text, status_color = _verification_status(r.get("abs_error"), mae)
-            rows.append([
-                f"<b>{escape(variable.upper())}</b>",
-                f'<span class="num">{_fmt(r.get("final_predicted_value"), 2)}</span>',
-                f'<span class="num">{_fmt(r.get("actual_value"), 2)}</span>',
-                f'<span class="num">{_fmt_signed(r.get("error"), 2)}</span>',
-                f'<span class="num">{_fmt(mae, 3)}</span>',
-                f'<span class="num">{_fmt(rmse_by_var.get(variable), 3)}</span>',
-                f'<span class="num">{_fmt_signed(bias_by_var.get(variable), 3)}</span>',
-                f'<span style="color:{status_color}; font-weight:700;">{status_text}</span>',
-            ])
-        st.markdown(f'<div class="term-root">{_table(headers, rows, numeric_cols={1,2,3,4,5,6})}</div>', unsafe_allow_html=True)
+    with st.expander(f"▸ Verified Forecasts (showing up to 60 per table, {len(evaluations)} total)", expanded=False):
+        _verified_forecasts_subtable(headline_evals, _OPERATIONAL_LABEL)
+        st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+        _verified_forecasts_subtable(extended_evals, _EXTENDED_LABEL)
 
     package_verifications = storage.load_package_verification_history()
     if not package_verifications.empty:
+        # Not split — a Forecast Package is BY DEFINITION built only from
+        # the headline members (see packages.HEADLINE_KEYS), so there is
+        # no "extended horizons" equivalent of a package to show here.
         with st.expander(f"▸ Package Verification Summary ({len(package_verifications)})", expanded=False):
             headers = ["PACKAGE ID", "VERIFIED AT", "VARS VERIFIED", "AVG ERROR", "WORST VAR", "BEST VAR", "ACCURACY"]
             rows = []
@@ -844,6 +931,163 @@ def _render_verification_tab(snapshot: dict) -> None:
                     f'<span class="num">{_fmt(r.get("overall_package_accuracy_pct"), 0)}%</span>',
                 ])
             st.markdown(f'<div class="term-root">{_table(headers, rows, numeric_cols={3,6})}</div>', unsafe_allow_html=True)
+
+    _render_skill_section(headline_evals, extended_evals)
+    _render_calibration_sections(headline_evals, extended_evals)
+
+
+def _insufficient_data_note(min_samples: int) -> None:
+    st.markdown(
+        f'<div class="term-root term-caption">Not enough evaluated history yet — needs at least {min_samples} '
+        f"evaluated forecasts per group before reporting anything (a handful of points is noise, not a finding). "
+        f"This fills in on its own as the engine accumulates more verified forecasts.</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _skill_subtable(scores: list, evals: pd.DataFrame, subtitle: str) -> None:
+    st.markdown(f'<div class="term-root term-section">{escape(subtitle)}</div>', unsafe_allow_html=True)
+    st.markdown(_evaluation_caption(evals), unsafe_allow_html=True)
+    if not scores:
+        _insufficient_data_note(skill.MIN_SAMPLES)
+        return
+
+    beating = sum(1 for s in scores if s["verdict"] == "Beats Persistence")
+    st.markdown(
+        f'<div class="term-root term-caption">GROUPS REPORTED: {len(scores)}  ·  BEATING PERSISTENCE: '
+        f'{(beating / len(scores) * 100):.0f}%</div>',
+        unsafe_allow_html=True,
+    )
+    headers = ["VARIABLE", "HORIZON", "SAMPLES", "MODEL RMSE", "PERSISTENCE RMSE", "SKILL SCORE", "VERDICT"]
+    rows = []
+    for s in scores:
+        beats = s["verdict"] == "Beats Persistence"
+        verdict_color = ACCENT if beats else RED
+        rows.append([
+            f"<b>{escape(s['variable'].upper())}</b>",
+            s["horizon"],
+            str(s["sample_n"]),
+            f'<span class="num">{_fmt(s["model_rmse"], 3)}</span>',
+            f'<span class="num">{_fmt(s["persistence_rmse"], 3)}</span>',
+            f'<span class="num" style="color:{verdict_color}; font-weight:700;">{_fmt_signed(s["skill_score"], 3)}</span>',
+            f'<span style="color:{verdict_color}; font-weight:700;">{escape(s["verdict"])}</span>',
+        ])
+    st.markdown(f'<div class="term-root">{_table(headers, rows, numeric_cols={2,3,4,5})}</div>', unsafe_allow_html=True)
+
+
+def _render_skill_section(headline_evals: pd.DataFrame, extended_evals: pd.DataFrame) -> None:
+    """Forecast Skill vs. Persistence — does the model actually beat the
+    naive "assume no change" forecast, not just its own training
+    benchmark (see swdss.engine.skill). AE never appears here: it has no
+    live feed, so there is no persistence baseline to compare against.
+    """
+    scores = storage.load_skill_scores()
+    headline_scores = [s for s in scores if _is_headline(s["dataset"], s["variable"], s["horizon"])]
+    extended_scores = [s for s in scores if not _is_headline(s["dataset"], s["variable"], s["horizon"])]
+
+    with st.expander(f"▸ Forecast Skill vs. Persistence ({len(scores)})", expanded=len(scores) > 0):
+        st.markdown(
+            '<div class="term-root term-caption">Skill score = 1 − (model MSE / persistence MSE). '
+            "Positive means the model beats assuming no change between issuance and the target hour; "
+            "zero or negative means it currently does not.</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+        _skill_subtable(headline_scores, headline_evals, _OPERATIONAL_LABEL)
+        st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+        _skill_subtable(extended_scores, extended_evals, _EXTENDED_LABEL)
+
+
+def _confidence_subtable(confidence_rows: list, evals: pd.DataFrame, subtitle: str) -> None:
+    st.markdown(f'<div class="term-root term-section">{escape(subtitle)}</div>', unsafe_allow_html=True)
+    st.markdown(_evaluation_caption(evals), unsafe_allow_html=True)
+    reportable = [r for r in confidence_rows if r.get("status") == "OK"]
+    if not reportable:
+        _insufficient_data_note(calibration.MIN_SAMPLES)
+        return
+    headers = ["CONFIDENCE CATEGORY", "SAMPLES", "SUCCESS RATE (≤1.5x MAE)"]
+    rows = []
+    for r in confidence_rows:
+        if r.get("status") != "OK":
+            rows.append([escape(r["confidence_category"]), str(r["sample_n"]), f'<span style="color:{MUTED};">Insufficient Data</span>'])
+            continue
+        rows.append([
+            f"<b>{escape(r['confidence_category'])}</b>",
+            str(r["sample_n"]),
+            f'<span class="num">{_fmt(r["success_rate_pct"], 1)}%</span>',
+        ])
+    st.markdown(f'<div class="term-root">{_table(headers, rows, numeric_cols={1,2})}</div>', unsafe_allow_html=True)
+
+
+def _regime_subtable(regime_rows: list, evals: pd.DataFrame, subtitle: str) -> None:
+    st.markdown(f'<div class="term-root term-section">{escape(subtitle)}</div>', unsafe_allow_html=True)
+    st.markdown(_evaluation_caption(evals), unsafe_allow_html=True)
+    if not regime_rows:
+        _insufficient_data_note(calibration.MIN_SAMPLES)
+        return
+    headers = ["VARIABLE", "HORIZON", "REGIME", "SAMPLES", "MEAN ABS ERROR"]
+    rows = []
+    for r in regime_rows:
+        regime_color = {"Quiet": ACCENT, "Active": AMBER, "Storm": RED}.get(r["activity_regime"], MUTED)
+        rows.append([
+            f"<b>{escape(r['variable'].upper())}</b>",
+            r["horizon"],
+            f'<span style="color:{regime_color}; font-weight:700;">{escape(r["activity_regime"])}</span>',
+            str(r["sample_n"]),
+            f'<span class="num">{_fmt(r["mean_abs_error"], 3)}</span>',
+        ])
+    st.markdown(f'<div class="term-root">{_table(headers, rows, numeric_cols={3,4})}</div>', unsafe_allow_html=True)
+
+
+def _render_calibration_sections(headline_evals: pd.DataFrame, extended_evals: pd.DataFrame) -> None:
+    """Confidence calibration (is a "Very High" forecast actually more
+    reliable than a "Moderate" one?) and activity-regime error bands (is
+    accuracy worse specifically during storms, when it matters most?) —
+    see swdss.engine.calibration. Pure analysis over already-collected
+    evaluation history; neither result feeds back into how confidence or
+    activity regime are computed.
+
+    Confidence calibration is recomputed here directly on the headline/
+    extended split (rather than read pre-split from storage) because it
+    groups by confidence category, not by variable/horizon — splitting
+    it can't be done by filtering already-computed rows the way Skill
+    and Regime below can; it needs its own grouping pass per subset.
+    This is the same pure pandas aggregation swdss.engine.calibration
+    always does — nothing here recomputes a model or a forecast, exactly
+    like the Verified Forecasts table above already aggregates inline.
+    """
+    headline_confidence = calibration.compute_confidence_calibration(headline_evals)
+    extended_confidence = calibration.compute_confidence_calibration(extended_evals)
+
+    with st.expander(f"▸ Confidence Calibration ({len(headline_confidence) + len(extended_confidence)})", expanded=False):
+        st.markdown(
+            '<div class="term-root term-caption">A well-calibrated confidence score shows success rate '
+            "decreasing monotonically from Very High down to Low. A flat or inverted ordering means the "
+            "heuristic's weights (swdss.engine.confidence) don't track real accuracy and should be revisited.</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+        _confidence_subtable(headline_confidence, headline_evals, _OPERATIONAL_LABEL)
+        st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+        _confidence_subtable(extended_confidence, extended_evals, _EXTENDED_LABEL)
+
+    report = storage.load_calibration_report()
+    regime_rows_all = report.get("regime_error_bands") or []
+    headline_regime = [r for r in regime_rows_all if _is_headline(r["dataset"], r["variable"], r["horizon"])]
+    extended_regime = [r for r in regime_rows_all if not _is_headline(r["dataset"], r["variable"], r["horizon"])]
+
+    with st.expander(f"▸ Error by Activity Regime ({len(regime_rows_all)})", expanded=False):
+        st.markdown(
+            '<div class="term-root term-caption">The classic space-weather ML failure mode: a model that looks '
+            "strong on a quiet-time-dominated aggregate and degrades exactly when a storm makes the forecast "
+            "matter most. This segments already-observed error by regime — it never changes a model's training "
+            "or its dashboard-reported aggregate MAE.</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+        _regime_subtable(headline_regime, headline_evals, _OPERATIONAL_LABEL)
+        st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+        _regime_subtable(extended_regime, extended_evals, _EXTENDED_LABEL)
 
 
 # ==================== Logs ====================
@@ -918,6 +1162,11 @@ def _render_downloads_tab(snapshot: dict) -> None:
     evaluations = storage.load_evaluation_history()
     if not evaluations.empty:
         st.download_button("↓ FETCH evaluation_history.csv", data=evaluations.to_csv(index=False), file_name="evaluation_history.csv", mime="text/csv", key="dl_eval_csv")
+
+    st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+    st.markdown(f'<div class="term-root"><div class="term-section">Verification Science</div></div>', unsafe_allow_html=True)
+    _file_row("Skill Scores", storage.SKILL_SCORES_PATH, "JSON", "application/json")
+    _file_row("Calibration Report", storage.CALIBRATION_REPORT_PATH, "JSON", "application/json")
 
 
 # ==================== Alerts ====================

@@ -40,6 +40,23 @@ from swdss.physics.plasma import (
 WINDOW_HOURS = 48
 ROLLING_WINDOW = 24
 
+# The computed numeric physics quantities build_physics_snapshot produces
+# — deliberately excludes the derived *_label / overall_coupling string
+# fields below, since those are descriptive categorizations of the
+# numbers here, not independent inputs whose absence would represent a
+# genuine data gap. Kept as an explicit list (rather than introspecting
+# the returned dict's keys) so this module's own schema is the single
+# source of truth physics_completeness() checks against.
+PHYSICS_QUANTITY_KEYS = (
+    "dynamic_pressure", "clock_angle_deg", "clock_angle_rate", "vbz", "ey",
+    "newell_coupling", "akasofu_epsilon_watts", "boyle_index_kv",
+    "magnetic_pressure", "thermal_pressure", "plasma_beta", "alfven_speed",
+    "alfven_mach_number", "magnetic_shear", "imf_rotation_rate",
+    "southward_duration_hr", "strong_southward_duration_hr",
+    "integrated_southward_bz", "integrated_ey", "integrated_vbz",
+    "magnetopause_standoff_re", "estimated_compression_pct",
+)
+
 
 def _last(series):
     if series is None:
@@ -156,3 +173,16 @@ def build_physics_snapshot() -> dict:
     physics["overall_coupling"] = "Strong" if strong else ("Moderate" if moderate else "Weak")
 
     return physics
+
+
+def physics_completeness(physics: dict) -> dict:
+    """Reports the health of the COMPUTED physics, not just whether the
+    Physics Engine process ran — a quantity can be silently None (a
+    genuinely missing/NaN input propagated through, e.g. no dynamic
+    pressure because density was unavailable) even while build_physics_
+    snapshot() itself completes without raising. Returns
+    {available, total, missing: [names]} against PHYSICS_QUANTITY_KEYS.
+    """
+    missing = [key for key in PHYSICS_QUANTITY_KEYS if physics.get(key) is None]
+    total = len(PHYSICS_QUANTITY_KEYS)
+    return {"available": total - len(missing), "total": total, "missing": missing}

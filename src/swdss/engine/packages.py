@@ -135,7 +135,38 @@ def build_current_package(forecasts: dict, physics_summary: dict, outlook: dict,
         kp_carried_over = kp_generated < generated_at
 
     missing_variables = [v for v, e in members.items() if e is None]
+    variables_complete = len(HEADLINE_KEYS) - len(missing_variables)
     completeness = "COMPLETE" if not missing_variables else "PARTIALLY COMPLETE"
+
+    # The staleness bottleneck: the OLDEST "current" observation timestamp
+    # feeding any of the EIGHT fast-moving live-feed members (Solar Wind
+    # x3, IMF x4, Dst), not the newest. If NOAA is delayed on one of
+    # those, this is what tells an operator the package was built against
+    # data only current through — e.g. — 11:52 even though it was
+    # generated at 12:00.
+    #
+    # AE and Kp are both deliberately excluded, for the same underlying
+    # reason via two different mechanisms: AE has no live feed at all, so
+    # its "current" reading is always weeks-to-months stale by design.
+    # Kp DOES have a real feed, but only updates once per NOAA's official
+    # 3-hour interval — so its own current_observed_at is routinely 1-3h
+    # behind the minute-cadence feeds even when everything is perfectly
+    # healthy. Confirmed live in production: with Kp included, this field
+    # showed a 4-hour gap on a day when Solar Wind/IMF were both under 10
+    # minutes old — Kp's normal cadence was permanently setting the floor,
+    # which would silently mask a genuine delay on one of the fast feeds
+    # this field actually exists to catch. Excluding both keeps this
+    # field honestly about the thing it's meant to detect. Both AE's and
+    # Kp's own staleness are already reported honestly elsewhere — AE via
+    # evaluation_status's separate async line, Kp via its own carried-over
+    # flag and System tab freshness entry.
+    observed_timestamps = []
+    for variable, entry in members.items():
+        if variable in ("ae", "kp") or entry is None or not entry.get("current_observed_at"):
+            continue
+        ts = pd.Timestamp(entry["current_observed_at"])
+        observed_timestamps.append(ts.tz_localize("UTC") if ts.tzinfo is None else ts)
+    observations_used_through = min(observed_timestamps).isoformat() if observed_timestamps else None
 
     status = _package_lifecycle_status(valid_start, valid_end, core_members, now)
 
@@ -152,6 +183,9 @@ def build_current_package(forecasts: dict, physics_summary: dict, outlook: dict,
         "valid_end": valid_end.isoformat(),
         "status": status,
         "completeness": completeness,
+        "variables_complete": variables_complete,
+        "variables_total": len(HEADLINE_KEYS),
+        "observations_used_through": observations_used_through,
         "missing_variables": missing_variables,
         "kp_carried_over": kp_carried_over,
         "models_used": models_used,

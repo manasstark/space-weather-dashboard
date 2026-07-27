@@ -25,6 +25,14 @@ those are observed values, not a forecast product this module owns.
 - history/package_verification_history.parquet: one row per package,
   written once its core (non-AE) members are all verified — the
   permanent Package Verification Summary record.
+- current/skill_scores.json: swdss.engine.skill's persistence-based
+  skill score per (dataset, variable, horizon), recomputed every cycle
+  from the full evaluation history — Verification tab's "Forecast Skill
+  vs. Persistence" table.
+- current/calibration_report.json: swdss.engine.calibration's
+  confidence-reliability and activity-regime error-band tables,
+  recomputed every cycle from the full evaluation history —
+  Verification tab's calibration sections.
 """
 
 import json
@@ -41,6 +49,8 @@ ENGINE_LOG_PATH = FORECASTS_DIR / "logs" / "engine_log.jsonl"
 CURRENT_PACKAGE_PATH = FORECASTS_DIR / "current" / "forecast_package.json"
 PACKAGE_HISTORY_PATH = FORECASTS_DIR / "history" / "package_history.parquet"
 PACKAGE_VERIFICATION_HISTORY_PATH = FORECASTS_DIR / "history" / "package_verification_history.parquet"
+SKILL_SCORES_PATH = FORECASTS_DIR / "current" / "skill_scores.json"
+CALIBRATION_REPORT_PATH = FORECASTS_DIR / "current" / "calibration_report.json"
 
 MAX_LOG_LINES = 5000
 
@@ -197,6 +207,9 @@ def append_package_history_row(package: dict) -> int:
         "valid_end": package["valid_end"],
         "status": package["status"],
         "completeness": package["completeness"],
+        "variables_complete": package.get("variables_complete"),
+        "variables_total": package.get("variables_total"),
+        "observations_used_through": package.get("observations_used_through"),
         "evaluation_status": package["evaluation_status"],
         "overall_confidence_score": package["overall_confidence"]["score"],
         "overall_confidence_category": package["overall_confidence"]["category"],
@@ -241,6 +254,42 @@ def append_package_verification_row(row: dict) -> None:
     else:
         combined = new_df
     combined.to_parquet(PACKAGE_VERIFICATION_HISTORY_PATH, index=False)
+
+
+def write_skill_scores(rows: list) -> None:
+    """Always-overwritten, like write_current_package — skill.py
+    recomputes this from the FULL evaluation history every cycle, so
+    there is no incremental state to preserve between writes."""
+    _ensure_parent(SKILL_SCORES_PATH)
+    tmp_path = SKILL_SCORES_PATH.with_suffix(".json.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(rows, f, indent=2, default=str)
+    os.replace(tmp_path, SKILL_SCORES_PATH)
+
+
+def load_skill_scores() -> list:
+    if not SKILL_SCORES_PATH.exists():
+        return []
+    with open(SKILL_SCORES_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def write_calibration_report(confidence_calibration: list, regime_error_bands: list) -> None:
+    """Always-overwritten — same recompute-from-full-history pattern as
+    write_skill_scores."""
+    _ensure_parent(CALIBRATION_REPORT_PATH)
+    report = {"confidence_calibration": confidence_calibration, "regime_error_bands": regime_error_bands}
+    tmp_path = CALIBRATION_REPORT_PATH.with_suffix(".json.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, default=str)
+    os.replace(tmp_path, CALIBRATION_REPORT_PATH)
+
+
+def load_calibration_report() -> dict:
+    if not CALIBRATION_REPORT_PATH.exists():
+        return {"confidence_calibration": [], "regime_error_bands": []}
+    with open(CALIBRATION_REPORT_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def load_package_verification_history() -> pd.DataFrame:

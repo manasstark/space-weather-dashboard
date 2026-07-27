@@ -2,13 +2,23 @@
 
 run_forecast_cycle(): ensures a job exists for every (dataset, variable,
 horizon) in matrix.PRODUCTION_MATRIX — this is what removes the "must
-click Start Prediction" requirement. Uses jobs.has_active_job() as a
-cheap precheck so the expensive jobs.start_job() (which always calls
-predict_live first) only runs when nothing is already tracking that
-combination. Because a new job is only created once the previous one
-completes, this already gives each (dataset, variable, horizon) a
-natural forecast cycle paced by its own horizon — a 1h job cycles about
-hourly, a 24h job about daily.
+click Start Prediction" requirement. For every horizon EXCEPT 1,
+jobs.has_active_job() is used as a cheap precheck so the expensive
+jobs.start_job() (which always calls predict_live first) only runs when
+nothing is already tracking that combination — a new job there is only
+created once the previous one completes, giving each of those a natural
+forecast cycle paced by its own horizon (a 6h job cycles about every 6
+hours, a 24h job about daily).
+
+Horizon-1 jobs (which includes Kp's interval job, tracked at horizon=1
+in jobs.py) are deliberately NOT gated this way: issuing the next hour's
+forecast must never wait on the previous hour's still being evaluated,
+or the wall-clock hour that gap falls in silently never gets its own
+forecast. So the precheck is skipped for horizon==1 — start_job is
+always attempted, and its own target-hour-keyed dedup (see
+jobs.start_job's continuous_reissue branch) is what prevents duplicates,
+while deliberately allowing a not-yet-evaluated job and a freshly issued
+one to coexist briefly.
 
 evaluate_due_forecasts(): a thin, documented wrapper around
 jobs.tick_all_active_jobs() — kept separate purely for API symmetry
@@ -43,14 +53,14 @@ import traceback
 
 import pandas as pd
 
-from swdss.engine import explanation, packages, storage
+from swdss.engine import calibration, explanation, packages, skill, storage
 from swdss.engine.alerts import build_alerts
 from swdss.engine.confidence import score_forecast_confidence
 from swdss.engine.drift import detect_drift
 from swdss.engine.labels import classify_current_reading
 from swdss.engine.matrix import PRODUCTION_MATRIX
 from swdss.engine.outlook import classify_activity_regime, classify_overall_outlook
-from swdss.engine.physics_snapshot import build_physics_snapshot
+from swdss.engine.physics_snapshot import PHYSICS_QUANTITY_KEYS, build_physics_snapshot, physics_completeness
 from swdss.models import jobs as jobs_module
 from swdss.models import predict
 from swdss.models.jobs import (
@@ -59,6 +69,7 @@ from swdss.models.jobs import (
     get_running_jobs,
     has_active_job,
     prune_old_engine_jobs,
+    resolve_actual_value,
     stability_metric,
     start_job,
 )
@@ -91,11 +102,16 @@ CURRENT_CONDITIONS_SOURCES = {
     "ae": ("ae", "ae"),
 }
 
-# Variables shown as a range (predicted_value ± the model's own held-out
-# MAE) rather than a single precise decimal — the two the brief singles
-# out as higher-uncertainty. MAE is a real, already-computed number (the
-# model's own typical error), not a fabricated interval.
-RANGE_VARIABLES = {"bz_gsm", "kp"}
+# Every headline variable is shown as a range (predicted_value ± the
+# model's own held-out MAE) rather than a single over-precise decimal —
+# a point forecast with no uncertainty band is scientifically incomplete
+# for an operational product, and the MAE is already a real, computed
+# number (the model's own typical error) sitting in every model's
+# metrics.json, not a fabricated interval invented for display.
+RANGE_VARIABLES = {
+    "speed", "density", "temperature", "bt", "bx_gsm", "by_gsm", "bz_gsm",
+    "dst", "kp", "ae",
+}
 
 _metrics_cache = {}
 
@@ -135,7 +151,13 @@ def run_forecast_cycle() -> dict:
 
         for horizon in job_horizons:
             try:
-                if has_active_job(dataset, variable, horizon, source="engine"):
+                # horizon==1 re-issues continuously (see module docstring
+                # and jobs.start_job's continuous_reissue branch) — the
+                # precheck would otherwise block a new hour's job from
+                # starting just because the previous hour's is still
+                # waiting to be evaluated, which is exactly the gap this
+                # is meant to close.
+                if horizon != 1 and has_active_job(dataset, variable, horizon, source="engine"):
                     skipped += 1
                     continue
                 job, created = start_job(dataset, variable, horizon, source="engine")
@@ -199,6 +221,28 @@ def _lifecycle_status(job_status: str, actual_value, valid_start: pd.Timestamp, 
     return "LIVE" if now < valid_start else "ACTIVE"
 
 
+def _resolve_persistence_anchor(dataset: str, variable: str, created_at):
+    """The naive "persistence" forecast's input: the last known hourly-
+    mean observation at/before the job's own creation time — i.e. "what
+    if we'd just assumed nothing changes between now and the target
+    hour." Reuses jobs.resolve_actual_value's existing hourly-mean
+    lookup (identical mechanics — an observed value at a given hour) at
+    the issuance timestamp instead of the target timestamp, rather than
+    adding a second lookup path.
+
+    AE always returns None: it has no live feed (swdss.models.registry's
+    static_variables), so there is no real "value known at issuance" to
+    persist from — a persistence baseline is scientifically meaningless
+    for it, not merely unavailable.
+    """
+    if dataset == "ae" or created_at is None:
+        return None
+    try:
+        return resolve_actual_value(dataset, variable, created_at)
+    except Exception:
+        return None
+
+
 def _trend_word(variable: str, current_value, predicted_value) -> str:
     if current_value is None or predicted_value is None:
         return "—"
@@ -210,7 +254,17 @@ def _trend_word(variable: str, current_value, predicted_value) -> str:
     return "Increasing" if delta > 0 else "Decreasing"
 
 
-def _build_forecast_entry(dataset: str, variable: str, horizon, job: dict, trend_history: list, current_value, current_observed_at) -> dict:
+def _build_forecast_entry(
+    dataset: str,
+    variable: str,
+    horizon,
+    job: dict,
+    trend_history: list,
+    current_value,
+    current_observed_at,
+    current_regime=None,
+    regime_mae_lookup: dict = None,
+) -> dict:
     if job is None:
         return None
 
@@ -244,9 +298,26 @@ def _build_forecast_entry(dataset: str, variable: str, horizon, job: dict, trend
     abs_error = abs(predicted_value - actual_value) if predicted_value is not None and actual_value is not None else None
     delta = (predicted_value - current_value) if predicted_value is not None and current_value is not None else None
 
-    range_low = range_high = None
+    range_low = range_high = range_source = None
     if variable in RANGE_VARIABLES and predicted_value is not None:
-        mae = metrics.get("mae")
+        # Prefer the CURRENT activity regime's own historical MAE (Quiet/
+        # Active/Storm — see swdss.engine.calibration.compute_regime_error_
+        # bands) over the model's single all-time MAE, which is quiet-
+        # dominated and understates the real error band whenever conditions
+        # are actually active or stormy (see Storm Backtest findings in
+        # README's Known Limitations). Falls back to the all-time MAE
+        # whenever there isn't yet a MIN_SAMPLES-worthy regime-specific
+        # history to draw from — regime_mae_lookup simply has no entry for
+        # that case, so this never guesses off a handful of points.
+        horizon_label = f"{horizon}h" if isinstance(horizon, int) else horizon
+        mae = None
+        if current_regime is not None and regime_mae_lookup is not None:
+            mae = regime_mae_lookup.get((dataset, variable, horizon_label, current_regime))
+            if mae is not None:
+                range_source = current_regime
+        if mae is None:
+            mae = metrics.get("mae")
+            range_source = "All-Time"
         if mae is not None:
             range_low, range_high = predicted_value - mae, predicted_value + mae
 
@@ -271,6 +342,7 @@ def _build_forecast_entry(dataset: str, variable: str, horizon, job: dict, trend
         "predicted_value": predicted_value,
         "range_low": range_low,
         "range_high": range_high,
+        "range_source": range_source,
         "delta": delta,
         "trend": _trend_word(variable, current_value, predicted_value),
         "model_name": job["model_name"],
@@ -290,6 +362,20 @@ def _build_forecast_entry(dataset: str, variable: str, horizon, job: dict, trend
     return entry
 
 
+def _format_age(age_minutes: float) -> str:
+    """Minutes for anything under an hour, hours under a day, and days
+    beyond that — AE's Kyoto WDC lag genuinely runs to months in this
+    project, and reporting that as "4728.0 hr old" is unreadable and
+    actively hides how stale the source is from an operator glancing at
+    the System tab.
+    """
+    if age_minutes < 60:
+        return f"{age_minutes:.1f} min old"
+    if age_minutes < 1440:
+        return f"{age_minutes / 60:.1f} hr old"
+    return f"{age_minutes / 1440:.1f} days old"
+
+
 def _freshness() -> dict:
     result = {}
     for name, (dataset, variable, max_age) in FRESHNESS_CHECKS.items():
@@ -305,7 +391,7 @@ def _freshness() -> dict:
             ts = ts.tz_localize("UTC")
         age_minutes = (_now() - ts).total_seconds() / 60
         status = "Fresh" if age_minutes <= max_age else "Stale"
-        age_text = f"{age_minutes:.1f} min old" if age_minutes < 60 else f"{age_minutes / 60:.1f} hr old"
+        age_text = _format_age(age_minutes)
         result[name] = {"status": status, "age": age_text, "age_minutes": age_minutes}
     return result
 
@@ -332,7 +418,7 @@ def _current_conditions() -> dict:
     return conditions
 
 
-def _service_health(freshness: dict, run_forecast_cycle_errors: int, active_jobs_total: int) -> list:
+def _service_health(freshness: dict, run_forecast_cycle_errors: int, active_jobs_total: int, physics_summary: dict) -> list:
     """Returns a flat list of {name, status, detail} rows for the System
     tab's service table — Forecast Engine / Physics Engine / NOAA /
     Kyoto / DONKI / Database / Scheduler.
@@ -345,7 +431,21 @@ def _service_health(freshness: dict, run_forecast_cycle_errors: int, active_jobs
         "status": "RUNNING" if engine_ok else "DEGRADED",
         "detail": f"{run_forecast_cycle_errors} error(s) last cycle" if not engine_ok else f"{active_jobs_total} job(s) tracked",
     })
-    rows.append({"name": "Physics Engine", "status": "RUNNING", "detail": "Descriptive only, no model dependency"})
+
+    # Reports on the HEALTH of the computed physics, not just whether the
+    # engine process ran — a quantity can be silently None (e.g. no
+    # dynamic pressure because density was unavailable) even while
+    # build_physics_snapshot() itself completes without raising.
+    completeness = physics_completeness(physics_summary) if physics_summary else {"available": 0, "total": len(PHYSICS_QUANTITY_KEYS), "missing": list(PHYSICS_QUANTITY_KEYS)}
+    physics_ok = completeness["available"] == completeness["total"]
+    if physics_ok:
+        physics_detail = f"Complete — {completeness['available']}/{completeness['total']} variables"
+    else:
+        missing_preview = ", ".join(completeness["missing"][:3])
+        if len(completeness["missing"]) > 3:
+            missing_preview += f", +{len(completeness['missing']) - 3} more"
+        physics_detail = f"{completeness['available']}/{completeness['total']} variables — missing {missing_preview}"
+    rows.append({"name": "Physics Engine", "status": "RUNNING" if physics_ok else "DEGRADED", "detail": physics_detail})
 
     noaa_ok = freshness.get("solar_wind", {}).get("status") == "Fresh" and freshness.get("imf", {}).get("status") == "Fresh"
     rows.append({
@@ -390,7 +490,35 @@ def _service_health(freshness: dict, run_forecast_cycle_errors: int, active_jobs
 
 
 def refresh_dashboard_products() -> dict:
+    # ==================== Stage 1: Per-Variable Forecast Entries ====================
+    # Walks PRODUCTION_MATRIX, building the live `forecasts` tree (what
+    # the Forecast tab displays), the permanent `history_rows` log
+    # (Search/Timeline/Downloads), and `evaluation_rows` for any job that
+    # completed this cycle (Verification/Skill/Calibration).
     current_conditions = _current_conditions()
+
+    # Current activity regime, from OBSERVED conditions right now (not a
+    # prediction) — used below to pick a storm/quiet-appropriate error band
+    # per forecast, instead of one all-time MAE. classify_activity_regime
+    # is purely a numeric bucketing function; feeding it live observations
+    # rather than a forecast is a deliberate, simpler choice than waiting
+    # for this cycle's own predicted_kp/dst/ae (only known once every
+    # forecast entry below has already been built) — see Development
+    # Roadmap for why this was chosen over a two-pass restructure.
+    current_regime = classify_activity_regime(
+        predicted_kp=current_conditions.get("kp", {}).get("value"),
+        predicted_dst=current_conditions.get("dst", {}).get("value"),
+        predicted_ae=current_conditions.get("ae", {}).get("value"),
+    )
+
+    # Pre-this-cycle evaluation history — same "one cycle stale is fine"
+    # reasoning already used by the drift check below, which reuses this
+    # exact same load rather than reading the file twice for the same data.
+    evaluation_history_before_cycle = storage.load_evaluation_history()
+    regime_mae_lookup = {
+        (row["dataset"], row["variable"], row["horizon"], row["activity_regime"]): row["mean_abs_error"]
+        for row in calibration.compute_regime_error_bands(evaluation_history_before_cycle)
+    }
 
     forecasts = {"solar_wind": {}, "imf": {}, "analytics": {}, "ae": {}}
     history_rows = []
@@ -433,57 +561,114 @@ def refresh_dashboard_products() -> dict:
             job = active[0] if active else (candidates[0] if candidates else None)
 
             horizon_label = f"{semantic_horizon}h" if isinstance(semantic_horizon, int) else semantic_horizon
-            entry = _build_forecast_entry(dataset, variable, semantic_horizon, job, trend, current_value, current_observed_at)
+            entry = _build_forecast_entry(
+                dataset, variable, semantic_horizon, job, trend, current_value, current_observed_at,
+                current_regime, regime_mae_lookup,
+            )
             variable_block[horizon_label] = entry
 
-            if entry is not None:
+            # Build (and log/evaluate) an entry for EVERY candidate this
+            # cycle, not just the one selected above for the Forecast
+            # tab's display — see jobs.start_job's continuous_reissue
+            # note. Each candidate has its own distinct valid_start, so
+            # logging all of them creates no ambiguity for readers like
+            # the Search tab (already dedupes by (horizon, valid_start),
+            # keeping the latest logged state for each) — it just means a
+            # completed-but-superseded job actually gets a log entry
+            # reflecting its TRUE final state and gets properly
+            # evaluated, instead of being silently frozen forever at
+            # whatever it looked like the cycle before a newer job took
+            # over as the display representative.
+            #
+            # This was a real, confirmed regression, not a hypothetical:
+            # once continuous re-issue guarantees there's always a newer
+            # ACTIVE job for a 1h/interval slot, `job` above is always
+            # bound to that active one — so checking only `job` meant a
+            # completed candidate's `job_status == "completed"` could
+            # never be seen here again. Confirmed live two ways: (1) the
+            # Search tab showing a fully-elapsed 1h Speed forecast still
+            # frozen at [ACTIVE] / actual=— even though its real
+            # completed value already existed in the jobs table, and (2)
+            # querying the jobs table directly showed ALL 10 of a single
+            # day's completed 1h Speed jobs had a real actual_value with
+            # zero of them ever evaluated.
+            for candidate in candidates:
+                candidate_entry = entry if candidate is job else _build_forecast_entry(
+                    dataset, variable, semantic_horizon, candidate, trend, current_value, current_observed_at,
+                    current_regime, regime_mae_lookup,
+                )
+                if candidate_entry is None:
+                    continue
+
                 history_rows.append({
                     "generated_at": generated_at,
                     "dataset": dataset,
                     "variable": variable,
                     "horizon": horizon_label,
-                    "job_id": entry["job_id"],
-                    "status": entry["status"],
-                    "job_status": entry["job_status"],
-                    "valid_start": entry["valid_start"],
-                    "valid_end": entry["valid_end"],
-                    "current_value": entry["current_value"],
-                    "predicted_value": entry["predicted_value"],
-                    "model_name": entry["model_name"],
-                    "r2": entry["metrics"].get("r2"),
-                    "mae": entry["metrics"].get("mae"),
-                    "confidence_score": entry["confidence"]["score"],
-                    "confidence_category": entry["confidence"]["category"],
-                    "actual_value": entry["actual_value"],
-                    "abs_error": entry["abs_error"],
+                    "job_id": candidate_entry["job_id"],
+                    "status": candidate_entry["status"],
+                    "job_status": candidate_entry["job_status"],
+                    "valid_start": candidate_entry["valid_start"],
+                    "valid_end": candidate_entry["valid_end"],
+                    "current_value": candidate_entry["current_value"],
+                    "predicted_value": candidate_entry["predicted_value"],
+                    "model_name": candidate_entry["model_name"],
+                    "r2": candidate_entry["metrics"].get("r2"),
+                    "mae": candidate_entry["metrics"].get("mae"),
+                    "confidence_score": candidate_entry["confidence"]["score"],
+                    "confidence_category": candidate_entry["confidence"]["category"],
+                    "actual_value": candidate_entry["actual_value"],
+                    "abs_error": candidate_entry["abs_error"],
                 })
 
-                if entry["job_status"] == "completed" and entry["actual_value"] is not None and entry["job_id"] not in already_evaluated:
-                    signed_error = entry["predicted_value"] - entry["actual_value"]
-                    evaluation_rows.append({
-                        "job_id": entry["job_id"],
-                        "dataset": dataset,
-                        "variable": variable,
-                        "horizon": horizon_label,
-                        "valid_start": entry["valid_start"],
-                        "valid_end": entry["valid_end"],
-                        "completed_at": job.get("completed_at"),
-                        "final_predicted_value": entry["predicted_value"],
-                        "actual_value": entry["actual_value"],
-                        "error": signed_error,
-                        "abs_error": entry["abs_error"],
-                        "squared_error": signed_error ** 2,
-                        "model_name": entry["model_name"],
-                        "confidence_score_at_issuance": entry["confidence"]["score"],
-                        "confidence_category_at_issuance": entry["confidence"]["category"],
-                        # The model's own held-out training MAE — drift.detect_drift
-                        # compares recent live abs_error against this. Activity
-                        # regime is filled in below, once this cycle's overall
-                        # Kp/Dst/AE outlook is known — see the tagging pass after
-                        # this loop.
-                        "training_mae": entry["metrics"].get("mae"),
-                        "activity_regime": None,
-                    })
+                if candidate["status"] != "completed" or candidate_entry["actual_value"] is None:
+                    continue
+                if candidate["job_id"] in already_evaluated:
+                    continue
+                if candidate_entry["predicted_value"] is None:
+                    continue
+
+                signed_error = candidate_entry["predicted_value"] - candidate_entry["actual_value"]
+
+                # Persistence skill score input — see swdss.engine.skill.
+                # Resolved once, here, at evaluation time (not every
+                # cycle) since it never changes once a job is created.
+                persistence_value = _resolve_persistence_anchor(dataset, variable, candidate.get("created_at"))
+                persistence_error = (
+                    candidate_entry["actual_value"] - persistence_value if persistence_value is not None else None
+                )
+
+                evaluation_rows.append({
+                    "job_id": candidate_entry["job_id"],
+                    "dataset": dataset,
+                    "variable": variable,
+                    "horizon": horizon_label,
+                    "valid_start": candidate_entry["valid_start"],
+                    "valid_end": candidate_entry["valid_end"],
+                    "completed_at": candidate.get("completed_at"),
+                    "final_predicted_value": candidate_entry["predicted_value"],
+                    "actual_value": candidate_entry["actual_value"],
+                    "error": signed_error,
+                    "abs_error": candidate_entry["abs_error"],
+                    "squared_error": signed_error ** 2,
+                    "model_name": candidate_entry["model_name"],
+                    "confidence_score_at_issuance": candidate_entry["confidence"]["score"],
+                    "confidence_category_at_issuance": candidate_entry["confidence"]["category"],
+                    # The model's own held-out training MAE — drift.detect_drift
+                    # compares recent live abs_error against this. Activity
+                    # regime is filled in below, once this cycle's overall
+                    # Kp/Dst/AE outlook is known — see the tagging pass after
+                    # this loop.
+                    "training_mae": candidate_entry["metrics"].get("mae"),
+                    "activity_regime": None,
+                    # Persistence baseline (see swdss.engine.skill) — the
+                    # naive "assume no change" forecast's own error at
+                    # this exact event. None for AE (no live feed) or
+                    # if the issuance hour's actual isn't resolvable.
+                    "persistence_value": persistence_value,
+                    "persistence_abs_error": abs(persistence_error) if persistence_error is not None else None,
+                    "persistence_squared_error": persistence_error ** 2 if persistence_error is not None else None,
+                })
 
             is_headline = semantic_horizon == "interval" or semantic_horizon == 1
             if is_headline and entry is not None:
@@ -494,6 +679,7 @@ def refresh_dashboard_products() -> dict:
                 elif dataset == "ae" and variable == "ae":
                     predicted_ae = entry["predicted_value"]
 
+    # ==================== Stage 2: Physics & Overall Outlook ====================
     try:
         physics_summary = build_physics_snapshot()
     except Exception:
@@ -515,14 +701,17 @@ def refresh_dashboard_products() -> dict:
     for row in evaluation_rows:
         row["activity_regime"] = activity_regime
 
+    # ==================== Stage 3: Freshness, Alerts & Drift ====================
     freshness = _freshness()
     alerts = build_alerts(outlook_level=outlook_level, physics=physics_summary, freshness=freshness)
 
     # Drift check against ALREADY-persisted history (this cycle's brand
     # new evaluation_rows haven't been written yet) — a one-cycle lag is
     # irrelevant for a signal that's inherently about a sustained trend.
+    # Reuses the same pre-cycle load already fetched above for the regime
+    # error-band lookup, rather than reading the same file twice.
     try:
-        drift_alerts = detect_drift(storage.load_evaluation_history())
+        drift_alerts = detect_drift(evaluation_history_before_cycle)
     except Exception:
         drift_alerts = []
         traceback.print_exc()
@@ -536,13 +725,14 @@ def refresh_dashboard_products() -> dict:
             recent_cycle_errors += 1
             if not recent_run_cycle_errors:
                 recent_run_cycle_errors = log.get("errors") or []
-    system_health = _service_health(freshness, recent_cycle_errors, active_jobs_total)
+    system_health = _service_health(freshness, recent_cycle_errors, active_jobs_total, physics_summary)
 
-    # Forecast Explanation Engine — connects the Physics Engine's live
-    # readings to the Kp/Dst/AE forecasts they drive (see
-    # swdss.engine.explanation). Attached directly onto each headline
-    # entry so the Forecast tab can show "why" alongside "what", rather
-    # than leaving Physics and Forecast as isolated views.
+    # ==================== Stage 4: Forecast Explanation Engine ====================
+    # Connects the Physics Engine's live readings to the Kp/Dst/AE
+    # forecasts they drive (see swdss.engine.explanation). Attached
+    # directly onto each headline entry so the Forecast tab can show
+    # "why" alongside "what", rather than leaving Physics and Forecast
+    # as isolated views.
     headline_entries = {
         "kp": forecasts.get("analytics", {}).get("kp", {}).get("interval"),
         "dst": forecasts.get("analytics", {}).get("dst", {}).get("1h"),
@@ -557,6 +747,7 @@ def refresh_dashboard_products() -> dict:
         explanations = {}
         traceback.print_exc()
 
+    # ==================== Stage 5: Assemble the Snapshot ====================
     completed_at = _now_iso()
     snapshot = {
         "generated_at": completed_at,
@@ -571,10 +762,10 @@ def refresh_dashboard_products() -> dict:
         "active_jobs_total": active_jobs_total,
     }
 
-    # Forecast Package — the synchronized operational product bundling
-    # the 10 headline forecasts (see swdss.engine.packages). Pure
-    # re-packaging of what was just computed above; starts no job, calls
-    # no model.
+    # ==================== Stage 6: Forecast Package ====================
+    # The synchronized operational product bundling the 10 headline
+    # forecasts (see swdss.engine.packages). Pure re-packaging of what
+    # was just computed above; starts no job, calls no model.
     try:
         package = packages.build_current_package(
             forecasts, physics_summary, {"level": outlook_level, "reasoning": outlook_reasoning},
@@ -591,9 +782,27 @@ def refresh_dashboard_products() -> dict:
     except Exception:
         traceback.print_exc()
 
+    # ==================== Stage 7: Persist History & Verification Science ====================
     storage.write_snapshot(snapshot)
     storage.append_forecast_history_rows(history_rows)
     storage.append_evaluation_rows(evaluation_rows)
+
+    # Verification science — skill.py and calibration.py are pure
+    # analysis over the FULL evaluation history (including the rows just
+    # appended above, unlike drift's deliberate one-cycle lag), so both
+    # are recomputed from scratch every cycle rather than maintained
+    # incrementally. Cheap: evaluation_history is small (one row per
+    # completed forecast) even after months of continuous operation.
+    try:
+        full_history = storage.load_evaluation_history()
+        storage.write_skill_scores(skill.compute_skill_scores(full_history))
+        storage.write_calibration_report(
+            calibration.compute_confidence_calibration(full_history),
+            calibration.compute_regime_error_bands(full_history),
+        )
+    except Exception:
+        traceback.print_exc()
+
     storage.append_log_lines([{
         "ts": completed_at,
         "level": "INFO",

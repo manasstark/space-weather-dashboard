@@ -99,6 +99,8 @@ ANALYTICS_INPUT_VARIABLES = ["speed", "density", "temperature", "bt", "bx_gsm", 
 AE_INPUT_VARIABLES = SOLAR_WIND_VARIABLES + IMF_VARIABLES
 
 
+# ==================== Database Setup ====================
+
 @contextmanager
 def _connect():
     """Every call commits and immediately checkpoint-truncates the WAL back
@@ -246,6 +248,8 @@ def _ensure_column(conn, table: str, column: str, decl: str) -> None:
 _init_db()
 
 
+# ==================== Internal Row/Tick Helpers ====================
+
 def _to_utc_iso(ts) -> str:
     ts = pd.Timestamp(ts)
     ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
@@ -389,10 +393,13 @@ def _tick_reference_variable(dataset: str, variable: str) -> str:
     return "speed" if dataset in ("analytics", "ae", "experimental") else variable
 
 
+# ==================== Job Lifecycle Core ====================
+
 def start_job(dataset: str, variable: str, horizon: int, source: str = "manual") -> tuple:
     """Starts a new continuous prediction job, or returns the existing one
-    if a job for this exact (dataset, variable, horizon, start_hour) is
-    already in progress.
+    if a job for this exact slot is already tracked (see the dedup
+    branches below — the definition of "already tracked" differs for
+    continuously-reissued engine jobs vs. everything else).
 
     `source` is 'manual' (a user's own "Start Prediction" click — the
     default, so every existing call site needs no change) or 'engine'
@@ -408,7 +415,19 @@ def start_job(dataset: str, variable: str, horizon: int, source: str = "manual")
     happened to resolve (up to 24h for the slowest horizon), which is
     a far worse outcome than the rare extra prediction call.
 
-    Returns (job, created) where created=False signals a duplicate.
+    CONTINUOUS RE-ISSUE (engine, horizon == 1 — this includes Kp's
+    interval job, which is tracked at horizon=1 in this table): issuing
+    the next forecast must never wait on the previous one being
+    evaluated. Chaining "start a new job only once the old one
+    completes" means the new job's target hour is decided by whenever
+    evaluation happens to finish, not by the wall clock — which silently
+    skips whichever hour falls in that gap. So for this case, dedup is
+    keyed on the exact target_hour (regardless of the existing job's
+    status) rather than on "is anything still in_progress": a job for
+    12:00-13:00 that's still waiting to be evaluated and a freshly
+    issued job for 13:00-14:00 are expected to coexist briefly, not be
+    serialized. Every other case (manual jobs, and engine jobs at every
+    other horizon) keeps the original in_progress-based dedup.
     """
     is_kp_interval_job = dataset in ("analytics", "experimental") and variable == "kp"
     # For Kp, predict_live/predict_kp_interval returns the FROZEN Mode 1
@@ -418,12 +437,20 @@ def start_job(dataset: str, variable: str, horizon: int, source: str = "manual")
     # just its one and only prediction, same as always.
     result = predict_live(dataset, variable, horizon)
     start_hour_iso = _to_utc_iso(result["observed_at"])
+    target_hour_iso = _to_utc_iso(result["predicted_for"])
+    continuous_reissue = source == "engine" and horizon == 1
 
     with _connect() as conn:
-        existing = conn.execute(
-            "SELECT * FROM jobs WHERE dataset=? AND variable=? AND horizon=? AND start_hour=? AND status='in_progress' AND source=?",
-            (dataset, variable, horizon, start_hour_iso, source),
-        ).fetchone()
+        if continuous_reissue:
+            existing = conn.execute(
+                "SELECT * FROM jobs WHERE dataset=? AND variable=? AND horizon=? AND target_hour=? AND source=?",
+                (dataset, variable, horizon, target_hour_iso, source),
+            ).fetchone()
+        else:
+            existing = conn.execute(
+                "SELECT * FROM jobs WHERE dataset=? AND variable=? AND horizon=? AND start_hour=? AND status='in_progress' AND source=?",
+                (dataset, variable, horizon, start_hour_iso, source),
+            ).fetchone()
         if existing is not None:
             job = _row_to_job(existing)
             job["ticks"] = _fetch_ticks(conn, job["job_id"])
@@ -458,7 +485,7 @@ def start_job(dataset: str, variable: str, horizon: int, source: str = "manual")
                 variable,
                 horizon,
                 start_hour_iso,
-                _to_utc_iso(result["predicted_for"]),
+                target_hour_iso,
                 result["model_name"],
                 json.dumps(result["metrics"]),
                 "in_progress",
@@ -508,6 +535,11 @@ def _finalize_job(conn, job_row: sqlite3.Row, actual_value: float) -> None:
         (actual_value, _to_utc_iso(pd.Timestamp.now(tz="UTC")), job_row["job_id"]),
     )
 
+
+# ==================== AE Quicklook Verification ====================
+# Approximate, image-based cross-check against Kyoto WDC's real-time
+# graph — never the official verification source (see resolve_actual_value
+# / the official Kyoto digital AE ingest for that). Purely additive.
 
 def _capture_quicklook_estimate(conn, job_id: str, target_hour) -> None:
     """Quicklook Verification (AE only): an approximate, image-based
@@ -572,6 +604,13 @@ def refresh_quicklook_estimate(job_id: str) -> dict:
             _capture_quicklook_estimate(conn, job_id, pd.Timestamp(row["target_hour"]))
     return get_job(job_id)
 
+
+# ==================== Job Advancement (Ticking) ====================
+# The state machine every active job moves through each cycle:
+# in_progress (refining) -> evaluating (target hour reached, awaiting
+# actual) -> completed. poll_jobs is the per-dataset entry point;
+# tick_all_active_jobs (bottom of this file) is the public one called
+# once per live_update.py loop.
 
 def _advance_predicting(conn, job_row: sqlite3.Row) -> None:
     """Phase 1 (status='in_progress'): refine the forecast for the fixed
@@ -908,6 +947,13 @@ def poll_jobs(dataset: str) -> None:
         _auto_refresh_quicklook_jobs(conn, dataset)
 
 
+# ==================== Job Querying ====================
+# Read-only lookups the dashboard and the Operational Forecast Engine
+# both call — the `source` parameter throughout this section is what
+# keeps a user's manually-started jobs and the engine's own automatic
+# ones from crowding each other out (see the `source` column's own note
+# in _init_db).
+
 def get_running_jobs(dataset: str, limit: int = JOB_HISTORY_LIMIT, source: str | None = "manual") -> list[dict]:
     """Returns this dataset's non-saved jobs (in-progress or completed but
     never saved), newest first, capped at `limit` — except for
@@ -1024,6 +1070,8 @@ def has_active_job(dataset: str, variable: str, horizon: int, source: str = "eng
         return row is not None
 
 
+# ==================== Job Management ====================
+
 def save_job(job_id: str) -> bool:
     with _connect() as conn:
         cur = conn.execute("UPDATE jobs SET saved=1 WHERE job_id=?", (job_id,))
@@ -1081,6 +1129,11 @@ def stop_job(job_id: str) -> bool:
         )
         return cur.rowcount > 0
 
+
+# ==================== Statistics & Metrics ====================
+# Read-only aggregation over already-stored job data — accuracy labels,
+# stability/drift metrics, and dataset-wide statistics panels. Nothing
+# below this point writes to the database.
 
 def job_mae(job: dict) -> float:
     if job["actual_value"] is None or not job["ticks"]:
@@ -1523,6 +1576,8 @@ def compute_variable_metrics(dataset: str, variable: str) -> dict:
         "errors": errors.tolist(),
     }
 
+
+# ==================== Public Entry Point ====================
 
 def tick_all_active_jobs() -> None:
     """Advance every active prediction job across all datasets.

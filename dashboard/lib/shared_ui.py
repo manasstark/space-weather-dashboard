@@ -235,22 +235,55 @@ def style_top_nav() -> None:
     currently-selected page is detected via the CSS :has()/:checked
     combinator rather than any Streamlit-internal class name, since
     those are auto-generated and not a stable thing to depend on.
+
+    The dark-blue background lives on the OUTER topnav container (not
+    just the radiogroup) so the page links and the Refresh/Concepts/
+    References buttons — laid out as siblings in home.py via st.columns
+    inside this same container — read as one continuous bar, matching a
+    traditional website's combined nav-and-actions header row, rather
+    than a colored nav strip with mismatched white buttons floating next
+    to it (2026-07 sticky-header redesign — see style_sticky_header).
     """
     st.markdown(
         """
         <style>
-        div[class*="st-key-topnav"] div[data-testid="stRadio"] > div[role="radiogroup"] {
+        div[class*="st-key-topnav"] {
             background:#0a2a5e;
-            display:flex;
-            flex-wrap:wrap;
-            gap:0;
             padding:0 8px;
+        }
+        /* stColumn defaults to min-width:auto (a standard flexbox gotcha),
+        so it refuses to shrink below its content's natural width — the
+        actual cause of the nav bleeding into the buttons' column despite
+        every content-size reduction above. Forcing min-width:0 here lets
+        the column honor its intended fractional width, which is what
+        makes the inner overflow-x:auto scroll (rather than the whole
+        column silently growing past its share) actually take effect. */
+        div[class*="st-key-topnav"] div[data-testid="stColumn"] {
+            min-width:0 !important;
+        }
+        div[class*="st-key-topnav"] div[data-testid="stRadio"] {
+            border:none !important;
+            background:transparent !important;
+            width:100%;
+            max-width:100%;
+            overflow-x:auto;
+            overflow-y:hidden;
+            scrollbar-width:thin;
+        }
+        div[class*="st-key-topnav"] div[data-testid="stRadio"] > div[role="radiogroup"] {
+            background:transparent;
+            border:none !important;
+            display:flex;
+            flex-wrap:nowrap;
+            gap:0;
+            width:max-content;
         }
         div[class*="st-key-topnav"] label[data-baseweb="radio"] {
             margin:0 !important;
-            padding:13px 22px !important;
+            padding:13px 1px !important;
             border-radius:0 !important;
             cursor:pointer;
+            flex-shrink:0;
         }
         div[class*="st-key-topnav"] label[data-baseweb="radio"] > div:first-child {
             display:none !important;
@@ -259,9 +292,10 @@ def style_top_nav() -> None:
             color:#ffffff !important;
             font-weight:600;
             text-transform:uppercase;
-            font-size:0.82rem;
-            letter-spacing:0.4px;
+            font-size:0.62rem;
+            letter-spacing:0px;
             margin:0;
+            white-space:nowrap;
         }
         div[class*="st-key-topnav"] label[data-baseweb="radio"]:hover {
             background:#13396e;
@@ -269,6 +303,54 @@ def style_top_nav() -> None:
         div[class*="st-key-topnav"] label[data-baseweb="radio"]:has(input:checked) {
             background:#1c56a3;
             box-shadow: inset 0 -3px 0 0 #ffffff;
+        }
+
+        /* Refresh / Space Weather Concepts / References — restyled as
+        ghost buttons so they read as part of the same dark nav bar
+        instead of Streamlit's default white rounded buttons. */
+        div[class*="st-key-topnav_actions"] {
+            justify-content:flex-end !important;
+            flex-wrap:nowrap !important;
+            overflow:hidden;
+        }
+        div[class*="st-key-topnav"] div[data-testid="stButton"] > button {
+            background:transparent !important;
+            border:1px solid rgba(255,255,255,0.35) !important;
+            color:#ffffff !important;
+            font-size:0.64rem !important;
+            font-weight:600 !important;
+            padding:5px 6px !important;
+            white-space:nowrap;
+        }
+        div[class*="st-key-topnav"] div[data-testid="stButton"] > button:hover {
+            background:rgba(255,255,255,0.15) !important;
+            border-color:#ffffff !important;
+            color:#ffffff !important;
+        }
+        div[class*="st-key-topnav"] div[data-testid="stButton"] > button p {
+            color:#ffffff !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def style_sticky_header() -> None:
+    """Pins the masthead + top navigation bar — rendered together inside
+    st.container(key="sticky_header") in home.py — to the top of the
+    viewport while the rest of the page scrolls beneath it. A standard
+    website fixed-header pattern; Streamlit has no native equivalent, so
+    this is plain CSS position:sticky on the outer wrapper Streamlit
+    already gives every keyed container.
+    """
+    st.markdown(
+        """
+        <style>
+        div[class*="st-key-sticky_header"] {
+            position: sticky;
+            top: 0;
+            z-index: 999;
         }
         </style>
         """,
