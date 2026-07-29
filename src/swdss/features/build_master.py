@@ -6,12 +6,11 @@ import pandas as pd
 import requests
 
 from swdss.paths import (
-    RAW_DIR,
-    PROCESSED_DIR,
     MASTER_V1_PATH,
+    PROCESSED_DIR,
+    RAW_DIR,
     ensure_data_dirs,
 )
-
 
 # NOAA retired the old separate /products/solar-wind/plasma-7-day.json and
 # mag-7-day.json endpoints (both now 404 — the whole solar-wind/ directory
@@ -386,6 +385,63 @@ def clean_cme(payload: list) -> pd.DataFrame:
     df = df.dropna(subset=["timestamp_utc"])
     df = to_numeric(df, ["speed", "latitude", "longitude", "half_angle"])
 
+    return df.sort_values("timestamp_utc").reset_index(drop=True)
+
+
+DONKI_FLR_URL = "https://api.nasa.gov/DONKI/FLR"
+
+
+def fetch_flr(start_date: str, end_date: str, api_key: str | None = None) -> list:
+    """DONKI's Flare catalog — added for historical flare-label backfill
+    (swdss.models.flare_cme_features), NOT used by the live production
+    pipeline, which still gets its Solar Events/flare data from NOAA's
+    edited_events.json rolling feed (NOAA_URLS["solar_events"] above,
+    unchanged). Kept here alongside fetch_cme/clean_cme rather than in
+    a research-only module since it's the same general-purpose,
+    date-range-queryable DONKI pattern already established by fetch_cme
+    — a reusable utility, not a production behavior change.
+
+    activeRegionNum here is already the full 5-digit NOAA active-region
+    number, matching DONKI's own CME catalog and SHARP's NOAA_AR
+    directly — unlike NOAA's edited_events.json feed (solar_events_
+    processed.parquet's active_region), which uses the older truncated
+    4-digit convention (see flare_cme_features.py's AR_NUMBER_OFFSET
+    docstring for the confirmed, empirical mismatch between those two).
+    Using DONKI FLR uniformly for training labels avoids reconciling two
+    different AR conventions across the backfill.
+    """
+    api_key = api_key or os.environ.get("NASA_API_KEY", "DEMO_KEY")
+
+    response = requests.get(
+        DONKI_FLR_URL,
+        params={"startDate": start_date, "endDate": end_date, "api_key": api_key},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def clean_flr(payload: list) -> pd.DataFrame:
+    if not payload:
+        return pd.DataFrame(columns=["timestamp_utc", "active_region", "flare_class"])
+
+    records = []
+    for event in payload:
+        if not isinstance(event, dict):
+            continue
+        records.append({
+            "timestamp_utc": event.get("beginTime"),
+            "active_region": event.get("activeRegionNum"),
+            "flare_class": event.get("classType"),
+            "source_location": event.get("sourceLocation"),
+        })
+
+    df = pd.DataFrame(records)
+    if df.empty:
+        return pd.DataFrame(columns=["timestamp_utc", "active_region", "flare_class"])
+
+    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
+    df = df.dropna(subset=["timestamp_utc", "active_region"])
     return df.sort_values("timestamp_utc").reset_index(drop=True)
 
 

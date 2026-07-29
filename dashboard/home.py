@@ -1,4 +1,5 @@
 import sys
+from html import escape
 from pathlib import Path
 
 import numpy as np
@@ -6,7 +7,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from html import escape
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -23,33 +23,6 @@ if str(SRC_DIR) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from swdss import physics
-from swdss.ingest.kyoto_ae_quicklook import annotate_quicklook_image, fetch_quicklook_image, quicklook_image_url
-from swdss.models.physics_interpretation import physics_interpretation
-from swdss.models.jobs import (
-    classify_quicklook_error,
-    get_job_stats,
-    get_prediction_statistics,
-    get_running_jobs,
-    get_saved_jobs,
-    poll_jobs,
-    quicklook_error,
-    quicklook_label,
-    quicklook_relative_error,
-    refresh_quicklook_estimate,
-    start_job,
-)
-from swdss.models.predict import latest_minute_observation
-from swdss.models.registry import (
-    AE_VARIABLES,
-    ANALYTICS_VARIABLES,
-    EXPERIMENTAL_VARIABLES,
-    HORIZONS,
-    IMF_VARIABLES,
-    SOLAR_WIND_VARIABLES,
-    VARIABLE_LABELS,
-)
-
 from dashboard.lib.ae_research_lab import (
     render_ae_research_laboratory,
     render_hypothesis_testing_tab,
@@ -58,13 +31,13 @@ from dashboard.lib.ae_research_lab import (
 from dashboard.lib.command_centre import render_operational_command_centre
 from dashboard.lib.data_helpers import (
     DATASET_LABELS,
+    QUICKLOOK_CONFIDENCE_COLORS,
     format_value,
     get_base64_image,
     latest_value,
     load_master_data,
     load_processed_data,
     nearest_row_in,
-    QUICKLOOK_CONFIDENCE_COLORS,
     recent_window,
     row_at_extreme,
     row_at_extreme_from_source,
@@ -85,29 +58,52 @@ from dashboard.lib.imf_research_lab import render_imf_research_laboratory
 from dashboard.lib.kp_research_lab import render_kp_research_laboratory
 from dashboard.lib.library import show_space_weather_library
 from dashboard.lib.project_status import render_project_status_page
-from dashboard.lib.solar_activity import (
-    cme_analysis,
-    cme_predictions,
-    f107_analysis,
-    f107_predictions,
-    heliomap_cme_tab,
-    heliomap_solar_events_tab,
-    solar_event_news_feed,
-    solar_events_analysis,
-)
-from dashboard.lib.storm_lab import render_storm_backtest_tab, render_storm_learning_tab
 from dashboard.lib.shared_ui import (
     apply_retro_chart_style,
     auto_refresh,
-    metric_card,
     open_dialog,
     plot_retro,
     render_dialog_close_button,
     render_site_header,
     style_sticky_header,
     style_top_nav,
+    terminal_metric,
 )
-
+from dashboard.lib.solar_activity import (
+    cme_analysis,
+    f107_analysis,
+    heliomap_cme_tab,
+    heliomap_solar_events_tab,
+    solar_event_news_feed,
+    solar_events_analysis,
+)
+from dashboard.lib.storm_lab import render_storm_backtest_tab, render_storm_learning_tab
+from swdss import physics
+from swdss.ingest.kyoto_ae_quicklook import annotate_quicklook_image, fetch_quicklook_image, quicklook_image_url
+from swdss.models.jobs import (
+    classify_quicklook_error,
+    get_job_stats,
+    get_prediction_statistics,
+    get_running_jobs,
+    get_saved_jobs,
+    poll_jobs,
+    quicklook_error,
+    quicklook_label,
+    quicklook_relative_error,
+    refresh_quicklook_estimate,
+    start_job,
+)
+from swdss.models.physics_interpretation import physics_interpretation
+from swdss.models.predict import latest_minute_observation
+from swdss.models.registry import (
+    AE_VARIABLES,
+    ANALYTICS_VARIABLES,
+    EXPERIMENTAL_VARIABLES,
+    HORIZONS,
+    IMF_VARIABLES,
+    SOLAR_WIND_VARIABLES,
+    VARIABLE_LABELS,
+)
 
 st.set_page_config(
     page_title="Space Weather DSS",
@@ -873,12 +869,12 @@ def render_prediction_queue_stats(dataset: str) -> None:
     stats = get_job_stats(dataset)
     c1, c2, c3 = st.columns(3)
     with c1:
-        metric_card("Running", str(stats["running"]), "Active prediction jobs")
+        terminal_metric("Running", str(stats["running"]), "Active prediction jobs")
     with c2:
-        metric_card("Completed Today", str(stats["completed_today"]), "Jobs finished today")
+        terminal_metric("Completed Today", str(stats["completed_today"]), "Jobs finished today")
     with c3:
         avg_mae_text = "N/A" if stats["avg_mae"] is None else f"{stats['avg_mae']:.2f}"
-        metric_card("Average MAE", avg_mae_text, "Across all completed jobs")
+        terminal_metric("Average MAE", avg_mae_text, "Across all completed jobs")
 
 
 def render_prediction_job_tiles(jobs: list[dict], empty_message: str) -> None:
@@ -1069,10 +1065,10 @@ def prediction_statistics_panel(dataset: str) -> None:
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        metric_card("Forecast Count", str(stats["count"]), "Completed & evaluated forecasts")
+        terminal_metric("Forecast Count", str(stats["count"]), "Completed & evaluated forecasts")
     with c2:
         rate = stats["success_rate"]
-        metric_card(
+        terminal_metric(
             "Success Rate",
             "N/A" if rate is None else f"{rate:.0f}%",
             "Within 1.5x the model's typical error",
@@ -1081,7 +1077,7 @@ def prediction_statistics_panel(dataset: str) -> None:
     with c3:
         best_model = stats["best_model"]
         best_mae = stats["mae_by_model"].get(best_model) if best_model else None
-        metric_card(
+        terminal_metric(
             "Best-Performing Model",
             best_model or "N/A",
             "" if best_mae is None else f"Avg error: {best_mae:.3f}",
@@ -1144,7 +1140,7 @@ def current_analysis_solar_wind(df: pd.DataFrame) -> None:
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        metric_card(
+        terminal_metric(
             "Highest Speed",
             format_value(None if speed_row is None else speed_row["solar_wind_speed"], " km/s", 1),
             time_caption(speed_row),
@@ -1155,7 +1151,7 @@ def current_analysis_solar_wind(df: pd.DataFrame) -> None:
                 f"Temp: {format_value(speed_row.get('temperature'), ' K', 0)}"
             )
     with c2:
-        metric_card(
+        terminal_metric(
             "Highest Density",
             format_value(None if density_row is None else density_row["proton_density"], " p/cm3", 2),
             time_caption(density_row),
@@ -1166,7 +1162,7 @@ def current_analysis_solar_wind(df: pd.DataFrame) -> None:
                 f"Temp: {format_value(density_row.get('temperature'), ' K', 0)}"
             )
     with c3:
-        metric_card(
+        terminal_metric(
             "Highest Temperature",
             format_value(None if temp_row is None else temp_row["temperature"], " K", 0),
             time_caption(temp_row),
@@ -1193,7 +1189,7 @@ def current_analysis_imf(df: pd.DataFrame) -> None:
     c1, c2, c3, c4 = st.columns(4)
 
     with c1:
-        metric_card("Lowest Bz", format_value(None if bz_row is None else bz_row["bz"], " nT", 2), time_caption(bz_row))
+        terminal_metric("Lowest Bz", format_value(None if bz_row is None else bz_row["bz"], " nT", 2), time_caption(bz_row))
         if bz_row is not None:
             card_note(
                 f"Bt: {format_value(bz_row.get('bt'), ' nT', 2)} | "
@@ -1204,7 +1200,7 @@ def current_analysis_imf(df: pd.DataFrame) -> None:
             card_note("No associated IMF values")
 
     with c2:
-        metric_card("Highest Bt", format_value(None if bt_row is None else bt_row["bt"], " nT", 2), time_caption(bt_row))
+        terminal_metric("Highest Bt", format_value(None if bt_row is None else bt_row["bt"], " nT", 2), time_caption(bt_row))
         if bt_row is not None:
             card_note(
                 f"Bz: {format_value(bt_row.get('bz'), ' nT', 2)} | "
@@ -1215,7 +1211,7 @@ def current_analysis_imf(df: pd.DataFrame) -> None:
             card_note("No associated IMF values")
 
     with c3:
-        metric_card("Highest Bx", format_value(None if bx_row is None else bx_row["bx"], " nT", 2), time_caption(bx_row))
+        terminal_metric("Highest Bx", format_value(None if bx_row is None else bx_row["bx"], " nT", 2), time_caption(bx_row))
         if bx_row is not None:
             card_note(
                 f"Bt: {format_value(bx_row.get('bt'), ' nT', 2)} | "
@@ -1226,7 +1222,7 @@ def current_analysis_imf(df: pd.DataFrame) -> None:
             card_note("No associated IMF values")
 
     with c4:
-        metric_card("Highest By", format_value(None if by_row is None else by_row["by"], " nT", 2), time_caption(by_row))
+        terminal_metric("Highest By", format_value(None if by_row is None else by_row["by"], " nT", 2), time_caption(by_row))
         if by_row is not None:
             card_note(
                 f"Bt: {format_value(by_row.get('bt'), ' nT', 2)} | "
@@ -1296,7 +1292,7 @@ def current_analysis_kp(df: pd.DataFrame) -> None:
     c1, c2, c3 = st.columns(3)
 
     with c1:
-        metric_card("Highest Kp", format_value(None if kp_row is None else kp_row["kp"], "", 1), time_caption(kp_row))
+        terminal_metric("Highest Kp", format_value(None if kp_row is None else kp_row["kp"], "", 1), time_caption(kp_row))
         if kp_row is not None:
             card_note(
                 f"Bz: {format_value(kp_row.get('bz'), ' nT', 2)} | "
@@ -1306,12 +1302,12 @@ def current_analysis_kp(df: pd.DataFrame) -> None:
             card_note("No associated Bz/Dst")
 
     with c2:
-        metric_card("Update Cadence", "3 hours", "NOAA Kp product cadence")
+        terminal_metric("Update Cadence", "3 hours", "NOAA Kp product cadence")
         card_note("Kp is a 3-hour planetary index")
 
     with c3:
         latest_value = np.nan if latest_row is None else latest_row["kp"]
-        metric_card("Latest Kp", format_value(latest_value, "", 1), time_caption(latest_row))
+        terminal_metric("Latest Kp", format_value(latest_value, "", 1), time_caption(latest_row))
         if latest_row is not None:
             card_note(
                 f"Bz: {format_value(latest_row.get('bz'), ' nT', 2)} | "
@@ -1346,7 +1342,7 @@ def current_analysis_dst(df: pd.DataFrame) -> None:
     c1, c2, c3 = st.columns(3)
 
     with c1:
-        metric_card("Lowest Dst", format_value(None if dst_row is None else dst_row["dst"], " nT", 1), time_caption(dst_row))
+        terminal_metric("Lowest Dst", format_value(None if dst_row is None else dst_row["dst"], " nT", 1), time_caption(dst_row))
         if dst_row is not None:
             card_note(
                 f"Bz: {format_value(dst_row.get('bz'), ' nT', 2)} | "
@@ -1356,12 +1352,12 @@ def current_analysis_dst(df: pd.DataFrame) -> None:
             card_note("No associated Bz/Kp")
 
     with c2:
-        metric_card("Update Cadence", "1 hour", "NOAA/Kyoto Dst product cadence")
+        terminal_metric("Update Cadence", "1 hour", "NOAA/Kyoto Dst product cadence")
         card_note("Dst is an hourly ring-current index")
 
     with c3:
         latest_value = np.nan if latest_row is None else latest_row["dst"]
-        metric_card("Latest Dst", format_value(latest_value, " nT", 1), time_caption(latest_row))
+        terminal_metric("Latest Dst", format_value(latest_value, " nT", 1), time_caption(latest_row))
         if latest_row is not None:
             card_note(
                 f"Bz: {format_value(latest_row.get('bz'), ' nT', 2)} | "
@@ -1393,7 +1389,7 @@ def earth_analysis(df: pd.DataFrame) -> None:
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        metric_card("Lowest Bz", format_value(None if bz_row is None else bz_row["bz"], " nT", 2), time_caption(bz_row))
+        terminal_metric("Lowest Bz", format_value(None if bz_row is None else bz_row["bz"], " nT", 2), time_caption(bz_row))
         if bz_row is not None:
             card_note(
                 f"Speed: {format_value(bz_row.get('solar_wind_speed'), ' km/s', 1)} | "
@@ -1401,7 +1397,7 @@ def earth_analysis(df: pd.DataFrame) -> None:
                 f"Temp: {format_value(bz_row.get('temperature'), ' K', 0)}"
             )
     with c2:
-        metric_card("Highest Kp", format_value(None if kp_row is None else kp_row["kp"], "", 1), time_caption(kp_row))
+        terminal_metric("Highest Kp", format_value(None if kp_row is None else kp_row["kp"], "", 1), time_caption(kp_row))
         if kp_row is not None:
             card_note(
                 f"Speed: {format_value(kp_row.get('solar_wind_speed'), ' km/s', 1)} | "
@@ -1409,7 +1405,7 @@ def earth_analysis(df: pd.DataFrame) -> None:
                 f"Bz: {format_value(kp_row.get('bz'), ' nT', 2)}"
             )
     with c3:
-        metric_card("Lowest Dst", format_value(None if dst_row is None else dst_row["dst"], " nT", 1), time_caption(dst_row))
+        terminal_metric("Lowest Dst", format_value(None if dst_row is None else dst_row["dst"], " nT", 1), time_caption(dst_row))
         if dst_row is not None:
             card_note(
                 f"Speed: {format_value(dst_row.get('solar_wind_speed'), ' km/s', 1)} | "
@@ -1475,15 +1471,13 @@ def heliosphere_page(df: pd.DataFrame) -> None:
             prediction_statistics_panel("solar_wind")
 
     with tabs[1]:
-        inner = st.tabs(["Current Analysis", "Predictions", "Prediction Statistics", "Research Laboratory"])
+        inner = st.tabs(["Current Analysis", "Predictions", "Prediction Statistics"])
         with inner[0]:
             current_analysis_imf(df)
         with inner[1]:
             prediction_panel("imf", IMF_VARIABLES)
         with inner[2]:
             prediction_statistics_panel("imf")
-        with inner[3]:
-            render_imf_research_laboratory()
 
     with tabs[2]:
         st.subheader("Dynamic Pressure")
@@ -1520,18 +1514,12 @@ def photosphere_page(df: pd.DataFrame) -> None:
             st.info("Prediction module will be added later.")
 
     with tabs[1]:
-        inner = st.tabs(["Current Analysis", "Predictions"])
-        with inner[0]:
-            cme_analysis()
-        with inner[1]:
-            cme_predictions()
+        cme_analysis()
+        st.caption("CME arrival forecasting (Drag-Based Model) now lives on Home → SW Operational Command Centre → Solar Forecast — one computed forecast, one place to see it, instead of a second copy here.")
 
     with tabs[2]:
-        inner = st.tabs(["Current Analysis", "Predictions"])
-        with inner[0]:
-            f107_analysis()
-        with inner[1]:
-            f107_predictions()
+        f107_analysis()
+        st.caption("F10.7 flux forecasting now lives on Home → SW Operational Command Centre → Solar Forecast — one computed forecast, one place to see it, instead of a second copy here.")
 
 
 def render_quicklook_verification_tab() -> None:
@@ -1583,19 +1571,19 @@ def render_quicklook_verification_tab() -> None:
 
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        metric_card("Prediction Time", pd.Timestamp(job["created_at"]).strftime("%H:%M:%S UTC"), "")
+        terminal_metric("Prediction Time", pd.Timestamp(job["created_at"]).strftime("%H:%M:%S UTC"), "")
     with c2:
-        metric_card("Forecast Target", pd.Timestamp(job["target_hour"]).strftime("%Y-%m-%d %H:%M UTC"), "")
+        terminal_metric("Forecast Target", pd.Timestamp(job["target_hour"]).strftime("%Y-%m-%d %H:%M UTC"), "")
     with c3:
-        metric_card("Predicted AE", f"{final_pred:.2f} nT", "")
+        terminal_metric("Predicted AE", f"{final_pred:.2f} nT", "")
     with c4:
-        metric_card(
+        terminal_metric(
             estimate_label,
             "N/A" if quicklook_ae is None else f"{quicklook_ae:.2f} nT",
             range_caption,
         )
     with c5:
-        metric_card(
+        terminal_metric(
             "Absolute Error",
             "N/A" if approx_error is None else f"{approx_error:.2f} nT",
             "Predicted vs. Quicklook estimate — not the official error",
@@ -1605,33 +1593,33 @@ def render_quicklook_verification_tab() -> None:
 
     d1, d2, d3, d4, d5 = st.columns(5)
     with d1:
-        metric_card(
+        terminal_metric(
             "Graph Coverage",
             "N/A" if hour_coverage is None else f"{hour_coverage * 100:.0f}%",
             "% of the forecast hour with a curve drawn in Kyoto's graph",
-            value_color=QUICKLOOK_CONFIDENCE_COLORS.get(confidence, "#000000"),
+            value_color=QUICKLOOK_CONFIDENCE_COLORS.get(confidence),
         )
     with d2:
-        metric_card(
+        terminal_metric(
             "Quicklook Confidence",
             "N/A" if confidence is None else confidence.title(),
             "<40% Low · 40–80% Moderate · >80% High coverage",
-            value_color=QUICKLOOK_CONFIDENCE_COLORS.get(confidence, "#000000"),
+            value_color=QUICKLOOK_CONFIDENCE_COLORS.get(confidence),
         )
     with d3:
-        metric_card(
+        terminal_metric(
             "Estimated Range",
             "N/A" if range_low is None or range_high is None else f"{range_low:.0f}–{range_high:.0f} nT",
             "Uncertainty band from graph extraction",
         )
     with d4:
-        metric_card(
+        terminal_metric(
             "Error Classification",
             error_label or "N/A",
             "Predicted vs. Quicklook estimate, coarse band",
         )
     with d5:
-        metric_card(
+        terminal_metric(
             "Relative Error",
             "N/A" if relative_error is None else f"{relative_error:.1f}%",
             "Absolute error as a % of the Quicklook estimate",
@@ -1679,21 +1667,21 @@ def render_quicklook_verification_tab() -> None:
 
     g1, g2, g3, g4 = st.columns(4)
     with g1:
-        metric_card(
+        terminal_metric(
             "Graph Created",
             "N/A" if graph_created is None else pd.Timestamp(graph_created).strftime("%H:%M UTC"),
             "When Kyoto last regenerated this day's graph image",
         )
     with g2:
-        metric_card(
+        terminal_metric(
             "Quicklook Timestamp",
             "N/A" if checked_at is None else pd.Timestamp(checked_at).strftime("%H:%M:%S UTC"),
             "When this estimate was last read from the graph",
         )
     with g3:
-        metric_card("Forecast Target", pd.Timestamp(job["target_hour"]).strftime("%H:%M UTC"), "")
+        terminal_metric("Forecast Target", pd.Timestamp(job["target_hour"]).strftime("%H:%M UTC"), "")
     with g4:
-        metric_card("Image Age", image_age, "Time since the graph image was generated")
+        terminal_metric("Image Age", image_age, "Time since the graph image was generated")
 
     st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
     st.markdown("##### Kyoto Quicklook Graph")
@@ -1747,16 +1735,16 @@ def render_quicklook_verification_tab() -> None:
     actual = job["actual_value"]
     o1, o2, o3 = st.columns(3)
     with o1:
-        metric_card(
+        terminal_metric(
             "Official Verification Status",
             "Verified" if verification_status == "verified" else "Pending Official Kyoto Data",
             "Kyoto WDC digital AE — the authoritative source",
         )
     with o2:
-        metric_card("Official AE", "Pending" if actual is None else f"{actual:.2f} nT", "")
+        terminal_metric("Official AE", "Pending" if actual is None else f"{actual:.2f} nT", "")
     with o3:
         official_error = None if actual is None else abs(final_pred - actual)
-        metric_card("Official Error", "N/A" if official_error is None else f"{official_error:.2f} nT", "")
+        terminal_metric("Official Error", "N/A" if official_error is None else f"{official_error:.2f} nT", "")
 
 
 def analytics_page(df: pd.DataFrame) -> None:
@@ -1768,27 +1756,21 @@ def analytics_page(df: pd.DataFrame) -> None:
     with inner[1]:
         prediction_panel("analytics", ANALYTICS_VARIABLES)
     with inner[2]:
-        ae_inner = st.tabs(["Production Prediction", "Quicklook Verification", "Research Laboratory"])
+        ae_inner = st.tabs(["Production Prediction", "Quicklook Verification"])
         with ae_inner[0]:
             prediction_panel("ae", AE_VARIABLES)
         with ae_inner[1]:
             render_quicklook_verification_tab()
-        with ae_inner[2]:
-            render_ae_research_laboratory()
     with inner[3]:
-        research_inner = st.tabs(["Experimental Predictions", "Kp Research Laboratory"])
-        with research_inner[0]:
-            st.markdown(_experimental_badge_html(), unsafe_allow_html=True)
-            st.caption(
-                "Research feature: cascades Predicted AE (from the frozen AE model) into the Kp/Dst "
-                "models as an extra feature, instead of the production pipeline's observed AE. "
-                "Completely separate models and training data from the Prediction tab — for "
-                "comparison purposes only, not a replacement for it."
-            )
-            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-            prediction_panel("experimental", EXPERIMENTAL_VARIABLES)
-        with research_inner[1]:
-            render_kp_research_laboratory()
+        st.markdown(_experimental_badge_html(), unsafe_allow_html=True)
+        st.caption(
+            "Research feature: cascades Predicted AE (from the frozen AE model) into the Kp/Dst "
+            "models as an extra feature, instead of the production pipeline's observed AE. "
+            "Completely separate models and training data from the Prediction tab — for "
+            "comparison purposes only, not a replacement for it."
+        )
+        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+        prediction_panel("experimental", EXPERIMENTAL_VARIABLES)
 
 
 def render_independent_models_tab() -> None:
@@ -1852,12 +1834,12 @@ def render_model_comparison_tab() -> None:
     st.markdown("##### AE (shared model)")
     a1, a2, a3 = st.columns(3)
     with a1:
-        metric_card("Verified Forecasts", str(ae_stats["count"]), "")
+        terminal_metric("Verified Forecasts", str(ae_stats["count"]), "")
     with a2:
         rate = ae_stats["success_rate"]
-        metric_card("Success Rate", "N/A" if rate is None else f"{rate:.0f}%", "Within 1.5x model's typical error")
+        terminal_metric("Success Rate", "N/A" if rate is None else f"{rate:.0f}%", "Within 1.5x model's typical error")
     with a3:
-        metric_card("Best-Performing Model", ae_stats.get("best_model") or "N/A", "")
+        terminal_metric("Best-Performing Model", ae_stats.get("best_model") or "N/A", "")
 
     st.markdown("<div style='height: 16px;'></div>", unsafe_allow_html=True)
     st.markdown("##### Kp & Dst — Production vs. Experimental")
@@ -1870,34 +1852,37 @@ def render_model_comparison_tab() -> None:
         st.markdown(f"**{label}**")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            metric_card(
+            terminal_metric(
                 "Production MAE",
                 "N/A" if prod_mae is None else f"{prod_mae:.3f}",
                 f"n={prod_stats['count']} verified forecasts (all variables)" if prod_stats["count"] else "",
             )
         with c2:
-            metric_card("Experimental MAE", "N/A" if exp_mae is None else f"{exp_mae:.3f}", "")
+            terminal_metric("Experimental MAE", "N/A" if exp_mae is None else f"{exp_mae:.3f}", "")
         with c3:
             if prod_mae is not None and exp_mae is not None and prod_mae:
                 diff_pct = (prod_mae - exp_mae) / prod_mae * 100
-                metric_card(
+                terminal_metric(
                     "Prediction Difference",
                     f"{diff_pct:+.1f}%",
                     "Positive = experimental has lower MAE",
                 )
             else:
-                metric_card("Prediction Difference", "N/A", "Need completed & verified jobs from both")
+                terminal_metric("Prediction Difference", "N/A", "Need completed & verified jobs from both")
         with c4:
             if prod_mae is not None and exp_mae is not None:
+                # Bright terminal-palette values (design_tokens' MUTED/ACCENT/RED) —
+                # the previous dark values were chosen for metric_card's light-grey
+                # Win-95 background and would be near-invisible on a dark panel.
                 if abs(prod_mae - exp_mae) < 1e-9:
-                    verdict, color = "Tie", "#404040"
+                    verdict, color = "Tie", "#6e7681"
                 elif exp_mae < prod_mae:
-                    verdict, color = "Experimental Better", "#1f7a3a"
+                    verdict, color = "Experimental Better", "#39d98a"
                 else:
-                    verdict, color = "Production Better", "#7a1f1f"
-                metric_card("Verdict", verdict, "Lower MAE wins", value_color=color)
+                    verdict, color = "Production Better", "#f85149"
+                terminal_metric("Verdict", verdict, "Lower MAE wins", value_color=color)
             else:
-                metric_card("Verdict", "Not enough data", "")
+                terminal_metric("Verdict", "Not enough data", "")
 
     st.markdown("<div style='height: 16px;'></div>", unsafe_allow_html=True)
     comp_col1, comp_col2 = st.columns(2)
@@ -2054,7 +2039,14 @@ def research_lab_page(df: pd.DataFrame) -> None:
     )
 
     tabs = st.tabs(
-        ["Forecasting Architectures", "Physics Interpretation", "Hypothesis Testing", "Storm Backtest", "Storm Learning"]
+        [
+            "Forecasting Architectures",
+            "Research Laboratory",
+            "Physics Interpretation",
+            "Hypothesis Testing",
+            "Storm Backtest",
+            "Storm Learning",
+        ]
     )
     with tabs[0]:
         st.caption(
@@ -2074,13 +2066,42 @@ def research_lab_page(df: pd.DataFrame) -> None:
         with inner[3]:
             render_prediction_pipeline_tab()
     with tabs[1]:
-        render_physics_interpretation_panel(df)
+        render_research_laboratory_tab()
     with tabs[2]:
-        render_hypothesis_testing_tab()
+        render_physics_interpretation_panel(df)
     with tabs[3]:
-        render_storm_backtest_tab()
+        render_hypothesis_testing_tab()
     with tabs[4]:
+        render_storm_backtest_tab()
+    with tabs[5]:
         render_storm_learning_tab()
+
+
+RESEARCH_LAB_VARIABLES = {
+    "Bz / IMF": render_imf_research_laboratory,
+    "Kp": render_kp_research_laboratory,
+    "AE": render_ae_research_laboratory,
+}
+
+
+def render_research_laboratory_tab() -> None:
+    """Single consolidated home for the Bz/IMF, Kp, and AE research labs —
+    replacing three copies previously buried inside Heliosphere > IMF,
+    Analytics > AE, and Analytics > Research & Experiments respectively.
+    Each lab's internals (Model Comparison, Feature Ablation, Hypothesis
+    Testing, Optimization Study, etc.) are unchanged; only the entry point
+    moved, selected here by variable instead of by which page you happened
+    to be on. Dst intentionally excluded — see Storm Backtest/Storm
+    Learning's "analytics" dataset for Dst's actual storm-tested evidence;
+    a dedicated Dst lab is deferred until there's a specific hypothesis
+    (e.g. a physics-hybrid model) worth building ablation tooling for.
+    """
+    st.caption(
+        "One consolidated lab for Model Comparison, Feature Ablation, Sequence Models, "
+        "Hypothesis Testing, and Optimization Studies — select a variable below."
+    )
+    variable = st.selectbox("Variable", list(RESEARCH_LAB_VARIABLES.keys()), key="research_lab_variable")
+    RESEARCH_LAB_VARIABLES[variable]()
 
 
 apply_retro_windows_style()

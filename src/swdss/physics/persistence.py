@@ -16,7 +16,6 @@ two labs — same formula shape, only the target column differs.
 
 import pandas as pd
 
-
 # ---------------------------------------------------------------------------
 # Persistence Stats (Solar Wind / Bt / Bz Persistence)
 # ---------------------------------------------------------------------------

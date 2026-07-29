@@ -31,7 +31,7 @@ from dashboard.lib.data_helpers import (
 )
 from dashboard.lib.library import load_saved_events, record_to_series, remove_saved_event, save_event_record
 from dashboard.lib.shared_ui import open_dialog, render_dialog_close_button
-
+from swdss.physics.cme_dbm import estimate_cme_arrival_dbm
 
 EVENT_TYPE_CATEGORY = {
     "FLA": "Flare",
@@ -177,15 +177,43 @@ def find_associated_cme(event_time, cme_df: pd.DataFrame, hours: int = 6) -> pd.
     return window_df.sort_values("timestamp_utc").iloc[0]
 
 
-def estimate_cme_arrival(cme_row: pd.Series):
+def estimate_cme_arrival_detailed(cme_row: pd.Series) -> dict | None:
+    """Drag-Based Model (DBM) arrival estimate for one CME — see
+    swdss.physics.cme_dbm for the physics. Replaces the previous pure
+    kinematic (1 AU / launch speed, held constant) estimate everywhere
+    it was used, since real CMEs decelerate or accelerate toward the
+    ambient solar wind speed rather than travelling at a fixed speed the
+    whole way. Ambient speed is read from master_df nearest the CME's
+    own launch time, falling back to a typical slow-wind default (see
+    cme_dbm.DEFAULT_AMBIENT_SPEED_KM_S) if that reading is missing.
+    Returns the full min/median/max ensemble window, or None if the CME
+    has no usable speed.
+    """
     speed = cme_row.get("speed")
     if speed is None or pd.isna(speed) or float(speed) <= 0:
-        return None, None
+        return None
 
-    au_km = 1.496e8
-    travel_hours = (au_km / float(speed)) / 3600
-    arrival_time = cme_row["timestamp_utc"] + pd.Timedelta(hours=travel_hours)
-    return arrival_time, travel_hours
+    launch_time = cme_row["timestamp_utc"]
+    ambient_row, _ = nearest_master_row(launch_time)
+    ambient_speed = None
+    if ambient_row is not None:
+        candidate = ambient_row.get("solar_wind_speed")
+        if candidate is not None and not pd.isna(candidate):
+            ambient_speed = float(candidate)
+
+    return estimate_cme_arrival_dbm(launch_time, float(speed), ambient_speed)
+
+
+def estimate_cme_arrival(cme_row: pd.Series):
+    """(arrival_time, travel_hours) contract every existing call site
+    already expects — now the DBM ensemble's median estimate rather than
+    a pure constant-speed one. Use estimate_cme_arrival_detailed directly
+    for the full min/median/max window (e.g. the Solar Forecast tab).
+    """
+    detail = estimate_cme_arrival_detailed(cme_row)
+    if detail is None:
+        return None, None
+    return detail["arrival_median"], detail["travel_hours_median"]
 
 
 def render_chain_step(title: str, lines: list[str], last: bool = False) -> None:
@@ -343,7 +371,7 @@ def build_event_chain_steps(event: pd.Series) -> list[tuple[str, list[str]]]:
             [
                 f"Estimated Arrival: {latest_label_time(arrival_time)}",
                 f"Travel Time: {travel_hours:.1f} hours",
-                "Heuristic constant-speed transit model.",
+                "Drag-Based Model (DBM) estimate — median of a drag-parameter/ambient-speed ensemble.",
             ],
         )
     )
@@ -563,7 +591,7 @@ def show_reverse_event_explorer(target_time, effect_label: str) -> None:
                 [
                     f"Estimated Arrival: {latest_label_time(arrival_time)}",
                     f"Travel Time: {travel_hours:.1f} hours",
-                    "Heuristic constant-speed transit model.",
+                    "Drag-Based Model (DBM) estimate — median of a drag-parameter/ambient-speed ensemble.",
                 ],
             ),
             (f"Observed: {effect_label}", [f"Time: {latest_label_time(target_time)}"]),

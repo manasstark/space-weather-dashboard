@@ -7,6 +7,13 @@ exclude = ["venv", "notebooks", "catboost_info"]
 select = ["E", "F", "I"]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+# home.py must call sys.path.insert() for SRC_DIR/PROJECT_ROOT before the
+# swdss.*/dashboard.lib.* imports below it can resolve at all (neither
+# package is pip-installed) — the late imports are load-bearing, not a
+# style slip, so E402 is silenced here rather than "fixed" by reordering.
+"dashboard/home.py" = ["E402"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]

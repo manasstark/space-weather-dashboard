@@ -15,10 +15,10 @@ from dashboard.lib.shared_ui import (
     CONCLUSION_COLORS,
     REFRESH_SECONDS,
     close_active_dialog,
-    metric_card,
     open_dialog,
     plot_retro,
     render_dialog_close_button,
+    terminal_metric,
 )
 from swdss.models import ae_research
 from swdss.models.hypothesis import (
@@ -156,15 +156,15 @@ def _ae_research_run_row(run: dict, best_run_id: str = None, key_prefix: str = "
                     f"MAE={cv['mae_mean']:.3f} ± {cv['mae_std']:.3f}"
                 )
         with c2:
-            metric_card("R²", f"{m['r2']:.4f}", "")
+            terminal_metric("R²", f"{m['r2']:.4f}", "")
         with c3:
-            metric_card("MAE", f"{m['mae']:.3f}", "")
+            terminal_metric("MAE", f"{m['mae']:.3f}", "")
         with c4:
-            metric_card("RMSE", f"{m['rmse']:.3f}", "")
+            terminal_metric("RMSE", f"{m['rmse']:.3f}", "")
         with c5:
-            metric_card("Train Time", f"{run.get('training_time_sec', 0):.2f}s", "")
+            terminal_metric("Train Time", f"{run.get('training_time_sec', 0):.2f}s", "")
         with c6:
-            metric_card("Predict Time", f"{run.get('prediction_time_sec', 0) * 1000:.1f}ms", "")
+            terminal_metric("Predict Time", f"{run.get('prediction_time_sec', 0) * 1000:.1f}ms", "")
         with c7:
             st.markdown("<div style='height: 22px;'></div>", unsafe_allow_html=True)
             b1, b2, b3 = st.columns(3)
@@ -435,7 +435,7 @@ def render_ae_physics_experiments_tab() -> None:
     if latest.empty:
         st.info("Not enough history to compute this feature yet.")
         return
-    metric_card(label, f"{latest.iloc[-1]:.3f}", f"Latest hourly value ({latest.index[-1].strftime('%Y-%m-%d %H:%M UTC')})")
+    terminal_metric(label, f"{latest.iloc[-1]:.3f}", f"Latest hourly value ({latest.index[-1].strftime('%Y-%m-%d %H:%M UTC')})")
 
     recent = frame.tail(24 * 30).dropna(subset=[col, "ae"])
     if not recent.empty:
@@ -521,12 +521,12 @@ def render_ae_sequence_models_tab() -> None:
         best_tabular = max(tabular_runs, key=lambda r: r["metrics"]["r2"])
         c1, c2, c3 = st.columns(3)
         with c1:
-            metric_card("Best Sequence Model R²", f"{best_seq['metrics']['r2']:.4f}", best_seq["model_type"])
+            terminal_metric("Best Sequence Model R²", f"{best_seq['metrics']['r2']:.4f}", best_seq["model_type"])
         with c2:
-            metric_card("Best Tabular Model R²", f"{best_tabular['metrics']['r2']:.4f}", best_tabular["model_type"])
+            terminal_metric("Best Tabular Model R²", f"{best_tabular['metrics']['r2']:.4f}", best_tabular["model_type"])
         with c3:
             diff = best_seq["metrics"]["r2"] - best_tabular["metrics"]["r2"]
-            metric_card("Sequence Advantage", f"{diff:+.4f}", "Positive = sequence models outperform tabular")
+            terminal_metric("Sequence Advantage", f"{diff:+.4f}", "Positive = sequence models outperform tabular")
 
     def _run_label(r):
         return f"{r['model_type']} seq={r['sequence_length']}h +{r.get('horizon', 1)}h ({pd.Timestamp(r['trained_at']).strftime('%m-%d %H:%M')})"
@@ -537,15 +537,15 @@ def render_ae_sequence_models_tab() -> None:
     m = run["metrics"]
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        metric_card("R²", f"{m['r2']:.4f}", "")
+        terminal_metric("R²", f"{m['r2']:.4f}", "")
     with c2:
-        metric_card("MAE", f"{m['mae']:.3f}", "")
+        terminal_metric("MAE", f"{m['mae']:.3f}", "")
     with c3:
-        metric_card("RMSE", f"{m['rmse']:.3f}", "")
+        terminal_metric("RMSE", f"{m['rmse']:.3f}", "")
     with c4:
-        metric_card("MAPE", "N/A" if m["mape"] is None else f"{m['mape']:.1f}%", "")
+        terminal_metric("MAPE", "N/A" if m["mape"] is None else f"{m['mape']:.1f}%", "")
     with c5:
-        metric_card("Bias", f"{m['bias']:+.3f}", "")
+        terminal_metric("Bias", f"{m['bias']:+.3f}", "")
 
     if run.get("loss_history"):
         lh = run["loss_history"]
@@ -704,13 +704,13 @@ def render_ae_hypothesis_testing_tab() -> None:
         st.markdown(f"### Verdict: <span style='color:{color}'>{result['verdict']}</span>", unsafe_allow_html=True)
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            metric_card("ΔR²", f"{result['delta_r2']:+.4f}", "")
+            terminal_metric("ΔR²", f"{result['delta_r2']:+.4f}", "")
         with c2:
-            metric_card("ΔMAE", f"{result['delta_mae']:+.4f}", "")
+            terminal_metric("ΔMAE", f"{result['delta_mae']:+.4f}", "")
         with c3:
-            metric_card("ΔRMSE", f"{result['delta_rmse']:+.4f}", "")
+            terminal_metric("ΔRMSE", f"{result['delta_rmse']:+.4f}", "")
         with c4:
-            metric_card("Baseline → Experimental R²", f"{result['baseline_r2']:.4f} → {result['experimental_r2']:.4f}", "")
+            terminal_metric("Baseline → Experimental R²", f"{result['baseline_r2']:.4f} → {result['experimental_r2']:.4f}", "")
 
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
     st.markdown("##### Hypothesis Test History")
@@ -898,13 +898,13 @@ def render_hypothesis_testing_tab() -> None:
                     f"created {pd.Timestamp(h['created_at']).strftime('%Y-%m-%d')}"
                 )
             with c2:
-                metric_card("Verified", str(result["n"]), f"of {result['baseline']['count'] + result['experimental']['count']} total")
+                terminal_metric("Verified", str(result["n"]), f"of {result['baseline']['count'] + result['experimental']['count']} total")
             with c3:
-                metric_card(
+                terminal_metric(
                     "Conclusion",
                     result["conclusion"],
                     f"Confidence: {result['confidence']}",
-                    value_color=CONCLUSION_COLORS.get(result["conclusion"], "#404040"),
+                    value_color=CONCLUSION_COLORS.get(result["conclusion"]),
                 )
             with c4:
                 st.markdown("<div style='height: 22px;'></div>", unsafe_allow_html=True)
@@ -965,9 +965,9 @@ def show_hypothesis_detail(hypothesis_id: str) -> None:
     st.markdown("##### Automatic Conclusion")
     c1, c2 = st.columns(2)
     with c1:
-        metric_card("Conclusion", result["conclusion"], "", value_color=CONCLUSION_COLORS.get(result["conclusion"], "#404040"))
+        terminal_metric("Conclusion", result["conclusion"], "", value_color=CONCLUSION_COLORS.get(result["conclusion"]))
     with c2:
-        metric_card("Confidence", result["confidence"], f"{result['n']} verified predictions")
+        terminal_metric("Confidence", result["confidence"], f"{result['n']} verified predictions")
     st.info(result["summary"])
     if h["manual_conclusion"]:
         st.markdown("**Researcher's Manual Conclusion / Addendum:**")
@@ -1072,11 +1072,11 @@ def show_hypothesis_detail(hypothesis_id: str) -> None:
     st.markdown("##### Experiment Timeline")
     t1, t2, t3 = st.columns(3)
     with t1:
-        metric_card("Experiment Started", pd.Timestamp(h["created_at"]).strftime("%Y-%m-%d %H:%M UTC"), "")
+        terminal_metric("Experiment Started", pd.Timestamp(h["created_at"]).strftime("%Y-%m-%d %H:%M UTC"), "")
     with t2:
-        metric_card("Predictions Generated", str(baseline["count"] + experimental["count"]), "Baseline + Experimental")
+        terminal_metric("Predictions Generated", str(baseline["count"] + experimental["count"]), "Baseline + Experimental")
     with t3:
-        metric_card("Current Status", h["status"].title(), "")
+        terminal_metric("Current Status", h["status"].title(), "")
 
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
     st.markdown("##### Research Notes")

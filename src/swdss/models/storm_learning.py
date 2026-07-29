@@ -33,6 +33,24 @@ training storm's own window is weighted `sample_weight_multiplier` times
 higher than an ordinary quiet-corpus row when fitting (default 1.0 —
 identical to the original unweighted behavior, since a uniform weight
 vector changes nothing for any of these algorithms).
+
+`include_storm_hints` (2026-07 addition, tried after sample weighting was
+ruled out): rather than more or reweighted data, this gives the model
+better clues — Storm Phase, Time Since Southward Turning, Previous Storm
+Strength (swdss.models.storm_data.build_storm_hint_features, already
+prototyped in the Kp Research Lab, never tried here) — added to the
+feature set alongside the existing physics features.
+
+`algorithm_storm_mae` (2026-07 addition): every candidate algorithm
+(LinearRegression/RandomForest/XGBoost) is now fit on the FULL training
+set and scored directly against the held-out storm, not just whichever
+one wins the internal mostly-quiet 80/20 holdout. Dst's winning algorithm
+has been LinearRegression at every setting tried so far — a straight-line
+model structurally cannot represent the nonlinear saturation/threshold
+effects real storm dynamics have, no matter how the training data is
+weighted or featured. This directly tests whether a model with real
+nonlinear capacity (RandomForest/XGBoost) does better specifically DURING
+the storm, even if it's not the one CV would have picked on average.
 """
 
 from __future__ import annotations
@@ -47,7 +65,14 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from swdss.models.features import add_derived_physics_features, build_feature_frame
 from swdss.models.registry import DATASETS
 from swdss.models.storm_backtest import run_storm_backtest
-from swdss.models.storm_data import NAMED_STORMS, build_base_df, build_persistence_series, build_target_series, load_storm_window
+from swdss.models.storm_data import (
+    NAMED_STORMS,
+    build_base_df,
+    build_persistence_series,
+    build_storm_hint_features,
+    build_target_series,
+    load_storm_window,
+)
 from swdss.models.train import CANDIDATE_MODELS
 from swdss.paths import DATA_DIR
 
@@ -84,6 +109,7 @@ def run_storm_learning_experiment(
     held_out_storm: str,
     training_storms: list[str],
     sample_weight_multiplier: float = 1.0,
+    include_storm_hints: bool = False,
 ) -> dict:
     """Trains a brand-new model on quiet-time history + training_storms,
     evaluates it on held_out_storm (never seen), and compares against the
@@ -93,6 +119,16 @@ def run_storm_learning_experiment(
     own window count that many times more than an ordinary quiet-corpus row
     in the fit — a different lever than adding more storm rows (see module
     docstring). 1.0 (default) reproduces the original unweighted behavior.
+
+    include_storm_hints=True adds Storm Phase / Time Since Southward
+    Turning / Previous Storm Strength to the feature set (see module
+    docstring and swdss.models.storm_data.build_storm_hint_features).
+
+    Every candidate algorithm is also fit on the full training set and
+    scored directly against the held-out storm (`algorithm_storm_mae` in
+    the result) — not just whichever one wins the internal, mostly-quiet
+    80/20 holdout — to check whether a model with real nonlinear capacity
+    does better specifically during the storm.
 
     Kp is a special case: its production model always targets NOAA's next
     official 3-hour interval, never a fixed hourly horizon — `horizon` is
@@ -126,6 +162,8 @@ def run_storm_learning_experiment(
     feature_vars = DATASETS[dataset_key].feature_variables or DATASETS[dataset_key].variables
     derived_cols = add_derived_physics_features(combined)
     feature_vars_all = feature_vars + derived_cols
+    if include_storm_hints:
+        feature_vars_all = feature_vars_all + build_storm_hint_features(combined)
 
     frame, feature_columns = build_feature_frame(combined, feature_vars_all)
     target = build_target_series(variable, horizon, combined)
@@ -164,14 +202,14 @@ def run_storm_learning_experiment(
             "rmse": float(np.sqrt(mean_squared_error(y_te, preds))),
         }
     best_name = max(candidates, key=lambda n: candidates[n]["r2"])
-    final_model = CANDIDATE_MODELS[best_name]()
-    final_model.fit(X_train, y_train, sample_weight=weight_train)
 
     # Evaluate the new model on the held-out storm — rebuild its features
     # from a fresh OMNI2 pull, exactly like storm_backtest.py does for the
     # production model, so both arms of the comparison see identical rows.
     ho_omni = load_storm_window(held_out_storm, lookback_hours=48)
     ho_base, _ = build_base_df(dataset_key, ho_omni)
+    if include_storm_hints:
+        build_storm_hint_features(ho_base)
     ho_frame, _ = build_feature_frame(ho_base, feature_vars_all)
     ho_target = build_target_series(variable, horizon, ho_base)
     ho_data = ho_frame.copy()
@@ -186,7 +224,24 @@ def run_storm_learning_experiment(
 
     X_ho = ho_eval[feature_columns]
     y_ho = ho_eval["__target__"].to_numpy()
-    y_pred_new = final_model.predict(X_ho)
+
+    # Fit every candidate on the FULL training set (not just the internal
+    # 80/20 holdout used above for algorithm selection) and score each one
+    # directly against the held-out storm — this is what actually tests
+    # "does a model that can learn curves (RandomForest/XGBoost) do better
+    # during a storm than the straight-line-only LinearRegression," a
+    # different question from which one merely averages best over the
+    # mostly-quiet internal holdout.
+    algorithm_storm_mae = {}
+    y_pred_new = None
+    for name, factory in CANDIDATE_MODELS.items():
+        model = factory()
+        model.fit(X_train, y_train, sample_weight=weight_train)
+        preds_storm = model.predict(X_ho)
+        algorithm_storm_mae[name] = float(np.mean(np.abs(y_ho - preds_storm)))
+        if name == best_name:
+            y_pred_new = preds_storm
+
     new_errors = y_ho - y_pred_new
     new_mae = float(np.mean(np.abs(new_errors)))
     new_rmse = float(np.sqrt(np.mean(new_errors**2)))
@@ -213,8 +268,10 @@ def run_storm_learning_experiment(
         "held_out_storm_label": held_out["label"],
         "training_storms": training_storms,
         "sample_weight_multiplier": sample_weight_multiplier,
+        "include_storm_hints": include_storm_hints,
         "new_model_algorithm": best_name,
         "new_model_candidates": {name: res["r2"] for name, res in candidates.items()},
+        "algorithm_storm_mae": algorithm_storm_mae,
         "n_train_samples": int(len(X_train)),
         "n_eval_samples": int(len(X_ho)),
         "new_model_mae": new_mae,

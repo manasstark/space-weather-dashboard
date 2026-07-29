@@ -30,11 +30,16 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from dashboard.lib.shared_ui import metric_card, plot_retro
+from dashboard.lib.shared_ui import plot_retro, terminal_metric
 from swdss.models.registry import HORIZONS
 from swdss.models.storm_backtest import BACKTESTABLE, list_backtest_runs, record_backtest_run, run_storm_backtest
 from swdss.models.storm_data import NAMED_STORMS
-from swdss.models.storm_learning import LEARNABLE, list_learning_runs, record_learning_run, run_storm_learning_experiment
+from swdss.models.storm_learning import (
+    LEARNABLE,
+    list_learning_runs,
+    record_learning_run,
+    run_storm_learning_experiment,
+)
 
 VARIABLE_LABELS_DISPLAY = {
     "speed": "Solar Wind Speed",
@@ -163,24 +168,24 @@ def _render_backtest_result(result: dict) -> None:
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         caption = f"vs. {result['production_mae']:.2f} on ordinary (quiet-dominated) test data" if result["production_mae"] else ""
-        metric_card("Storm-Period MAE", f"{result['mae']:.2f}", caption)
+        terminal_metric("Storm-Period MAE", f"{result['mae']:.2f}", caption)
     with c2:
         skill = result["skill_score"]
-        metric_card(
+        terminal_metric(
             "Skill vs. Persistence",
             f"{skill:.3f}" if skill is not None else "—",
             "Beats naive 'assume no change'" if (skill or 0) > 0 else "No skill over persistence",
-            value_color="#1f7a3a" if (skill or 0) > 0 else "#7a1f1f",
+            value_color="#39d98a" if (skill or 0) > 0 else "#f85149",
         )
     with c3:
         band = result["within_production_mae_band_rate"]
-        metric_card(
+        terminal_metric(
             "Within Normal Error Band",
             f"{band * 100:.0f}%" if band is not None else "—",
             "Share of storm-hours within 1.5x the model's usual MAE",
         )
     with c4:
-        metric_card("Persistence MAE", f"{result['persistence_mae']:.2f}", "Naive baseline for comparison")
+        terminal_metric("Persistence MAE", f"{result['persistence_mae']:.2f}", "Naive baseline for comparison")
 
     if result["per_regime"]:
         st.markdown("###### Error by Activity Regime (this storm)")
@@ -299,13 +304,13 @@ def _render_learning_result(result: dict) -> None:
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        metric_card("New Model MAE", f"{result['new_model_mae']:.2f}", f"Algorithm: {result['new_model_algorithm']}")
+        terminal_metric("New Model MAE", f"{result['new_model_mae']:.2f}", f"Algorithm: {result['new_model_algorithm']}")
     with c2:
-        metric_card("Production Model MAE", f"{result['production_model_mae']:.2f}", "Same held-out storm, current deployed model")
+        terminal_metric("Production Model MAE", f"{result['production_model_mae']:.2f}", "Same held-out storm, current deployed model")
     with c3:
-        metric_card("Persistence MAE", f"{result['persistence_mae']:.2f}", "Naive baseline")
+        terminal_metric("Persistence MAE", f"{result['persistence_mae']:.2f}", "Naive baseline")
     with c4:
-        metric_card(
+        terminal_metric(
             "Training Samples", f"{result['n_train_samples']:,}", f"{len(result['training_storms'])} storm(s) + quiet-time history"
         )
 

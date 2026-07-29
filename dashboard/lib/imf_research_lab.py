@@ -11,8 +11,9 @@ from plotly.subplots import make_subplots
 from dashboard.lib.shared_ui import (
     CONCLUSION_COLORS,
     REFRESH_SECONDS,
-    metric_card,
     plot_retro,
+    render_automl_shell,
+    terminal_metric,
 )
 from swdss.models.imf_research import (
     ALL_TRAINABLE_MODELS,
@@ -164,13 +165,13 @@ def _imf_research_run_row(run: dict, best_run_id: str = None, key_prefix: str = 
                     f"MAE={cv['mae_mean']:.3f} ± {cv['mae_std']:.3f}"
                 )
         with c2:
-            metric_card("R²", f"{m['r2']:.4f}", "")
+            terminal_metric("R²", f"{m['r2']:.4f}", "")
         with c3:
-            metric_card("MAE", f"{m['mae']:.3f}", "")
+            terminal_metric("MAE", f"{m['mae']:.3f}", "")
         with c4:
-            metric_card("RMSE", f"{m['rmse']:.3f}", "")
+            terminal_metric("RMSE", f"{m['rmse']:.3f}", "")
         with c5:
-            metric_card("Bias", f"{m['bias']:+.3f}", "")
+            terminal_metric("Bias", f"{m['bias']:+.3f}", "")
         with c6:
             st.markdown("<div style='height: 22px;'></div>", unsafe_allow_html=True)
             b1, b2 = st.columns(2)
@@ -400,7 +401,7 @@ def render_imf_feature_engineering_tab() -> None:
     for i, (col, label, unit, desc) in enumerate(physics_cols_display):
         with cols[i % 4]:
             val = latest.get(col)
-            metric_card(label, "N/A" if pd.isna(val) else f"{val:.2f} {unit}", desc)
+            terminal_metric(label, "N/A" if pd.isna(val) else f"{val:.2f} {unit}", desc)
 
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
     st.markdown("##### Full Feature List Used for Training")
@@ -443,15 +444,15 @@ def render_imf_sequence_models_tab() -> None:
     m = run["metrics"]
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        metric_card("R²", f"{m['r2']:.4f}", "")
+        terminal_metric("R²", f"{m['r2']:.4f}", "")
     with c2:
-        metric_card("MAE", f"{m['mae']:.3f}", "")
+        terminal_metric("MAE", f"{m['mae']:.3f}", "")
     with c3:
-        metric_card("RMSE", f"{m['rmse']:.3f}", "")
+        terminal_metric("RMSE", f"{m['rmse']:.3f}", "")
     with c4:
-        metric_card("MAPE", "N/A" if m["mape"] is None else f"{m['mape']:.1f}%", "")
+        terminal_metric("MAPE", "N/A" if m["mape"] is None else f"{m['mape']:.1f}%", "")
     with c5:
-        metric_card("Bias", f"{m['bias']:+.3f}", "")
+        terminal_metric("Bias", f"{m['bias']:+.3f}", "")
 
     if run.get("loss_history"):
         lh = run["loss_history"]
@@ -575,11 +576,11 @@ def render_imf_hypothesis_testing_tab() -> None:
         st.write(result["explanation"])
         c1, c2, c3 = st.columns(3)
         with c1:
-            metric_card("ΔR²", f"{result['delta_r2']:+.4f}", "")
+            terminal_metric("ΔR²", f"{result['delta_r2']:+.4f}", "")
         with c2:
-            metric_card("ΔMAE", f"{result['delta_mae']:+.4f}", "")
+            terminal_metric("ΔMAE", f"{result['delta_mae']:+.4f}", "")
         with c3:
-            metric_card("Samples", f"{experimental_run['n_test_samples']}", "held-out test rows")
+            terminal_metric("Samples", f"{experimental_run['n_test_samples']}", "held-out test rows")
 
 
 def render_imf_horizon_analysis_tab() -> None:
@@ -669,69 +670,48 @@ def render_imf_horizon_analysis_tab() -> None:
     st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
 
+def _bz_study_label(s: dict) -> str:
+    rec_icon = "✅" if s["recommendation"] == "Promote" else "⏸"
+    status_icon = {"pending": "🕓", "promoted": "🚀", "rejected": "❌"}.get(s.get("promotion_status", "pending"), "")
+    return (
+        f"{rec_icon} {pd.Timestamp(s['started_at']).strftime('%Y-%m-%d %H:%M UTC')} · "
+        f"Winner: {s['winner_model_type']} (R²={s['winner_metrics']['r2']:.4f}) · "
+        f"{status_icon} {s.get('promotion_status', 'pending')}"
+    )
+
+
+def _bz_success_message(study: dict) -> str:
+    return (
+        f"Study complete — winner: **{study['winner_model_type']}** "
+        f"(R²={study['winner_metrics']['r2']:.4f}) — recommendation: **{study['recommendation']}**"
+    )
+
+
 def _render_automl_section() -> None:
     """AutoML orchestration layer — automatically runs Experiments 1-10
     end-to-end (the manual Exp 1-8 tabs below stay untouched; this only
     sequences the same underlying functions those tabs call). Promotion
     is never automatic — the study always ends with a leaderboard and a
-    Promote/Keep recommendation for a human to act on.
+    Promote/Keep recommendation for a human to act on. Shell (button,
+    progress, history selector) shared with the Kp/AE studies via
+    render_automl_shell — see that function's docstring for why only
+    the shell, not the experiment logic itself, is consolidated.
     """
-    st.markdown("### 🤖 Automated Optimization (AutoML)")
-    st.caption(
-        "Runs the entire pipeline below — baseline, persistence benchmark, structured feature "
-        "search, full model sweep, feature importance, SHAP, leaderboard, and a production "
-        "recommendation — with a single click and no manual tab-clicking. Every model trained "
-        "here lands in the same registry as the manual experiments and can be inspected there. "
-        "**Promotion always requires your explicit confirmation** at the end."
+    render_automl_shell(
+        caption=(
+            "Runs the entire pipeline below — baseline, persistence benchmark, structured feature "
+            "search, full model sweep, feature importance, SHAP, leaderboard, and a production "
+            "recommendation — with a single click and no manual tab-clicking. Every model trained "
+            "here lands in the same registry as the manual experiments and can be inspected there. "
+            "**Promotion always requires your explicit confirmation** at the end."
+        ),
+        run_study_fn=run_complete_optimization_study,
+        list_studies_fn=list_studies,
+        render_detail_fn=_render_study_detail,
+        study_label_fn=_bz_study_label,
+        success_message_fn=_bz_success_message,
+        session_key_prefix="automl",
     )
-
-    if st.button("🚀 Run Complete Optimization Study", key="automl_run_study", type="primary"):
-        status_box = st.status("Running complete Bz optimization study…", expanded=True)
-
-        def _cb(step, total, msg):
-            status_box.update(label=f"Step {step}/{total} — {msg}")
-            status_box.write(f"**Step {step}/{total}:** {msg}")
-
-        try:
-            study = run_complete_optimization_study(progress_cb=_cb)
-            status_box.update(label="Optimization study complete.", state="complete", expanded=False)
-            st.session_state["automl_last_study_id"] = study["study_id"]
-            st.success(
-                f"Study complete — winner: **{study['winner_model_type']}** "
-                f"(R²={study['winner_metrics']['r2']:.4f}) — recommendation: **{study['recommendation']}**"
-            )
-            st.rerun()
-        except Exception as exc:
-            status_box.update(label="Optimization study failed.", state="error")
-            st.error(f"Study failed: {exc}")
-
-    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
-    st.markdown("##### Study History")
-    studies = list_studies()
-    if not studies:
-        st.info("No optimization studies run yet — click the button above to run the first one.")
-        return
-
-    def _study_label(s):
-        rec_icon = "✅" if s["recommendation"] == "Promote" else "⏸"
-        status_icon = {"pending": "🕓", "promoted": "🚀", "rejected": "❌"}.get(s.get("promotion_status", "pending"), "")
-        return (
-            f"{rec_icon} {pd.Timestamp(s['started_at']).strftime('%Y-%m-%d %H:%M UTC')} · "
-            f"Winner: {s['winner_model_type']} (R²={s['winner_metrics']['r2']:.4f}) · "
-            f"{status_icon} {s.get('promotion_status', 'pending')}"
-        )
-
-    study_labels = [_study_label(s) for s in studies]
-    default_idx = 0
-    last_id = st.session_state.get("automl_last_study_id")
-    if last_id:
-        for i, s in enumerate(studies):
-            if s["study_id"] == last_id:
-                default_idx = i
-                break
-    chosen_label = st.selectbox("Select a study to inspect", study_labels, index=default_idx, key="automl_study_select")
-    study = studies[study_labels.index(chosen_label)]
-    _render_study_detail(study)
 
 
 def _render_study_detail(study: dict) -> None:

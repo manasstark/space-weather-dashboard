@@ -14,7 +14,6 @@ feature set, so it's computed here directly from the same tail window.
 """
 
 from swdss.models.predict import load_live_features
-from swdss.physics.coupling import akasofu_epsilon_series, boyle_index_series, newell_coupling_series
 from swdss.physics.core import (
     integrated_ey_series,
     integrated_southward_bz_series,
@@ -22,6 +21,7 @@ from swdss.physics.core import (
     southward_duration_series,
     strong_southward_duration_series,
 )
+from swdss.physics.coupling import akasofu_epsilon_series, boyle_index_series, newell_coupling_series
 from swdss.physics.geometry import (
     clock_angle_rate_series,
     clock_angle_series,

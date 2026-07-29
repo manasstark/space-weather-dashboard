@@ -28,9 +28,8 @@ from html import escape
 import pandas as pd
 import streamlit as st
 
-from swdss.paths import MASTER_V1_PATH, PROCESSED_DIR
-
 from dashboard.lib.shared_ui import REFRESH_SECONDS
+from swdss.paths import MASTER_V1_PATH, PROCESSED_DIR
 
 
 def get_base64_image(path) -> str:
@@ -60,9 +59,13 @@ STATUS_BADGE_STYLES = {
 }
 
 QUICKLOOK_CONFIDENCE_COLORS = {
-    "high": "#1f5a2e",
-    "moderate": "#7a5a1f",
-    "low": "#7a1f1f",
+    # Bright terminal-palette values (dashboard.lib.design_tokens'
+    # ACCENT/AMBER/RED) — the previous dark, desaturated values were
+    # chosen for the retired metric_card's light-grey Win-95 background
+    # and would be near-invisible on terminal_metric's dark panel.
+    "high": "#39d98a",
+    "moderate": "#e3b341",
+    "low": "#f85149",
 }
 
 

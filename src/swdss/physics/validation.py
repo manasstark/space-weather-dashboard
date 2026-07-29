@@ -12,10 +12,9 @@ self-contained modules over external test-framework dependencies.
 
 import math
 
-import numpy as np
 import pandas as pd
 
-from swdss.physics import coupling, core, geometry, magnetosphere, plasma
+from swdss.physics import core, coupling, geometry, magnetosphere, plasma
 
 
 def _check(label: str, actual: float, expected: float, tol: float = 1e-6) -> bool:

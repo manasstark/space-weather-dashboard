@@ -12,8 +12,14 @@ touches jobs.py's SQLite DB directly, and never recomputes physics. If
 the engine hasn't produced a snapshot yet, it shows one line of plain
 text and nothing else.
 
-Ten fixed tabs: Forecast (default), Current, Physics, Timeline,
-Verification, Logs, Downloads, Alerts, System, Search.
+Eleven fixed tabs: Forecast (default), Current, Physics, Timeline,
+Verification, Logs, Downloads, Alerts, System, Search, Solar Forecast.
+Solar Forecast is the odd one out architecturally — F10.7 and CME
+arrival aren't PRODUCTION_MATRIX jobs, so it reads
+swdss.engine.storage.load_solar_forecast() (written by
+orchestrator._solar_forecast_snapshot) instead of the main
+`snapshot` dict every other tab here reads, but follows the exact same
+"engine computes, dashboard only reads" rule.
 """
 
 from html import escape
@@ -22,23 +28,16 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from dashboard.lib.design_tokens import ACCENT, AMBER, BG, BLUE, BORDER, MONO, MUTED, PANEL_BG, RED, TEXT
 from dashboard.lib.shared_ui import open_dialog
 from swdss.engine import calibration, packages, skill, storage
 from swdss.engine.labels import classify_current_reading
 from swdss.paths import PROCESSED_DIR
 
 # ==================== Terminal design tokens ====================
-
-BG = "#090c10"
-PANEL_BG = "#0d1117"
-BORDER = "#1c2530"
-TEXT = "#c9d1d9"
-MUTED = "#6e7681"
-ACCENT = "#39d98a"      # section headers, positive/online status
-AMBER = "#e3b341"       # warnings, moderate deviation
-RED = "#f85149"         # critical, large deviation
-BLUE = "#58a6ff"        # informational, links, LIVE status
-MONO = "'JetBrains Mono', 'Fira Code', 'Consolas', 'Courier New', monospace"
+# (BG/PANEL_BG/BORDER/TEXT/MUTED/ACCENT/AMBER/RED/BLUE/MONO now live in
+# dashboard.lib.design_tokens — single source of truth shared with
+# shared_ui.terminal_metric, imported above rather than redefined here.)
 
 STATUS_COLORS = {
     "CREATED": MUTED,
@@ -386,7 +385,7 @@ def _lifecycle_html(current_stage: str) -> str:
         cls = "stage current" if stage == current_stage else "stage"
         color = STATUS_COLORS.get(stage, MUTED) if stage == current_stage else MUTED
         parts.append(f'<span class="{cls}" style="color:{color};">{escape(stage)}</span>')
-    return f'<span class="arrow">→</span>'.join(parts)
+    return '<span class="arrow">→</span>'.join(parts)
 
 
 def _render_package_banner(package: dict) -> None:
@@ -482,7 +481,7 @@ def render_operational_command_centre() -> None:
 
     tabs = st.tabs([
         "Forecast", "Current", "Physics", "Timeline", "Verification",
-        "Logs", "Downloads", "Alerts", "System", "Search",
+        "Logs", "Downloads", "Alerts", "System", "Search", "Solar Forecast",
     ])
     with tabs[0]:
         _render_forecast_tab(snapshot)
@@ -504,6 +503,8 @@ def render_operational_command_centre() -> None:
         _render_system_tab(snapshot)
     with tabs[9]:
         _render_search_tab(snapshot)
+    with tabs[10]:
+        _render_solar_forecast_tab()
 
 
 # ==================== Forecast ====================
@@ -640,7 +641,7 @@ def _render_forecast_tab(snapshot: dict) -> None:
     level = outlook.get("level", "Quiet")
     level_color = {"Quiet": ACCENT, "Unsettled": AMBER, "Minor Storm": AMBER, "Moderate Storm": RED, "Strong Storm": RED}.get(level, TEXT)
 
-    st.markdown(f'<div class="term-root"><div class="term-section">Forecast Cycle</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="term-root"><div class="term-section">Forecast Cycle</div></div>', unsafe_allow_html=True)
     headers = ["CYCLE GENERATED", "ENGINE VERSION", "ACTIVE JOBS", "STATUS"]
     rows = [[_fmt_time(generated_at), str(snapshot.get("engine_version", "—")), str(snapshot.get("active_jobs_total", 0)), _status_span("ACTIVE")]]
     st.markdown(f'<div class="term-root">{_table(headers, rows)}</div>', unsafe_allow_html=True)
@@ -650,7 +651,7 @@ def _render_forecast_tab(snapshot: dict) -> None:
     _render_section_report("Geomagnetic", "analytics", ["dst", "kp"], snapshot)
     _render_section_report("Auroral Electrojet", "ae", ["ae"], snapshot)
 
-    st.markdown(f'<div class="term-root"><div class="term-section">Overall Space Weather Outlook</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="term-root"><div class="term-section">Overall Space Weather Outlook</div></div>', unsafe_allow_html=True)
     headers = ["EXPECTED ACTIVITY", "PRIMARY DRIVER", "CONFIDENCE BASIS"]
     primary_driver = outlook.get("reasoning", ["—"])[0] if outlook.get("reasoning") else "—"
     rows = [[f'<span style="color:{level_color}; font-weight:700;">{escape(level.upper())}</span>', escape(primary_driver), f"{len(outlook.get('reasoning', []))} contributing indices"]]
@@ -735,7 +736,7 @@ def _render_physics_tab(snapshot: dict) -> None:
         st.markdown('<div class="term-root term-caption">Physics summary not available yet.</div>', unsafe_allow_html=True)
         return
 
-    st.markdown(f'<div class="term-root"><div class="term-section">Engineering Readout</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="term-root"><div class="term-section">Engineering Readout</div></div>', unsafe_allow_html=True)
     headers = ["QUANTITY", "VALUE", "INTERPRETATION"]
     rows = []
     for key, label, suffix, label_key in PHYSICS_ROWS:
@@ -781,7 +782,7 @@ def _render_timeline_tab(snapshot: dict) -> None:
     _dark_plotly_layout(fig, f"{variable.upper()} @ {horizon} — Forecast vs. Observed", height=300)
     st.plotly_chart(fig, use_container_width=True, key="cc_timeline_chart")
 
-    st.markdown(f'<div class="term-root"><div class="term-section">Lifecycle Log</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="term-root"><div class="term-section">Lifecycle Log</div></div>', unsafe_allow_html=True)
     tail = subset.tail(40).iloc[::-1]
     headers = ["CYCLE GENERATED", "VALID PERIOD", "STATUS", "FORECAST", "OBSERVED", "CONF"]
     rows = []
@@ -1097,7 +1098,13 @@ def _render_logs_tab(snapshot: dict) -> None:
     logs = storage.load_recent_logs(500)
     if query:
         q = query.lower()
-        logs = [l for l in logs if q in str(l.get("stage", "")).lower() or q in str(l.get("message", "")).lower() or q in str(l.get("level", "")).lower()]
+        logs = [
+            entry
+            for entry in logs
+            if q in str(entry.get("stage", "")).lower()
+            or q in str(entry.get("message", "")).lower()
+            or q in str(entry.get("level", "")).lower()
+        ]
 
     if not logs:
         st.markdown('<div class="term-root term-caption">No matching log lines.</div>', unsafe_allow_html=True)
@@ -1136,7 +1143,7 @@ def _file_row(label: str, path, fmt: str, mime: str) -> None:
 
 
 def _render_downloads_tab(snapshot: dict) -> None:
-    st.markdown(f'<div class="term-root"><div class="term-section">Forecast Package</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="term-root"><div class="term-section">Forecast Package</div></div>', unsafe_allow_html=True)
     _file_row("Current Package", storage.CURRENT_PACKAGE_PATH, "JSON", "application/json")
     _file_row("Package History", storage.PACKAGE_HISTORY_PATH, "PARQUET", "application/octet-stream")
     _file_row("Package Verification History", storage.PACKAGE_VERIFICATION_HISTORY_PATH, "PARQUET", "application/octet-stream")
@@ -1150,7 +1157,7 @@ def _render_downloads_tab(snapshot: dict) -> None:
         )
 
     st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
-    st.markdown(f'<div class="term-root"><div class="term-section">Forecast Products</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="term-root"><div class="term-section">Forecast Products</div></div>', unsafe_allow_html=True)
     _file_row("Current Snapshot", storage.CURRENT_SNAPSHOT_PATH, "JSON", "application/json")
     _file_row("Forecast History", storage.FORECAST_HISTORY_PATH, "PARQUET", "application/octet-stream")
     _file_row("Evaluation History", storage.EVALUATION_HISTORY_PATH, "PARQUET", "application/octet-stream")
@@ -1164,7 +1171,7 @@ def _render_downloads_tab(snapshot: dict) -> None:
         st.download_button("↓ FETCH evaluation_history.csv", data=evaluations.to_csv(index=False), file_name="evaluation_history.csv", mime="text/csv", key="dl_eval_csv")
 
     st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
-    st.markdown(f'<div class="term-root"><div class="term-section">Verification Science</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="term-root"><div class="term-section">Verification Science</div></div>', unsafe_allow_html=True)
     _file_row("Skill Scores", storage.SKILL_SCORES_PATH, "JSON", "application/json")
     _file_row("Calibration Report", storage.CALIBRATION_REPORT_PATH, "JSON", "application/json")
 
@@ -1376,3 +1383,171 @@ def _render_search_tab(snapshot: dict) -> None:
                 for _, r in detail.iterrows()
             ]
             st.markdown(f'<div class="term-root">{_table(detail_headers, detail_rows)}</div>', unsafe_allow_html=True)
+
+
+# ==================== Solar Forecast ====================
+
+_F107_METHOD_SPAN = {
+    "harmonic": (ACCENT, "HARMONIC (VALIDATED)"),
+    "seasonal_naive_fallback_underperformed": (AMBER, "27-DAY SEASONAL-NAIVE (HARMONIC UNDERPERFORMED)"),
+    "seasonal_naive_fallback_insufficient_history": (MUTED, "27-DAY SEASONAL-NAIVE (INSUFFICIENT HISTORY)"),
+    "seasonal_naive_fallback_unvalidated": (MUTED, "27-DAY SEASONAL-NAIVE (HARMONIC UNVALIDATED)"),
+}
+
+
+def _render_f107_section(f107: dict | None) -> None:
+    st.markdown('<div class="term-root"><div class="term-section">F10.7 Outlook</div></div>', unsafe_allow_html=True)
+    if f107 is None:
+        st.markdown('<div class="term-root term-caption">No F10.7 data available yet.</div>', unsafe_allow_html=True)
+        return
+
+    color, method_label = _F107_METHOD_SPAN.get(f107.get("tomorrow_method"), (MUTED, f107.get("tomorrow_method", "—").upper()))
+    headers = ["LAST OBSERVED", "TOMORROW FORECAST", "27D SEASONAL-NAIVE", "METHOD", "HISTORY"]
+    rows = [[
+        f'{_fmt(f107.get("last_observed_value"), 0)} <span class="term-caption">({escape(str(f107.get("last_observed_date", "—"))[:10])})</span>',
+        f'<span class="num" style="font-weight:700;">{_fmt(f107.get("tomorrow_forecast"), 0)}</span>',
+        f'<span class="num">{_fmt(f107.get("tomorrow_naive_baseline"), 0)}</span>',
+        f'<span style="color:{color}; font-weight:700;">{escape(method_label)}</span>',
+        f'{f107.get("n_days_history", 0)} days <span class="term-caption">(need {f107.get("min_days_for_harmonic", "—")}+ for harmonic)</span>',
+    ]]
+    st.markdown(f'<div class="term-root">{_table(headers, rows)}</div>', unsafe_allow_html=True)
+
+    skill = f107.get("skill")
+    if skill is not None:
+        s_headers = ["HARMONIC MAE (HOLDOUT)", "NAIVE MAE (HOLDOUT)", "SKILL SCORE", "HOLDOUT SAMPLES"]
+        skill_score = skill.get("skill_score")
+        skill_color = ACCENT if (skill_score or 0) > 0 else RED
+        s_rows = [[
+            f'<span class="num">{_fmt(skill.get("model_mae"), 2)}</span>',
+            f'<span class="num">{_fmt(skill.get("naive_mae"), 2)}</span>',
+            f'<span class="num" style="color:{skill_color}; font-weight:700;">{_fmt_signed(skill_score, 2)}</span>',
+            str(skill.get("n_samples", "—")),
+        ]]
+        st.markdown(f'<div class="term-root">{_table(s_headers, s_rows)}</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="term-root term-caption">Not enough history yet to run a holdout skill check against the naive baseline.</div>', unsafe_allow_html=True)
+
+    week_trend = f107.get("week_trend") or []
+    if week_trend:
+        with st.expander("▸ 7-Day Trend (Harmonic Model vs. Seasonal-Naive)"):
+            t_headers = ["DAYS AHEAD", "HARMONIC MODEL", "27D SEASONAL-NAIVE"]
+            t_rows = [
+                [str(day.get("day")), f'<span class="num">{_fmt(day.get("model"), 1)}</span>', f'<span class="num">{_fmt(day.get("naive"), 1)}</span>']
+                for day in week_trend
+            ]
+            st.markdown(f'<div class="term-root">{_table(t_headers, t_rows, numeric_cols={1, 2})}</div>', unsafe_allow_html=True)
+
+
+def _render_cme_arrival_section(cme_arrivals: list) -> None:
+    st.markdown('<div class="term-root"><div class="term-section">CME Arrival — Drag-Based Model</div></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="term-root term-caption">Vršnak et al. (2013) — each CME decelerates or accelerates toward the '
+        'ambient solar wind speed rather than travelling at a fixed launch speed the whole way; arrival is reported '
+        'as a window (fastest/typical/slowest plausible transit), not a single number.</div>',
+        unsafe_allow_html=True,
+    )
+    if not cme_arrivals:
+        st.markdown('<div class="term-root term-caption">No CME with a usable speed reading in the recent lookback window.</div>', unsafe_allow_html=True)
+        return
+
+    headers = ["LAUNCHED", "SPEED", "TYPE", "ARRIVAL (MEDIAN)", "ARRIVAL WINDOW", "AMBIENT WIND USED", "TRAVEL TIME (MEDIAN)", "SOURCE REGION HELICITY"]
+    rows = []
+    for cme in cme_arrivals:
+        helicity = cme.get("source_region_helicity")
+        if helicity and helicity.get("mean_current_helicity") is not None:
+            helicity_cell = f'{_fmt(helicity["mean_current_helicity"], 4)} <span class="term-caption">({escape(helicity["sign_label"])})</span>'
+        else:
+            helicity_cell = '<span class="term-caption">no matched active region</span>'
+        rows.append([
+            _fmt_time(cme.get("launch_time")),
+            f'<span class="num">{_fmt(cme.get("launch_speed_km_s"), 0)} km/s</span>',
+            escape(str(cme.get("cme_type") or "—")),
+            _fmt_time(cme.get("arrival_median")),
+            f'{_fmt_time(cme.get("arrival_min"))} – {_fmt_time(cme.get("arrival_max"))}',
+            f'<span class="num">{_fmt(cme.get("ambient_speed_used_km_s"), 0)} km/s</span>',
+            f'<span class="num">{_fmt(cme.get("travel_hours_median"), 1)} h</span>',
+            helicity_cell,
+        ])
+    st.markdown(f'<div class="term-root">{_table(headers, rows, numeric_cols={1, 5, 6})}</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="term-root term-caption">Source Region Helicity is descriptive, not predictive — it\'s the '
+        'source active region\'s measured magnetic helicity sign (SDO/HMI SHARP), relevant to the hemispheric '
+        'helicity rule research on CME flux-rope chirality. It is NOT a Bz-sign forecast, and does not replace the '
+        'production Bz model (Heliosphere → IMF), which forecasts ambient solar wind Bz — a different, continuous '
+        'question from this CME-specific, descriptive note. See CME Outlook below for occurrence-probability '
+        'scoring; storm-strength/geoeffectiveness scoring (how strong an impact, not whether one occurs) is still '
+        'a separate, unbuilt capability.</div>',
+        unsafe_allow_html=True,
+    )
+
+
+_OUTLOOK_STATUS_MESSAGES = {
+    "not_trained": "Model not yet trained — insufficient historical flare/CME event history at the time this pipeline was built.",
+    "insufficient_positive_examples": "Not enough historical positive examples (flares/CMEs) yet to train a validated model.",
+    "degenerate_split": "Historical positive examples exist but aren't spread across a valid train/test split yet — needs more history.",
+    "trained_no_measurable_skill": "A model was trained, but scored no better than chance (TSS ≤ 0) on a holdout test — not shown as a live forecast until it demonstrates real skill. Expected outcome for a first pass on ~2 months of history across ~45 active regions, not a bug.",
+    "fetch_failed": "Live SHARP data fetch from JSOC failed this cycle — showing the last successful result if any.",
+    "no_active_regions": "No active regions with usable SHARP data in the current live snapshot.",
+    "no_scorable_regions": "Active regions present, but none have enough SHARP history yet (need 24h+ per region) to score.",
+}
+
+
+def _render_outlook_section(title: str, outlook: dict | None, caption: str) -> None:
+    st.markdown(f'<div class="term-root"><div class="term-section">{escape(title)}</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="term-root term-caption">{caption}</div>', unsafe_allow_html=True)
+
+    if not outlook or outlook.get("status") != "ok":
+        status = (outlook or {}).get("status", "not_trained")
+        message = _OUTLOOK_STATUS_MESSAGES.get(status, status)
+        st.markdown(f'<div class="term-root term-caption">{escape(message)}</div>', unsafe_allow_html=True)
+        return
+
+    headers = ["ACTIVE REGION", "PROBABILITY (NEXT 24H)"]
+    rows = []
+    for region in outlook.get("regions", []):
+        prob = region["probability"]
+        color = RED if prob >= 0.5 else (AMBER if prob >= 0.2 else ACCENT)
+        rows.append([
+            f"AR{region['noaa_ar']}",
+            f'<span class="num" style="color:{color}; font-weight:700;">{prob:.0%}</span>',
+        ])
+    st.markdown(f'<div class="term-root">{_table(headers, rows, numeric_cols={1})}</div>', unsafe_allow_html=True)
+
+
+def _render_solar_forecast_tab() -> None:
+    """Reads swdss.engine.storage.load_solar_forecast() only — F10.7's
+    harmonic-regression outlook, CME Drag-Based Model arrival estimates,
+    and (as of the SHARP pipeline) Flare Outlook / CME Outlook
+    probabilities are all computed once per engine cycle in
+    orchestrator._solar_forecast_snapshot, never recomputed here, the
+    same "engine computes, dashboard only reads" rule every other tab in
+    this module follows.
+    """
+    solar = storage.load_solar_forecast()
+    if solar is None:
+        st.markdown(
+            '<div class="term-root" style="color:#6e7681; font-size:0.8rem;">'
+            "NO SOLAR FORECAST SNAPSHOT YET — run `python -m swdss.features.live_update` "
+            "or call refresh_dashboard_products() manually."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    _render_outlook_section(
+        "Flare Outlook",
+        solar.get("flare_outlook"),
+        "Probability of an M-class+ flare in the next 24h, per active region — trained on SDO/HMI SHARP magnetic-"
+        "complexity features (USFLUX, R_VALUE, TOTPOT, MEANJZH, and related keywords) via RandomForestClassifier, "
+        "scored by True Skill Statistic and Brier score against a chronological holdout, not accuracy (which a "
+        "model that always predicts \"no flare\" would already win at, since flares are rare).",
+    )
+    _render_outlook_section(
+        "CME Outlook",
+        solar.get("cme_outlook"),
+        "Probability of an Earth-directed CME in the next 24h, per active region — same SHARP features and "
+        "methodology as Flare Outlook, trained as a separate model since flare occurrence and CME occurrence are "
+        "related but distinct events.",
+    )
+    _render_f107_section(solar.get("f107"))
+    _render_cme_arrival_section(solar.get("cme_arrivals") or [])

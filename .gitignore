@@ -18,6 +18,7 @@ __pycache__/
 /data/
 /models/
 /catboost_info/
+/logs/
 
 # Test / lint caches
 .pytest_cache/

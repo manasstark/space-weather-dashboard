@@ -1,0 +1,24 @@
+venv/
+.git/
+.github/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.DS_Store
+.vscode/
+htmlcov/
+.coverage
+
+# Secrets — pass NASA_API_KEY via `docker run -e` or --env-file instead.
+.env
+
+# Generated data/models/logs — mount as volumes, don't bake into the image.
+data/
+models/
+catboost_info/
+logs/
+
+notebooks/

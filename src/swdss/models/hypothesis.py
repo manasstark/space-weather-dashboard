@@ -9,7 +9,6 @@ All conclusions and confidence levels come from fixed, documented rules
 over measured statistics. No LLM is used anywhere in this module.
 """
 
-import json
 import sqlite3
 import uuid
 from contextlib import contextmanager

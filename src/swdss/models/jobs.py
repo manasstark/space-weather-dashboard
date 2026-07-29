@@ -28,15 +28,18 @@ from contextlib import contextmanager
 import numpy as np
 import pandas as pd
 
-from swdss.physics.core import dynamic_pressure_scalar, ey_scalar, vbz_scalar
-
 from swdss.ingest.kyoto_ae import fetch_kyoto_ae_hour
 from swdss.ingest.kyoto_ae_quicklook import estimate_kyoto_quicklook_ae_full
-from swdss.models.predict import latest_minute_observation, load_live_features, resolve_static_actual
+from swdss.models.predict import (
+    latest_minute_observation,
+    load_live_features,
+    predict_kp_rolling,
+    resolve_static_actual,
+)
 from swdss.models.predict import predict as predict_live
-from swdss.models.predict import predict_kp_rolling
 from swdss.models.registry import DATASETS, HORIZONS, IMF_VARIABLES, SOLAR_WIND_VARIABLES
 from swdss.paths import DATA_DIR
+from swdss.physics.core import dynamic_pressure_scalar, ey_scalar, vbz_scalar
 
 DB_PATH = DATA_DIR / "predictions" / "predictions.db"
 

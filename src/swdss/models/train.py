@@ -36,6 +36,61 @@ CANDIDATE_MODELS = {
 TEST_FRACTION = 0.2
 CV_FOLDS = 5
 
+# How much better the ensemble's walk-forward CV R² must be than the best
+# single candidate's before it's ever selected — matches this project's
+# established discipline of never promoting a change on the strength of a
+# difference that could just be noise (the same "is the difference even
+# meaningful" threshold Storm Learning's verdict logic already applies
+# elsewhere). A blend that's merely marginally different from its own best
+# ingredient isn't worth the extra inference cost and reduced
+# interpretability of shipping three models instead of one.
+ENSEMBLE_MEANINGFUL_IMPROVEMENT = 0.05
+
+
+class WeightedEnsembleRegressor:
+    """A blend of CANDIDATE_MODELS, weighted by each candidate's own
+    walk-forward CV R² (candidates with zero or negative CV R² get zero
+    weight, so a genuinely bad candidate can never drag the blend down —
+    it's a weighted average of the models that showed real skill, not a
+    naive average of all three regardless of quality).
+
+    Implements the same .fit()/.predict() contract every sklearn
+    estimator does, so it plugs directly into evaluate_walk_forward,
+    evaluate_split, predict.py's live inference, and joblib
+    persistence — every existing codepath that expects a fittable/
+    predictable model — with zero changes elsewhere. Falls back to the
+    model-agnostic permutation explainer automatically (see
+    explainability.py's _select_shap_explainer, which already returns
+    None for unrecognized model types), since SHAP's TreeExplainer/
+    LinearExplainer don't know how to open a custom blended object.
+    """
+
+    def __init__(self, weights: dict):
+        self.weights = {name: w for name, w in weights.items() if w > 0}
+        self._models = {}
+
+    def fit(self, X, y):
+        for name in self.weights:
+            model = CANDIDATE_MODELS[name]()
+            model.fit(X, y)
+            self._models[name] = model
+        return self
+
+    def predict(self, X):
+        preds = None
+        for name, model in self._models.items():
+            contribution = self.weights[name] * model.predict(X)
+            preds = contribution if preds is None else preds + contribution
+        return preds
+
+
+def _ensemble_weights(all_candidates: dict) -> dict:
+    positive_r2 = {name: max(res["cv"]["r2_mean"], 0.0) for name, res in all_candidates.items()}
+    total = sum(positive_r2.values())
+    if total <= 0:
+        return {}
+    return {name: r2 / total for name, r2 in positive_r2.items()}
+
 
 def evaluate_split(model, X_train, y_train, X_test, y_test) -> dict:
     model.fit(X_train, y_train)
@@ -48,7 +103,8 @@ def evaluate_split(model, X_train, y_train, X_test, y_test) -> dict:
 
 
 def _fit_best(X, y) -> tuple:
-    """Benchmarks every candidate algorithm two ways and refits the winner
+    """Benchmarks every candidate algorithm two ways, then ALSO benchmarks
+    a validated weighted ensemble of them, and refits the overall winner
     on the full dataset:
 
     1. The original single chronological 80/20 holdout split (`evaluate_split`)
@@ -62,13 +118,21 @@ def _fit_best(X, y) -> tuple:
        are rare enough that a single 20% holdout window may or may not
        contain one.
 
-    The algorithm is now SELECTED by mean walk-forward CV R² rather than
-    the single-split R² — a more robust criterion, since a candidate that
-    merely got lucky on one holdout window won't out-rank one that's
-    consistently good across several. Returns
-    (name, holdout_metrics, cv_metrics, model, all_candidates) where
-    all_candidates maps every candidate name to its own holdout/cv
-    metrics, for transparency about what was and wasn't selected.
+    The single-model algorithm is selected by mean walk-forward CV R²,
+    same as before. A WeightedEnsembleRegressor (see above) is then built
+    from the candidates' own CV performance and evaluated the identical
+    way — it only ever replaces the single-model winner if its CV R² beats
+    it by ENSEMBLE_MEANINGFUL_IMPROVEMENT, the same "prove it before you
+    trust it" bar every other new capability in this project has to clear
+    (F10.7's harmonic-vs-naive gate, the SHARP flare/CME TSS>0 gate). No
+    ensemble slot in PRODUCTION_MATRIX ever ships on the strength of "it's
+    fancier," only on a demonstrated, real improvement.
+
+    Returns (name, holdout_metrics, cv_metrics, model, all_candidates)
+    where all_candidates maps every candidate name (plus "Ensemble" when
+    one was built) to its own holdout/cv metrics, for transparency about
+    what was and wasn't selected — same contract as before, one possible
+    extra key.
     """
     split_idx = int(len(X) * (1 - TEST_FRACTION))
     X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
@@ -81,10 +145,32 @@ def _fit_best(X, y) -> tuple:
         all_candidates[name] = {"holdout": holdout_metrics, "cv": cv_metrics}
 
     best_name = max(all_candidates, key=lambda n: all_candidates[n]["cv"]["r2_mean"])
+    best_cv_r2 = all_candidates[best_name]["cv"]["r2_mean"]
+
+    weights = _ensemble_weights(all_candidates)
+    if len(weights) >= 2:  # blending only means something with 2+ real contributors
+        def ensemble_factory():
+            return WeightedEnsembleRegressor(weights)
+        ensemble_cv = evaluate_walk_forward(ensemble_factory, X, y, n_folds=CV_FOLDS)
+        all_candidates["Ensemble"] = {
+            "holdout": evaluate_split(ensemble_factory(), X_train, y_train, X_test, y_test),
+            "cv": ensemble_cv,
+            "weights": weights,
+        }
+        if best_cv_r2 > 0:
+            relative_improvement = (ensemble_cv["r2_mean"] - best_cv_r2) / best_cv_r2
+        else:
+            relative_improvement = 1.0 if ensemble_cv["r2_mean"] > 0 else 0.0
+        if ensemble_cv["r2_mean"] > best_cv_r2 and relative_improvement >= ENSEMBLE_MEANINGFUL_IMPROVEMENT:
+            best_name = "Ensemble"
+
     best_metrics = all_candidates[best_name]["holdout"]
     best_cv = all_candidates[best_name]["cv"]
 
-    final_model = CANDIDATE_MODELS[best_name]()
+    if best_name == "Ensemble":
+        final_model = WeightedEnsembleRegressor(weights)
+    else:
+        final_model = CANDIDATE_MODELS[best_name]()
     final_model.fit(X, y)
     return best_name, best_metrics, best_cv, final_model, all_candidates
 
@@ -107,10 +193,73 @@ def _load_base_df(config):
     return base_df, feature_vars
 
 
-def train_dataset(dataset_key: str) -> list[dict]:
+def prepare_dataset_frame(dataset_key: str) -> tuple:
+    """The dataset-level prep (load training CSV, build the derived-
+    physics + lag/rolling feature frame) every variable/horizon slot of
+    a dataset shares — factored out so a caller training many slots of
+    the same dataset (train_dataset's bulk loop, or
+    swdss.engine.retrain's automated cycle) only pays this cost once
+    per dataset rather than once per slot.
+    """
     config = DATASETS[dataset_key]
     base_df, feature_vars = _load_base_df(config)
     frame, feature_columns = build_feature_frame(base_df, feature_vars)
+    return config, base_df, frame, feature_columns
+
+
+def train_slot(dataset_key: str, variable: str, horizon: int, prepared: tuple | None = None) -> tuple:
+    """Trains and evaluates ONE (dataset, variable, horizon) production
+    slot — exactly the work train_dataset's loop body always did —
+    without writing anything to disk. Returns (final_model, record) so
+    a caller decides whether to persist it: train_dataset always does
+    (unconditional bulk refresh, unchanged behavior); swdss.engine.
+    retrain only does so if the new candidate actually beats the
+    currently-deployed model's own CV score.
+
+    `prepared`, if given, reuses an already-loaded
+    (config, base_df, frame, feature_columns) tuple from
+    prepare_dataset_frame — avoids re-reading the same training CSV for
+    every horizon of the same variable.
+    """
+    config, base_df, frame, feature_columns = prepared or prepare_dataset_frame(dataset_key)
+
+    target = base_df[variable].shift(-horizon)
+    data = frame.copy()
+    data["__target__"] = target
+    data = data.dropna(subset=feature_columns + ["__target__"])
+
+    X = data[feature_columns]
+    y = data["__target__"]
+
+    best_name, best_metrics, best_cv, final_model, all_candidates = _fit_best(X, y)
+
+    record = {
+        "variable": variable,
+        "horizon": horizon,
+        "algorithm": best_name,
+        "r2": best_metrics["r2"],
+        "mae": best_metrics["mae"],
+        "rmse": best_metrics["rmse"],
+        "cv_r2_mean": best_cv["r2_mean"],
+        "cv_r2_std": best_cv["r2_std"],
+        "cv_mae_mean": best_cv["mae_mean"],
+        "cv_mae_std": best_cv["mae_std"],
+        "cv_rmse_mean": best_cv["rmse_mean"],
+        "cv_rmse_std": best_cv["rmse_std"],
+        "cv_n_folds": best_cv["n_folds"],
+        "algorithm_candidates_cv_r2": {
+            name: round(res["cv"]["r2_mean"], 4) for name, res in all_candidates.items()
+        },
+        "feature_columns": feature_columns,
+        "trained_at": datetime.now(timezone.utc).isoformat(),
+        "n_samples": int(len(X)),
+    }
+    return final_model, record
+
+
+def train_dataset(dataset_key: str) -> list[dict]:
+    prepared = prepare_dataset_frame(dataset_key)
+    config = prepared[0]
 
     results = []
 
@@ -123,46 +272,16 @@ def train_dataset(dataset_key: str) -> list[dict]:
             continue
 
         for horizon in HORIZONS:
-            target = base_df[variable].shift(-horizon)
-            data = frame.copy()
-            data["__target__"] = target
-            data = data.dropna(subset=feature_columns + ["__target__"])
-
-            X = data[feature_columns]
-            y = data["__target__"]
-
-            best_name, best_metrics, best_cv, final_model, all_candidates = _fit_best(X, y)
+            final_model, record = train_slot(dataset_key, variable, horizon, prepared=prepared)
 
             path = model_path(dataset_key, variable, horizon)
             joblib.dump(final_model, path)
-
-            record = {
-                "variable": variable,
-                "horizon": horizon,
-                "algorithm": best_name,
-                "r2": best_metrics["r2"],
-                "mae": best_metrics["mae"],
-                "rmse": best_metrics["rmse"],
-                "cv_r2_mean": best_cv["r2_mean"],
-                "cv_r2_std": best_cv["r2_std"],
-                "cv_mae_mean": best_cv["mae_mean"],
-                "cv_mae_std": best_cv["mae_std"],
-                "cv_rmse_mean": best_cv["rmse_mean"],
-                "cv_rmse_std": best_cv["rmse_std"],
-                "cv_n_folds": best_cv["n_folds"],
-                "algorithm_candidates_cv_r2": {
-                    name: round(res["cv"]["r2_mean"], 4) for name, res in all_candidates.items()
-                },
-                "feature_columns": feature_columns,
-                "model_path": str(path),
-                "trained_at": datetime.now(timezone.utc).isoformat(),
-                "n_samples": int(len(X)),
-            }
+            record["model_path"] = str(path)
             results.append(record)
             print(
-                f"[{dataset_key}] {variable} +{horizon}h -> {best_name} "
-                f"(R2={best_metrics['r2']:.4f} MAE={best_metrics['mae']:.3f} RMSE={best_metrics['rmse']:.3f} | "
-                f"CV R2={best_cv['r2_mean']:.4f}+/-{best_cv['r2_std']:.4f})"
+                f"[{dataset_key}] {variable} +{horizon}h -> {record['algorithm']} "
+                f"(R2={record['r2']:.4f} MAE={record['mae']:.3f} RMSE={record['rmse']:.3f} | "
+                f"CV R2={record['cv_r2_mean']:.4f}+/-{record['cv_r2_std']:.4f})"
             )
 
     metrics_doc_path = metrics_path(dataset_key)
@@ -182,18 +301,12 @@ def train_dataset(dataset_key: str) -> list[dict]:
     return results
 
 
-def train_kp_interval_model(dataset: str = "analytics") -> dict:
-    """Kp is only ever officially published every 3 hours (00, 03, 06, ...
-    UTC). Instead of an arbitrary hourly horizon, this trains a single
-    model whose target is always "the Kp value of the next official
-    interval" — e.g. observing at 16:42 (inside the 15-18 UTC interval)
-    targets the 18-21 UTC interval's eventual Kp, same as observing at
-    17:55 in that same interval. The lead time naturally varies 1-3 hours
-    row by row, which the model learns directly from the training data.
-
-    Used for both the production "analytics" dataset and the experimental
-    cascade ("experimental") — same cadence-aware target logic, only the
-    feature set differs (observed AE vs. predicted_ae).
+def train_kp_interval_slot(dataset: str = "analytics") -> tuple:
+    """The Kp-interval equivalent of train_slot — same "prepare, fit,
+    build a record, don't write" contract, so swdss.engine.retrain can
+    evaluate a fresh Kp-interval candidate before deciding whether it
+    beats the currently-deployed one, exactly like every other
+    production slot.
     """
     config = DATASETS[dataset]
     base_df, feature_vars = _load_base_df(config)
@@ -213,9 +326,6 @@ def train_kp_interval_model(dataset: str = "analytics") -> dict:
 
     best_name, best_metrics, best_cv, final_model, all_candidates = _fit_best(X, y)
 
-    path = kp_interval_model_path(dataset)
-    joblib.dump(final_model, path)
-
     record = {
         "variable": "kp",
         "horizon": "interval",
@@ -234,10 +344,30 @@ def train_kp_interval_model(dataset: str = "analytics") -> dict:
             name: round(res["cv"]["r2_mean"], 4) for name, res in all_candidates.items()
         },
         "feature_columns": feature_columns,
-        "model_path": str(path),
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "n_samples": int(len(X)),
     }
+    return final_model, record
+
+
+def train_kp_interval_model(dataset: str = "analytics") -> dict:
+    """Kp is only ever officially published every 3 hours (00, 03, 06, ...
+    UTC). Instead of an arbitrary hourly horizon, this trains a single
+    model whose target is always "the Kp value of the next official
+    interval" — e.g. observing at 16:42 (inside the 15-18 UTC interval)
+    targets the 18-21 UTC interval's eventual Kp, same as observing at
+    17:55 in that same interval. The lead time naturally varies 1-3 hours
+    row by row, which the model learns directly from the training data.
+
+    Used for both the production "analytics" dataset and the experimental
+    cascade ("experimental") — same cadence-aware target logic, only the
+    feature set differs (observed AE vs. predicted_ae).
+    """
+    final_model, record = train_kp_interval_slot(dataset)
+
+    path = kp_interval_model_path(dataset)
+    joblib.dump(final_model, path)
+    record["model_path"] = str(path)
 
     metrics_doc_path = metrics_path(dataset)
     metrics_doc = {}
@@ -249,9 +379,9 @@ def train_kp_interval_model(dataset: str = "analytics") -> dict:
         json.dump(metrics_doc, f, indent=2)
 
     print(
-        f"[{dataset}] kp +next-interval -> {best_name} "
-        f"(R2={best_metrics['r2']:.4f} MAE={best_metrics['mae']:.3f} RMSE={best_metrics['rmse']:.3f} | "
-        f"CV R2={best_cv['r2_mean']:.4f}+/-{best_cv['r2_std']:.4f})"
+        f"[{dataset}] kp +next-interval -> {record['algorithm']} "
+        f"(R2={record['r2']:.4f} MAE={record['mae']:.3f} RMSE={record['rmse']:.3f} | "
+        f"CV R2={record['cv_r2_mean']:.4f}+/-{record['cv_r2_std']:.4f})"
     )
     return record
 

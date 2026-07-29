@@ -19,7 +19,6 @@ Plasma Beta feature values for any run after this migration.
 import numpy as np
 import pandas as pd
 
-
 # ---------------------------------------------------------------------------
 # Magnetic Pressure
 # ---------------------------------------------------------------------------

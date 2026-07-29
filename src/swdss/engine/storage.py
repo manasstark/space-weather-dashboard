@@ -33,6 +33,10 @@ those are observed values, not a forecast product this module owns.
   confidence-reliability and activity-regime error-band tables,
   recomputed every cycle from the full evaluation history —
   Verification tab's calibration sections.
+- current/solar_forecast.json: F10.7 harmonic-regression outlook
+  (swdss.models.f107_forecast) and Drag-Based Model CME arrival
+  estimates (swdss.physics.cme_dbm), recomputed every cycle — the Solar
+  Forecast tab's only data source.
 """
 
 import json
@@ -43,6 +47,7 @@ import pandas as pd
 from swdss.paths import FORECASTS_DIR
 
 CURRENT_SNAPSHOT_PATH = FORECASTS_DIR / "current" / "forecast_snapshot.json"
+CURRENT_SOLAR_FORECAST_PATH = FORECASTS_DIR / "current" / "solar_forecast.json"
 FORECAST_HISTORY_PATH = FORECASTS_DIR / "history" / "forecast_snapshot_history.parquet"
 EVALUATION_HISTORY_PATH = FORECASTS_DIR / "history" / "evaluation_history.parquet"
 ENGINE_LOG_PATH = FORECASTS_DIR / "logs" / "engine_log.jsonl"
@@ -74,6 +79,28 @@ def load_current_snapshot() -> dict | None:
     if not CURRENT_SNAPSHOT_PATH.exists():
         return None
     with open(CURRENT_SNAPSHOT_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def write_solar_forecast(payload: dict) -> None:
+    """Always-overwritten, like write_snapshot — the Solar Forecast tab's
+    F10.7 outlook and CME arrival estimates (swdss.models.f107_forecast,
+    swdss.physics.cme_dbm), computed once per engine cycle in
+    orchestrator.refresh_dashboard_products and read from here rather
+    than recomputed on every dashboard render, same as every other
+    Command Centre tab.
+    """
+    _ensure_parent(CURRENT_SOLAR_FORECAST_PATH)
+    tmp_path = CURRENT_SOLAR_FORECAST_PATH.with_suffix(".json.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, default=str)
+    os.replace(tmp_path, CURRENT_SOLAR_FORECAST_PATH)
+
+
+def load_solar_forecast() -> dict | None:
+    if not CURRENT_SOLAR_FORECAST_PATH.exists():
+        return None
+    with open(CURRENT_SOLAR_FORECAST_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
 

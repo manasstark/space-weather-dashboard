@@ -15,9 +15,8 @@ import json
 import pandas as pd
 import streamlit as st
 
-from swdss.paths import DATA_DIR, PROJECT_ROOT
-
 from dashboard.lib.shared_ui import render_dialog_close_button
+from swdss.paths import DATA_DIR, PROJECT_ROOT
 
 # ==================== Saved Events ====================
 

@@ -223,6 +223,40 @@ def build_base_df(dataset_key: str, omni_df: pd.DataFrame) -> tuple[pd.DataFrame
     return base_df, feature_vars + derived_cols
 
 
+def build_storm_hint_features(base_df: pd.DataFrame) -> list[str]:
+    """Adds storm-specific "hint" features on top of the ordinary physics
+    features — Storm Phase, Time Since Southward Turning, Previous Storm
+    Strength — already prototyped in the Kp Research Lab
+    (swdss.models.kp_physics_features) but never tried on the actual
+    Storm Learning training set. The idea: give the model an explicit
+    clue about *where in a storm* a hour sits, rather than asking it to
+    infer that structure purely from instantaneous solar wind/IMF values
+    (see storm_learning.py's module docstring for why this, not more
+    data or reweighting, is the more promising remaining lever).
+
+    Storm Phase and Previous Storm Strength need a "dst" column — present
+    for the analytics/dst target, not for solar_wind/imf's own narrower
+    feature sets — so those two are skipped (not raised) when it's
+    missing. Time Since Southward Turning only needs bz_gsm, so it's
+    still added wherever IMF data is present. Mutates base_df in place
+    and returns the created column names, same convention as
+    swdss.models.features.add_derived_physics_features.
+    """
+    from swdss.models.kp_physics_features import (
+        add_previous_storm_strength,
+        add_storm_phase,
+        add_time_since_southward_turning,
+    )
+
+    created = []
+    if "bz_gsm" in base_df.columns:
+        created += add_time_since_southward_turning(base_df)
+    if "dst" in base_df.columns:
+        created += add_storm_phase(base_df)
+        created += add_previous_storm_strength(base_df)
+    return created
+
+
 def build_context_frame(omni_df: pd.DataFrame) -> pd.DataFrame:
     """A small Kp/Dst/AE frame (Kp scaled to its natural 0-9 range) used
     purely to tag each historical hour's real activity regime via

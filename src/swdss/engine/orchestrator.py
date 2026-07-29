@@ -54,7 +54,7 @@ import traceback
 import pandas as pd
 
 from swdss.engine import calibration, explanation, packages, skill, storage
-from swdss.engine.alerts import build_alerts
+from swdss.engine.alerts import ambient_solar_wind_speed, build_alerts
 from swdss.engine.confidence import score_forecast_confidence
 from swdss.engine.drift import detect_drift
 from swdss.engine.labels import classify_current_reading
@@ -63,6 +63,7 @@ from swdss.engine.outlook import classify_activity_regime, classify_overall_outl
 from swdss.engine.physics_snapshot import PHYSICS_QUANTITY_KEYS, build_physics_snapshot, physics_completeness
 from swdss.models import jobs as jobs_module
 from swdss.models import predict
+from swdss.models.f107_forecast import forecast_f107
 from swdss.models.jobs import (
     DB_PATH,
     compute_variable_metrics,
@@ -75,6 +76,10 @@ from swdss.models.jobs import (
 )
 from swdss.models.registry import metrics_path
 from swdss.paths import PROCESSED_DIR
+from swdss.physics.cme_dbm import estimate_cme_arrival_dbm
+
+SOLAR_FORECAST_CME_LOOKBACK_HOURS = 120
+FLARE_CME_OUTLOOK_REFRESH_MINUTES = 20  # JSOC queries + classifier inference are far more expensive than the DBM/F10.7 math above and don't need 60s-cycle freshness
 
 ENGINE_VERSION = "1.0"
 
@@ -489,6 +494,206 @@ def _service_health(freshness: dict, run_forecast_cycle_errors: int, active_jobs
     return rows
 
 
+def _solar_forecast_snapshot() -> dict:
+    """The Solar Forecast tab's only data source (see storage.py's
+    write_solar_forecast) — F10.7's harmonic-regression outlook
+    (swdss.models.f107_forecast) and the Drag-Based Model arrival
+    estimate for every recent CME (swdss.physics.cme_dbm), computed once
+    here per engine cycle rather than on every dashboard render, the same
+    "engine computes, dashboard only reads" separation every other
+    Command Centre tab already follows. Reads processed parquet directly
+    (never dashboard/home.py, which runs Streamlit script code at import
+    time and must never be imported from engine/live_update code) —
+    same reasoning swdss.engine.alerts already documents for its own
+    direct CME/Solar Wind reads.
+    """
+    f107_path = PROCESSED_DIR / "f107" / "f107_processed.parquet"
+    f107_result = None
+    if f107_path.exists():
+        try:
+            f107_df = pd.read_parquet(f107_path)
+            f107_df["timestamp_utc"] = pd.to_datetime(f107_df["timestamp_utc"], utc=True, errors="coerce")
+            f107_result = forecast_f107(f107_df)
+        except Exception:
+            traceback.print_exc()
+
+    cme_path = PROCESSED_DIR / "cme" / "cme_processed.parquet"
+    cme_arrivals = []
+    if cme_path.exists():
+        try:
+            cme_df = pd.read_parquet(cme_path)
+            cme_df["timestamp_utc"] = pd.to_datetime(cme_df["timestamp_utc"], utc=True, errors="coerce")
+            cme_df = cme_df.dropna(subset=["timestamp_utc"])
+            cutoff = _now() - pd.Timedelta(hours=SOLAR_FORECAST_CME_LOOKBACK_HOURS)
+            recent = cme_df[cme_df["timestamp_utc"] >= cutoff].sort_values("timestamp_utc", ascending=False)
+            for _, row in recent.iterrows():
+                speed = row.get("speed")
+                if speed is None or pd.isna(speed) or float(speed) <= 0:
+                    continue
+                launch_time = row["timestamp_utc"]
+                ambient = ambient_solar_wind_speed(launch_time)
+                dbm = estimate_cme_arrival_dbm(launch_time, float(speed), ambient)
+                if dbm is None:
+                    continue
+                cme_arrivals.append({
+                    "launch_time": launch_time,
+                    "launch_speed_km_s": float(speed),
+                    "half_angle": row.get("half_angle"),
+                    "cme_type": row.get("cme_type"),
+                    "active_region": row.get("active_region"),
+                    **dbm,
+                })
+        except Exception:
+            traceback.print_exc()
+
+    flare_outlook, cme_outlook, cme_arrivals, helicity_by_ar, flare_cme_computed_at = _flare_cme_outlook_and_lean(cme_arrivals)
+
+    return {
+        "generated_at": _now_iso(),
+        "f107": f107_result,
+        "cme_arrivals": cme_arrivals,
+        "flare_outlook": flare_outlook,
+        "cme_outlook": cme_outlook,
+        "helicity_by_ar": helicity_by_ar,
+        "flare_cme_computed_at": flare_cme_computed_at,
+    }
+
+
+def _previous_flare_cme_outlook() -> tuple[dict | None, dict | None, dict | None, str | None]:
+    """The throttle in _flare_cme_outlook_and_lean must compare against
+    when the flare/CME outlook itself was last actually (re)computed —
+    NOT the enclosing solar_forecast.json snapshot's own `generated_at`,
+    which is stamped fresh every ~60s engine cycle regardless of whether
+    this specific, expensive computation ran that cycle. A real bug found
+    here: this previously read `generated_at`, so `age_minutes` was
+    always ~0 and the throttle silently never let a refresh through again
+    after the first successful computation — caught when a newly
+    retrained flare/CME model's improved metrics never appeared in the
+    live snapshot no matter how long the engine kept running.
+    """
+    previous = storage.load_solar_forecast()
+    if previous is None:
+        return None, None, None, None
+    return (
+        previous.get("flare_outlook"),
+        previous.get("cme_outlook"),
+        previous.get("helicity_by_ar"),
+        previous.get("flare_cme_computed_at"),
+    )
+
+
+def _attach_helicity(cme_arrivals: list, helicity_by_ar: dict) -> list:
+    """Applied every cycle, regardless of the SHARP-fetch throttle below
+    — cme_arrivals itself is rebuilt fresh every 60s cycle as CMEs enter
+    and leave the lookback window, so annotating it must not be nested
+    inside the same throttle as the expensive JSOC fetch (a real bug
+    found and fixed here: the first version nested this loop inside the
+    throttled branch, so a CME appearing mid-throttle-window would sit
+    at "no matched active region" for up to FLARE_CME_OUTLOOK_REFRESH_MINUTES
+    even when its region's helicity was already known).
+    """
+    for cme in cme_arrivals:
+        ar = cme.get("active_region")
+        if ar is None or pd.isna(ar):
+            cme["source_region_helicity"] = None
+            continue
+        entry = helicity_by_ar.get(str(int(ar))) if helicity_by_ar else None
+        cme["source_region_helicity"] = entry
+    return cme_arrivals
+
+
+def _flare_cme_outlook_and_lean(cme_arrivals: list) -> tuple[dict, dict, list, dict, str]:
+    """Flare Outlook / CME Outlook (swdss.models.flare_cme_predict), plus
+    a per-CME source-region magnetic-helicity note attached to every
+    entry in cme_arrivals — deliberately NOT a Bz-sign prediction (see
+    swdss.ingest.sharp's module docstring on the hemispheric helicity
+    rule): just the region's measured helicity sign, a descriptive fact
+    a researcher can weigh, not a confident forecast.
+
+    Only the SHARP fetch + classifier inference is throttled to
+    FLARE_CME_OUTLOOK_REFRESH_MINUTES (reusing the previous cycle's
+    helicity_by_ar lookup when still fresh) — the per-CME attachment
+    itself always runs against the current cycle's cme_arrivals, via
+    _attach_helicity above. The returned `computed_at` is stamped fresh
+    on every path that actually attempts this work (success or failure),
+    and only ever carried over unchanged on the throttled-reuse path —
+    see _previous_flare_cme_outlook for why this must be tracked
+    separately from the enclosing snapshot's own `generated_at`.
+    """
+    prev_flare, prev_cme, prev_helicity_by_ar, prev_computed_at = _previous_flare_cme_outlook()
+    if prev_computed_at is not None:
+        age_minutes = (_now() - pd.Timestamp(prev_computed_at)).total_seconds() / 60
+        if age_minutes < FLARE_CME_OUTLOOK_REFRESH_MINUTES:
+            cme_arrivals = _attach_helicity(cme_arrivals, prev_helicity_by_ar or {})
+            return (
+                prev_flare or {"status": "not_trained"},
+                prev_cme or {"status": "not_trained"},
+                cme_arrivals,
+                (prev_helicity_by_ar or {}),
+                prev_computed_at,
+            )
+
+    from swdss.models.flare_cme_features import SHARP_FEATURE_COLUMNS, resample_sharp_hourly
+    from swdss.models.flare_cme_predict import (
+        FEATURE_COLUMNS,
+        load_flare_cme_metrics,
+        predict_cme_probability,
+        predict_flare_probability,
+    )
+
+    metrics = load_flare_cme_metrics()
+    flare_status = (metrics or {}).get("flare", {}).get("status", "not_trained")
+    cme_status = (metrics or {}).get("cme", {}).get("status", "not_trained")
+    flare_ready = flare_status == "trained"
+    cme_ready = cme_status == "trained"
+
+    try:
+        from swdss.ingest.sharp import fetch_sharp_recent
+        recent = fetch_sharp_recent(hours=30)
+    except Exception:
+        traceback.print_exc()
+        cme_arrivals = _attach_helicity(cme_arrivals, prev_helicity_by_ar or {})
+        return {"status": "fetch_failed"}, {"status": "fetch_failed"}, cme_arrivals, (prev_helicity_by_ar or {}), _now_iso()
+
+    hourly = resample_sharp_hourly(recent)
+    if hourly.empty:
+        cme_arrivals = _attach_helicity(cme_arrivals, prev_helicity_by_ar or {})
+        return {"status": "no_active_regions"}, {"status": "no_active_regions"}, cme_arrivals, (prev_helicity_by_ar or {}), _now_iso()
+
+    hourly = hourly.sort_values(["NOAA_AR", "hour"])
+    for col in SHARP_FEATURE_COLUMNS:
+        hourly[f"{col}_24h_ago"] = hourly.groupby("NOAA_AR")[col].shift(24)
+        hourly[f"{col}_24h_delta"] = hourly[col] - hourly[f"{col}_24h_ago"]
+    latest_per_ar = hourly.sort_values("hour").groupby("NOAA_AR").tail(1).set_index("NOAA_AR")
+    ready_rows = latest_per_ar.dropna(subset=FEATURE_COLUMNS)
+
+    def _top_region_summary(proba: pd.Series | None) -> dict:
+        if proba is None or proba.empty:
+            return {"status": "no_scorable_regions"}
+        ranked = proba.sort_values(ascending=False)
+        return {
+            "status": "ok",
+            "regions": [{"noaa_ar": int(ar), "probability": float(p)} for ar, p in ranked.items()],
+            "highest_risk_ar": int(ranked.index[0]),
+            "highest_risk_probability": float(ranked.iloc[0]),
+        }
+
+    flare_outlook = _top_region_summary(predict_flare_probability(ready_rows)) if flare_ready else {"status": flare_status}
+    cme_outlook = _top_region_summary(predict_cme_probability(ready_rows)) if cme_ready else {"status": cme_status}
+
+    helicity_by_ar = {}
+    for ar_int, row in latest_per_ar.iterrows():
+        meanjzh = row["MEANJZH"]
+        helicity_by_ar[str(ar_int)] = {
+            "noaa_ar": int(ar_int),
+            "mean_current_helicity": None if pd.isna(meanjzh) else float(meanjzh),
+            "sign_label": None if pd.isna(meanjzh) else ("negative (left-handed)" if meanjzh < 0 else "positive (right-handed)"),
+        }
+    cme_arrivals = _attach_helicity(cme_arrivals, helicity_by_ar)
+
+    return flare_outlook, cme_outlook, cme_arrivals, helicity_by_ar, _now_iso()
+
+
 def refresh_dashboard_products() -> dict:
     # ==================== Stage 1: Per-Variable Forecast Entries ====================
     # Walks PRODUCTION_MATRIX, building the live `forecasts` tree (what
@@ -800,6 +1005,15 @@ def refresh_dashboard_products() -> dict:
             calibration.compute_confidence_calibration(full_history),
             calibration.compute_regime_error_bands(full_history),
         )
+    except Exception:
+        traceback.print_exc()
+
+    # ==================== Stage 8: Solar Forecast (F10.7 + CME Arrival) ====================
+    # Independent of the PRODUCTION_MATRIX loop above — F10.7 and CME
+    # arrival aren't trained/persisted models, so they're computed fresh
+    # here rather than through jobs.py's job-lifecycle machinery.
+    try:
+        storage.write_solar_forecast(_solar_forecast_snapshot())
     except Exception:
         traceback.print_exc()
 

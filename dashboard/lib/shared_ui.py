@@ -12,6 +12,8 @@ from html import escape
 import pandas as pd
 import streamlit as st
 
+from dashboard.lib.design_tokens import BORDER, MONO, MUTED, PANEL_BG, TEXT
+
 try:
     from streamlit_autorefresh import st_autorefresh
 except ImportError:
@@ -23,7 +25,11 @@ REFRESH_SECONDS = 15
 RETRO_CHART_COLORWAY = ["#0000FF", "#008000", "#FF0000", "#00BFBF", "#BF00BF", "#BFBF00", "#404040"]
 RETRO_CHART_FONT = "Courier New, Consolas, monospace"
 
-CONCLUSION_COLORS = {"Supported": "#1f7a3a", "Not Supported": "#7a1f1f", "Inconclusive": "#7a5a1f"}
+# Bright terminal-palette values (dashboard.lib.design_tokens' ACCENT/RED/AMBER) —
+# the previous dark, desaturated values were chosen for the retired metric_card's
+# light-grey Win-95 background and would be near-invisible on terminal_metric's
+# dark panel.
+CONCLUSION_COLORS = {"Supported": "#39d98a", "Not Supported": "#f85149", "Inconclusive": "#e3b341"}
 
 
 def apply_retro_chart_style(fig) -> None:
@@ -72,47 +78,51 @@ def auto_refresh(seconds: int = REFRESH_SECONDS) -> None:
     else:
         st.warning("Install streamlit-autorefresh for automatic dashboard refresh.")
 
-def metric_card(label: str, value: str, caption: str = "", tooltip: str = "", value_color: str = "#000000") -> None:
-    """Fixed-height card so a row of cards always lines up evenly, even when
-    one value wraps to two lines (e.g. a date + time) or one caption is
-    longer than its neighbors. The value area reserves space for two lines
-    and vertically centers its content, so short and long values still
-    start their caption at the same point; nothing is clamped or hidden,
-    so a card with unusually long text simply grows past the fixed height
-    rather than losing content.
+def terminal_metric(label: str, value: str, caption: str = "", tooltip: str = "", value_color: str | None = None) -> None:
+    """Terminal-styled metric tile — the Command Centre's actual dark,
+    monospace design language (dashboard.lib.design_tokens), replacing
+    the retired metric_card's literal Windows-95 beveled grey box.
+    Resolves the "three competing visual identities" product-review
+    finding (Command Centre's Bloomberg-terminal look vs. metric_card's
+    Win-95 box vs. Project Status's plainer third look) by making this
+    the one consistent metric tile used everywhere.
+
+    Same content contract as the retired metric_card (label/value/
+    caption/tooltip/value_color) so every call site only needed a
+    rename, not a rewrite. Fixed-height so a row of tiles always lines
+    up evenly, even when one value wraps to two lines or one caption is
+    longer than its neighbors — nothing is clamped or hidden, a tile
+    with unusually long text simply grows past the fixed height.
     """
+    color = value_color or TEXT
     title_attr = f' title="{escape(tooltip)}"' if tooltip else ""
     info_icon = " ⓘ" if tooltip else ""
     st.markdown(
         f"""
         <div{title_attr} style="
-            border-top: 2px solid #ffffff;
-            border-left: 2px solid #ffffff;
-            border-right: 2px solid #808080;
-            border-bottom: 2px solid #808080;
+            border: 1px solid {BORDER};
             padding: 14px 16px;
-            min-height: 158px;
+            min-height: 120px;
             box-sizing: border-box;
-            background: #dcdcdc;
-            color: #000000;
-            font-family: 'MS Sans Serif', Tahoma, sans-serif;
+            background: {PANEL_BG};
+            font-family: {MONO};
             display: flex;
             flex-direction: column;
         ">
-            <div style="font-size: 0.85rem; color: #000080; line-height: 1.2; flex-shrink: 0;">{label}{info_icon}</div>
+            <div style="font-size: 0.7rem; letter-spacing: 0.03em; text-transform: uppercase; color: {MUTED}; line-height: 1.3; flex-shrink: 0;">{escape(label)}{info_icon}</div>
             <div style="
-                font-size: 1.6rem;
+                font-size: 1.5rem;
                 font-weight: 700;
-                color: {value_color};
-                line-height: 1.15;
-                min-height: 2.3em;
+                color: {color};
+                line-height: 1.2;
+                min-height: 1.6em;
                 flex-shrink: 0;
                 display: flex;
                 align-items: center;
                 overflow-wrap: break-word;
                 word-break: break-word;
-            ">{value}</div>
-            <div style="font-size: 0.72rem; color: #404040; line-height: 1.25; flex-grow: 1;">{caption}</div>
+            ">{escape(str(value))}</div>
+            <div style="font-size: 0.68rem; color: {MUTED}; line-height: 1.3; flex-grow: 1;">{escape(str(caption))}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -334,6 +344,83 @@ def style_top_nav() -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_automl_shell(
+    *,
+    caption: str,
+    run_study_fn,
+    list_studies_fn,
+    render_detail_fn,
+    study_label_fn,
+    success_message_fn,
+    session_key_prefix: str,
+    button_label: str = "🚀 Run Complete Optimization Study",
+    warning: str | None = None,
+    extra_caption: str | None = None,
+) -> None:
+    """Shared AutoML orchestration shell for the Bz/Kp/AE Optimization
+    Studies — button, live progress callback, success message, and
+    study-history selector are mechanically identical across all three
+    (confirmed by reading all three call sites, not assumed); only the
+    underlying study/listing/detail functions and how a study's result
+    is summarized differ, passed in by the caller.
+
+    Deliberately NOT consolidated: the actual experiment-generation
+    logic (run_study_fn — Bz's 8 steps, Kp's 10, AE's 10-per-horizon
+    plus cross-horizon synthesis) and each study's detailed result
+    breakdown (render_detail_fn) stay as three separate, existing
+    functions, since the underlying science genuinely differs per
+    variable (AE alone runs across 5 horizons) — only the UI shell that
+    wraps them was duplicated for no functional reason, so only the
+    shell is shared here.
+    """
+    st.markdown("### 🤖 Automated Optimization (AutoML)")
+    st.caption(caption)
+    if warning:
+        st.warning(warning)
+    if extra_caption:
+        st.caption(extra_caption)
+
+    run_key = f"{session_key_prefix}_run_study"
+    last_id_key = f"{session_key_prefix}_last_study_id"
+    select_key = f"{session_key_prefix}_study_select"
+
+    if st.button(button_label, key=run_key, type="primary"):
+        status_box = st.status("Running complete optimization study…", expanded=True)
+
+        def _cb(step, total, msg):
+            status_box.update(label=f"Step {step}/{total} — {msg}")
+            status_box.write(f"**Step {step}/{total}:** {msg}")
+
+        try:
+            study = run_study_fn(progress_cb=_cb)
+            status_box.update(label="Optimization study complete.", state="complete", expanded=False)
+            st.session_state[last_id_key] = study["study_id"]
+            st.success(success_message_fn(study))
+            st.rerun()
+        except Exception as exc:
+            status_box.update(label="Optimization study failed.", state="error")
+            st.error(f"Study failed: {exc}")
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### Study History")
+    studies = list_studies_fn()
+    if not studies:
+        st.info("No optimization studies run yet — click the button above to run the first one.")
+        return
+
+    study_labels = [study_label_fn(s) for s in studies]
+    default_idx = 0
+    last_id = st.session_state.get(last_id_key)
+    if last_id:
+        for i, s in enumerate(studies):
+            if s["study_id"] == last_id:
+                default_idx = i
+                break
+    chosen_label = st.selectbox("Select a study to inspect", study_labels, index=default_idx, key=select_key)
+    study = studies[study_labels.index(chosen_label)]
+    render_detail_fn(study)
 
 
 def style_sticky_header() -> None:

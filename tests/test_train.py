@@ -20,9 +20,13 @@ def test_fit_best_returns_cv_metrics_alongside_the_original_holdout_metrics():
     assert best_name in CANDIDATE_MODELS
     assert set(best_metrics) == {"r2", "mae", "rmse"}
     assert set(best_cv) == {"n_folds", "folds", "r2_mean", "r2_std", "mae_mean", "mae_std", "rmse_mean", "rmse_std"}
-    assert set(all_candidates) == set(CANDIDATE_MODELS)
+    # all_candidates always includes every base CANDIDATE_MODELS entry, plus
+    # an "Ensemble" blend when 2+ candidates had positive walk-forward weight.
+    assert set(CANDIDATE_MODELS) <= set(all_candidates)
+    assert set(all_candidates) - set(CANDIDATE_MODELS) <= {"Ensemble"}
     for candidate_result in all_candidates.values():
-        assert set(candidate_result) == {"holdout", "cv"}
+        assert {"holdout", "cv"} <= set(candidate_result)
+        assert set(candidate_result) - {"holdout", "cv"} <= {"weights"}
 
     # The refit-on-full-data contract is unchanged: the returned model must
     # already be fit and able to predict on the full X immediately.

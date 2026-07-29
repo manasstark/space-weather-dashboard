@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Optional macOS launchd job for the forecast engine's live_update loop.
+  Not installed automatically — this is a template. To install:
+
+    cp scripts/launchd/com.spacedukimi.swdss.live-update.plist \
+       ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.spacedukimi.swdss.live-update.plist
+
+  To stop/uninstall:
+
+    launchctl unload ~/Library/LaunchAgents/com.spacedukimi.swdss.live-update.plist
+    rm ~/Library/LaunchAgents/com.spacedukimi.swdss.live-update.plist
+
+  KeepAlive restarts the job if it exits for any reason (belt-and-braces
+  alongside run_live_update.sh's own restart loop, in case the wrapper
+  script itself is ever run directly by launchd instead). RunAtLoad starts
+  it automatically at login/reboot, closing the "nothing restarts it" gap
+  entirely rather than just shortening the outage.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.spacedukimi.swdss.live-update</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/manasstark/Projects/Space Weather Dashboard V2/scripts/run_live_update.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/manasstark/Projects/Space Weather Dashboard V2</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/manasstark/Projects/Space Weather Dashboard V2/logs/live_update_launchd.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/manasstark/Projects/Space Weather Dashboard V2/logs/live_update_launchd.err.log</string>
+</dict>
+</plist>

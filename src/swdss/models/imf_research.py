@@ -391,7 +391,11 @@ def train_research_model_exp(
         feature_source_cols = list(BASELINE_COLUMNS) + physics_cols
         from swdss.models.imf_physics_features import (
             add_minute_change_features as _amcf,
+        )
+        from swdss.models.imf_physics_features import (
             add_minute_lag_features as _amlf,
+        )
+        from swdss.models.imf_physics_features import (
             add_minute_rolling_features as _amrf,
         )
         lag_cols = _amlf(base_frame, feature_source_cols)
@@ -1431,7 +1435,11 @@ def _rebuild_test_frame_for_run(run: dict) -> tuple:
         base_frame, physics_cols = _load_minute_base_frame()
         from swdss.models.imf_physics_features import (
             add_minute_change_features as _amcf,
+        )
+        from swdss.models.imf_physics_features import (
             add_minute_lag_features as _amlf,
+        )
+        from swdss.models.imf_physics_features import (
             add_minute_rolling_features as _amrf,
         )
         feature_source_cols = list(BASELINE_COLUMNS) + physics_cols

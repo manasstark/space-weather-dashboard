@@ -20,6 +20,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from dashboard.lib.data_helpers import format_value, status_badge_html
+from dashboard.lib.shared_ui import close_active_dialog, plot_retro, render_dialog_close_button, terminal_metric
 from swdss.models.explainability import explain_prediction
 from swdss.models.jobs import (
     average_prediction,
@@ -41,9 +43,6 @@ from swdss.models.jobs import (
 )
 from swdss.models.predict import latest_minute_observation
 from swdss.models.registry import VARIABLE_LABELS, VARIABLE_UNITS
-
-from dashboard.lib.data_helpers import format_value, status_badge_html
-from dashboard.lib.shared_ui import close_active_dialog, metric_card, plot_retro, render_dialog_close_button
 
 
 def format_analytics_inputs(inputs: dict) -> str:
@@ -181,19 +180,19 @@ def render_kp_forecast_dialog(job: dict) -> None:
     st.markdown("##### Production Forecast (Frozen)")
     pc1, pc2, pc3, pc4 = st.columns(4)
     with pc1:
-        metric_card("Prediction Generated", created_at.strftime("%H:%M:%S UTC"), "")
+        terminal_metric("Prediction Generated", created_at.strftime("%H:%M:%S UTC"), "")
     with pc2:
-        metric_card(
+        terminal_metric(
             "Prediction Time",
             "N/A" if production_observed_at is None else pd.Timestamp(production_observed_at).strftime("%H:%M UTC"),
             "Input data timestamp — strictly before the interval, matching training",
         )
     with pc3:
-        metric_card(
+        terminal_metric(
             "Forecast Interval", f"{target_hour.strftime('%H:%M')}–{target_interval_end.strftime('%H:%M UTC')}", ""
         )
     with pc4:
-        metric_card(
+        terminal_metric(
             "Frozen Forecast Value",
             "N/A" if production_prediction is None else f"{production_prediction:.2f}",
             "Never recomputed — used for official model evaluation",
@@ -259,43 +258,43 @@ def render_kp_forecast_dialog(job: dict) -> None:
 
     r1, r2c, r3, r4, r5 = st.columns(5)
     with r1:
-        metric_card("Current Time", pd.Timestamp.now(tz="UTC").strftime("%H:%M:%S UTC"), "")
+        terminal_metric("Current Time", pd.Timestamp.now(tz="UTC").strftime("%H:%M:%S UTC"), "")
     with r2c:
-        metric_card(
+        terminal_metric(
             "Latest Solar Wind Update",
             _fmt(latest_inputs.get("speed"), 1, " km/s"),
             "" if latest_minute_at is None else latest_minute_at.strftime("%H:%M:%S UTC"),
         )
     with r3:
-        metric_card(
+        terminal_metric(
             "Latest IMF Update",
             "N/A" if latest_inputs.get("bz_gsm") is None else f"Bz {latest_inputs['bz_gsm']:.2f} nT",
             "" if latest_minute_at is None else latest_minute_at.strftime("%H:%M:%S UTC"),
         )
     with r4:
-        metric_card("Latest Dst", _fmt(latest_inputs.get("dst"), 1, " nT"), "")
+        terminal_metric("Latest Dst", _fmt(latest_inputs.get("dst"), 1, " nT"), "")
     with r5:
-        metric_card("Latest AE", _fmt(latest_inputs.get("ae"), 1, " nT"), "")
+        terminal_metric("Latest AE", _fmt(latest_inputs.get("ae"), 1, " nT"), "")
 
     r6, r7, r8, r9, r10 = st.columns(5)
     with r6:
-        metric_card(
+        terminal_metric(
             "Current Rolling Estimate",
             "N/A" if rolling_value is None else f"{rolling_value:.2f}",
             "Experimental — not the production forecast",
         )
     with r7:
-        metric_card(
+        terminal_metric(
             "Last Updated", "N/A" if latest_minute_at is None else latest_minute_at.strftime("%H:%M:%S UTC"), ""
         )
     with r8:
-        metric_card("Trend", rolling_trend, "")
+        terminal_metric("Trend", rolling_trend, "")
     with r9:
         if drift is None:
-            metric_card("Prediction Drift", "N/A", "")
+            terminal_metric("Prediction Drift", "N/A", "")
         else:
             sign = "+" if drift >= 0 else ""
-            metric_card(
+            terminal_metric(
                 "Prediction Drift",
                 f"{sign}{drift:.2f}",
                 "First rolling estimate to latest",
@@ -303,7 +302,7 @@ def render_kp_forecast_dialog(job: dict) -> None:
             )
     with r10:
         r2_val = metrics.get("r2")
-        metric_card(
+        terminal_metric(
             "Confidence",
             model_quality_label(r2_val),
             "Reflects the underlying model only — not calibrated for off-distribution input",
@@ -431,21 +430,21 @@ def render_kp_forecast_dialog(job: dict) -> None:
         st.markdown("**Production Forecast → Official Kp** (official model evaluation)")
         v1, v2, v3, v4 = st.columns(4)
         with v1:
-            metric_card(
+            terminal_metric(
                 "Frozen Forecast", "N/A" if production_prediction is None else f"{production_prediction:.2f}", ""
             )
         with v2:
-            metric_card(
+            terminal_metric(
                 "Official Kp",
                 "Pending" if actual is None else f"{actual:.2f}",
                 "" if job["status"] == "completed" else "Stopped before the interval closed",
             )
         with v3:
-            metric_card(
+            terminal_metric(
                 "Production Error", "N/A" if prod_err is None else f"{prod_err:.2f}", "Primary official accuracy metric"
             )
         with v4:
-            metric_card(
+            terminal_metric(
                 "Production Bias",
                 "N/A" if prod_bias is None else f"{prod_bias:+.2f}",
                 "Signed — positive means the model runs high",
@@ -455,25 +454,25 @@ def render_kp_forecast_dialog(job: dict) -> None:
         st.markdown("**Final Rolling Estimate → Official Kp** (research comparison only, never official)")
         v5, v6, v7 = st.columns(3)
         with v5:
-            metric_card(
+            terminal_metric(
                 "Final Rolling Estimate",
                 "N/A" if final_rolling_value is None else f"{final_rolling_value:.2f}",
                 "Experimental",
             )
         with v6:
-            metric_card("Official Kp", "Pending" if actual is None else f"{actual:.2f}", "")
+            terminal_metric("Official Kp", "Pending" if actual is None else f"{actual:.2f}", "")
         with v7:
-            metric_card("Rolling Error", "N/A" if roll_err is None else f"{roll_err:.2f}", "Research only")
+            terminal_metric("Rolling Error", "N/A" if roll_err is None else f"{roll_err:.2f}", "Research only")
 
         st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
         m1, m2, m3 = st.columns(3)
         with m1:
             r2 = metrics.get("r2")
-            metric_card("Model Quality", model_quality_label(r2), "N/A" if r2 is None else f"R² = {r2:.4f}")
+            terminal_metric("Model Quality", model_quality_label(r2), "N/A" if r2 is None else f"R² = {r2:.4f}")
         with m2:
-            metric_card("MAE", f"{metrics.get('mae', float('nan')):.3f}", "Model's typical training error")
+            terminal_metric("MAE", f"{metrics.get('mae', float('nan')):.3f}", "Model's typical training error")
         with m3:
-            metric_card("RMSE", f"{metrics.get('rmse', float('nan')):.3f}", "")
+            terminal_metric("RMSE", f"{metrics.get('rmse', float('nan')):.3f}", "")
         if metrics.get("cv_r2_mean") is not None:
             st.caption(
                 f"🔁 Walk-forward CV ({metrics.get('cv_n_folds')} folds): "
@@ -678,13 +677,13 @@ def render_dst_forecast_dialog(job: dict) -> None:
 
         s1, s2, s3, s4 = st.columns(4)
         with s1:
-            metric_card("Started", created_at.strftime("%H:%M:%S UTC"), "")
+            terminal_metric("Started", created_at.strftime("%H:%M:%S UTC"), "")
         with s2:
-            metric_card("Target", target_hour.strftime("%H:%M UTC"), "")
+            terminal_metric("Target", target_hour.strftime("%H:%M UTC"), "")
         with s3:
-            metric_card("Horizon", f"{horizon}h", "")
+            terminal_metric("Horizon", f"{horizon}h", "")
         with s4:
-            metric_card(
+            terminal_metric(
                 "Final Prediction",
                 "N/A" if final_pred is None else f"{final_pred:.2f} nT",
                 "Last forecast before the target arrived — the operational forecast",
@@ -692,26 +691,26 @@ def render_dst_forecast_dialog(job: dict) -> None:
 
         s5, s6, s7, s8 = st.columns(4)
         with s5:
-            metric_card(
+            terminal_metric(
                 "Average Prediction",
                 "N/A" if avg_pred is None else f"{avg_pred:.2f} nT",
                 "Stability indicator, not the operational forecast",
                 tooltip="Mean of every prediction generated during the session.",
             )
         with s6:
-            metric_card(
+            terminal_metric(
                 "Actual Dst",
                 "Pending" if actual is None else f"{actual:.2f} nT",
                 "" if job["status"] == "completed" else "Stopped before the target arrived",
             )
         with s7:
-            metric_card(
+            terminal_metric(
                 "Final Prediction Error",
                 "N/A" if final_error is None else f"{final_error:.2f} nT",
                 "Primary operational accuracy metric",
             )
         with s8:
-            metric_card(
+            terminal_metric(
                 "Average Prediction Error",
                 "N/A" if avg_error is None else f"{avg_error:.2f} nT",
                 "Secondary stability metric",
@@ -720,10 +719,10 @@ def render_dst_forecast_dialog(job: dict) -> None:
         s9, s10, s11, s12 = st.columns(4)
         with s9:
             if drift is None:
-                metric_card("Forecast Drift", "N/A", "")
+                terminal_metric("Forecast Drift", "N/A", "")
             else:
                 sign = "+" if drift >= 0 else ""
-                metric_card(
+                terminal_metric(
                     "Forecast Drift",
                     f"{sign}{drift:.2f} nT",
                     "Final minus initial prediction",
@@ -731,11 +730,11 @@ def render_dst_forecast_dialog(job: dict) -> None:
                 )
         with s10:
             r2 = metrics.get("r2")
-            metric_card("Model Quality", model_quality_label(r2), "N/A" if r2 is None else f"R² = {r2:.4f}")
+            terminal_metric("Model Quality", model_quality_label(r2), "N/A" if r2 is None else f"R² = {r2:.4f}")
         with s11:
-            metric_card("MAE", f"{metrics.get('mae', float('nan')):.3f} nT", "Model's typical training error")
+            terminal_metric("MAE", f"{metrics.get('mae', float('nan')):.3f} nT", "Model's typical training error")
         with s12:
-            metric_card("RMSE", f"{metrics.get('rmse', float('nan')):.3f} nT", "")
+            terminal_metric("RMSE", f"{metrics.get('rmse', float('nan')):.3f} nT", "")
         if metrics.get("cv_r2_mean") is not None:
             st.caption(
                 f"🔁 Walk-forward CV ({metrics.get('cv_n_folds')} folds): "
@@ -979,13 +978,13 @@ def render_ae_forecast_dialog(job: dict) -> None:
 
         s1, s2, s3, s4 = st.columns(4)
         with s1:
-            metric_card("Started", created_at.strftime("%H:%M:%S UTC"), "")
+            terminal_metric("Started", created_at.strftime("%H:%M:%S UTC"), "")
         with s2:
-            metric_card("Target", target_hour.strftime("%H:%M UTC"), "")
+            terminal_metric("Target", target_hour.strftime("%H:%M UTC"), "")
         with s3:
-            metric_card("Horizon", f"{horizon}h", "")
+            terminal_metric("Horizon", f"{horizon}h", "")
         with s4:
-            metric_card(
+            terminal_metric(
                 "Final Prediction",
                 "N/A" if final_pred is None else f"{final_pred:.2f} nT",
                 "Last forecast before the target arrived — the operational forecast",
@@ -993,7 +992,7 @@ def render_ae_forecast_dialog(job: dict) -> None:
 
         s5, s6, s7, s8 = st.columns(4)
         with s5:
-            metric_card(
+            terminal_metric(
                 "Average Prediction",
                 "N/A" if avg_pred is None else f"{avg_pred:.2f} nT",
                 "Stability indicator, not the operational forecast",
@@ -1006,19 +1005,19 @@ def render_ae_forecast_dialog(job: dict) -> None:
                 actual_caption = "Verified against Kyoto WDC's published AE digital data"
             else:
                 actual_caption = "Awaiting Official AE (Kyoto WDC checked automatically)"
-            metric_card(
+            terminal_metric(
                 "Actual AE",
                 "Pending" if actual is None else f"{actual:.2f} nT",
                 actual_caption,
             )
         with s7:
-            metric_card(
+            terminal_metric(
                 "Final Prediction Error",
                 "N/A" if final_error is None else f"{final_error:.2f} nT",
                 "Primary operational accuracy metric",
             )
         with s8:
-            metric_card(
+            terminal_metric(
                 "Average Prediction Error",
                 "N/A" if avg_error is None else f"{avg_error:.2f} nT",
                 "Secondary stability metric",
@@ -1027,39 +1026,39 @@ def render_ae_forecast_dialog(job: dict) -> None:
         s9, s10, s11, s12 = st.columns(4)
         with s9:
             if drift is None:
-                metric_card("Forecast Drift", "N/A", "")
+                terminal_metric("Forecast Drift", "N/A", "")
             else:
                 sign = "+" if drift >= 0 else ""
-                metric_card(
+                terminal_metric(
                     "Forecast Drift",
                     f"{sign}{drift:.2f} nT",
                     "Final minus initial prediction",
                     tooltip="How much the forecast moved from the first tick to the last.",
                 )
         with s10:
-            metric_card("Model Quality", model_quality_label(r2), "N/A" if r2 is None else f"R² = {r2:.4f}")
+            terminal_metric("Model Quality", model_quality_label(r2), "N/A" if r2 is None else f"R² = {r2:.4f}")
         with s11:
-            metric_card("MAE", f"{metrics.get('mae', float('nan')):.3f} nT", "Model's typical training error")
+            terminal_metric("MAE", f"{metrics.get('mae', float('nan')):.3f} nT", "Model's typical training error")
         with s12:
-            metric_card("RMSE", f"{metrics.get('rmse', float('nan')):.3f} nT", "")
+            terminal_metric("RMSE", f"{metrics.get('rmse', float('nan')):.3f} nT", "")
 
         s13, s14, s15, s16 = st.columns(4)
         with s13:
             pct_error = final_percentage_error(job)
-            metric_card(
+            terminal_metric(
                 "Percentage Error",
                 "N/A" if pct_error is None else f"{pct_error:.1f}%",
                 "Final prediction error as % of the official AE value",
             )
         with s14:
             verified_at = job.get("verified_at")
-            metric_card(
+            terminal_metric(
                 "Verification Date",
                 "N/A" if verified_at is None else pd.Timestamp(verified_at).strftime("%Y-%m-%d %H:%M UTC"),
                 "When Kyoto WDC's data first covered this target hour",
             )
         with s15:
-            metric_card(
+            terminal_metric(
                 "Verification Status",
                 "Verified" if verification_status == "verified" else "Pending Official Kyoto Data",
                 "Kyoto WDC digital AE" if verification_status == "verified" else "Checked ~daily",
@@ -1067,7 +1066,7 @@ def render_ae_forecast_dialog(job: dict) -> None:
         with s16:
             cv_r2_mean = metrics.get("cv_r2_mean")
             if cv_r2_mean is not None:
-                metric_card(
+                terminal_metric(
                     "Walk-Forward CV",
                     f"R² = {cv_r2_mean:.3f} ± {metrics['cv_r2_std']:.3f}",
                     f"{metrics.get('cv_n_folds')} folds",
@@ -1313,19 +1312,19 @@ def render_experimental_forecast_dialog(job: dict) -> None:
 
         c1, c2, c3 = st.columns(3)
         with c1:
-            metric_card(
+            terminal_metric(
                 "Production (latest)",
                 "N/A" if prod_final is None else f"{prod_final:.2f} {unit}",
                 f"Model: {production_job['model_name']}",
             )
         with c2:
-            metric_card(
+            terminal_metric(
                 "Experimental (latest)",
                 "N/A" if exp_final is None else f"{exp_final:.2f} {unit}",
                 f"Model: {job['model_name']}",
             )
         with c3:
-            metric_card(
+            terminal_metric(
                 "Actual",
                 "Pending" if actual is None else f"{actual:.2f} {unit}",
                 "Shared ground truth for both pipelines",
@@ -1472,7 +1471,7 @@ def show_prediction_job(job_id: str) -> None:
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        metric_card(
+        terminal_metric(
             "Current NOAA",
             format_value(live_val, f" {unit}", decimals),
             "N/A" if live_ts is None else f"As of {live_ts.strftime('%H:%M:%S UTC')}",
@@ -1480,7 +1479,7 @@ def show_prediction_job(job_id: str) -> None:
     with c2:
         r2 = metrics.get("r2")
         quality = model_quality_label(r2)
-        metric_card(
+        terminal_metric(
             "Model Quality",
             quality,
             "N/A" if r2 is None else f"R² = {r2:.4f}",
@@ -1490,13 +1489,13 @@ def show_prediction_job(job_id: str) -> None:
         if latest_predicted is not None and live_val is not None:
             change = latest_predicted - live_val
             if abs(change) < 1e-9:
-                trend, color = "No Change", "#404040"
+                trend, color = "No Change", "#6e7681"
             elif change > 0:
-                trend, color = "Increase", "#1f7a3a"
+                trend, color = "Increase", "#39d98a"
             else:
-                trend, color = "Decrease", "#a31f1f"
+                trend, color = "Decrease", "#f85149"
             sign = "+" if change >= 0 else ""
-            metric_card(
+            terminal_metric(
                 "Expected Change",
                 f"{sign}{format_value(change, f' {unit}', decimals)}",
                 f"Trend: {trend}",
@@ -1504,18 +1503,18 @@ def show_prediction_job(job_id: str) -> None:
                 value_color=color,
             )
         else:
-            metric_card("Expected Change", "N/A", "", tooltip="Difference between the latest forecast and the current live NOAA reading.")
+            terminal_metric("Expected Change", "N/A", "", tooltip="Difference between the latest forecast and the current live NOAA reading.")
     with c4:
         stability_label, stability_delta = stability_metric(job)
         if stability_label is None:
-            metric_card(
+            terminal_metric(
                 "Stability",
                 "N/A",
                 "Not enough updates to evaluate stability",
                 tooltip="How much the prediction has varied across the most recent updates in this session.",
             )
         else:
-            metric_card(
+            terminal_metric(
                 "Stability",
                 stability_label,
                 f"Δ Prediction = {stability_delta:.2f} {unit}",
@@ -1538,19 +1537,19 @@ def show_prediction_job(job_id: str) -> None:
         model_mae = metrics.get("mae")
         a1, a2, a3, a4 = st.columns(4)
         with a1:
-            metric_card(
+            terminal_metric(
                 "Final Prediction",
                 format_value(final_pred, f" {unit}", decimals),
                 f"Target {target_hour.strftime('%H:%M UTC')}",
             )
         with a2:
-            metric_card(
+            terminal_metric(
                 "Actual NOAA",
                 format_value(job["actual_value"], f" {unit}", decimals),
                 f"At {target_hour.strftime('%H:%M UTC')}",
             )
         with a3:
-            metric_card(
+            terminal_metric(
                 "Absolute Error",
                 "N/A" if error is None else format_value(error, f" {unit}", decimals),
                 "",
@@ -1558,7 +1557,7 @@ def show_prediction_job(job_id: str) -> None:
             )
         with a4:
             eval_label = forecast_evaluation_label(error, model_mae)
-            metric_card(
+            terminal_metric(
                 "Forecast Evaluation",
                 eval_label,
                 "" if model_mae is None else f"Model's typical error: {model_mae:.{decimals}f} {unit}",

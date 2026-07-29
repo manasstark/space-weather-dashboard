@@ -29,7 +29,6 @@ understood by is corrected). See kp_physics_features.py's migration note.
 import numpy as np
 import pandas as pd
 
-
 # ---------------------------------------------------------------------------
 # Clock Angle
 # ---------------------------------------------------------------------------

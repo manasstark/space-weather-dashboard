@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from dashboard.lib.shared_ui import REFRESH_SECONDS, metric_card, plot_retro
+from dashboard.lib.shared_ui import REFRESH_SECONDS, plot_retro, render_automl_shell, terminal_metric
 from swdss.models import ae_research, kp_research
 from swdss.models.registry import VARIABLE_LABELS
 
@@ -124,15 +124,15 @@ def _kp_research_run_row(run: dict, best_run_id: str = None, key_prefix: str = "
                     f"MAE={cv['mae_mean']:.3f} ± {cv['mae_std']:.3f}"
                 )
         with c2:
-            metric_card("R²", f"{m['r2']:.4f}", "")
+            terminal_metric("R²", f"{m['r2']:.4f}", "")
         with c3:
-            metric_card("MAE", f"{m['mae']:.3f}", "")
+            terminal_metric("MAE", f"{m['mae']:.3f}", "")
         with c4:
-            metric_card("RMSE", f"{m['rmse']:.3f}", "")
+            terminal_metric("RMSE", f"{m['rmse']:.3f}", "")
         with c5:
-            metric_card("Train Time", f"{run.get('training_time_sec', 0):.2f}s", "")
+            terminal_metric("Train Time", f"{run.get('training_time_sec', 0):.2f}s", "")
         with c6:
-            metric_card("Predict Time", f"{run.get('prediction_time_sec', 0) * 1000:.1f}ms", "")
+            terminal_metric("Predict Time", f"{run.get('prediction_time_sec', 0) * 1000:.1f}ms", "")
         with c7:
             st.markdown("<div style='height: 22px;'></div>", unsafe_allow_html=True)
             b1, b2, b3 = st.columns(3)
@@ -412,7 +412,7 @@ def render_kp_physics_experiments_tab() -> None:
     if latest.empty:
         st.info("Not enough history to compute this feature yet.")
         return
-    metric_card(label, f"{latest.iloc[-1]:.3f}", f"Latest hourly value ({latest.index[-1].strftime('%Y-%m-%d %H:%M UTC')})")
+    terminal_metric(label, f"{latest.iloc[-1]:.3f}", f"Latest hourly value ({latest.index[-1].strftime('%Y-%m-%d %H:%M UTC')})")
 
     recent = frame.tail(24 * 30).dropna(subset=[col, "kp"])
     if not recent.empty:
@@ -498,12 +498,12 @@ def render_kp_sequence_models_tab() -> None:
         best_tabular = max(tabular_runs, key=lambda r: r["metrics"]["r2"])
         c1, c2, c3 = st.columns(3)
         with c1:
-            metric_card("Best Sequence Model R²", f"{best_seq['metrics']['r2']:.4f}", best_seq["model_type"])
+            terminal_metric("Best Sequence Model R²", f"{best_seq['metrics']['r2']:.4f}", best_seq["model_type"])
         with c2:
-            metric_card("Best Tabular Model R²", f"{best_tabular['metrics']['r2']:.4f}", best_tabular["model_type"])
+            terminal_metric("Best Tabular Model R²", f"{best_tabular['metrics']['r2']:.4f}", best_tabular["model_type"])
         with c3:
             diff = best_seq["metrics"]["r2"] - best_tabular["metrics"]["r2"]
-            metric_card("Sequence Advantage", f"{diff:+.4f}", "Positive = sequence models outperform tabular")
+            terminal_metric("Sequence Advantage", f"{diff:+.4f}", "Positive = sequence models outperform tabular")
 
     def _run_label(r):
         return f"{r['model_type']} seq={r['sequence_length']}h ({pd.Timestamp(r['trained_at']).strftime('%m-%d %H:%M')})"
@@ -514,15 +514,15 @@ def render_kp_sequence_models_tab() -> None:
     m = run["metrics"]
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        metric_card("R²", f"{m['r2']:.4f}", "")
+        terminal_metric("R²", f"{m['r2']:.4f}", "")
     with c2:
-        metric_card("MAE", f"{m['mae']:.3f}", "")
+        terminal_metric("MAE", f"{m['mae']:.3f}", "")
     with c3:
-        metric_card("RMSE", f"{m['rmse']:.3f}", "")
+        terminal_metric("RMSE", f"{m['rmse']:.3f}", "")
     with c4:
-        metric_card("MAPE", "N/A" if m["mape"] is None else f"{m['mape']:.1f}%", "")
+        terminal_metric("MAPE", "N/A" if m["mape"] is None else f"{m['mape']:.1f}%", "")
     with c5:
-        metric_card("Bias", f"{m['bias']:+.3f}", "")
+        terminal_metric("Bias", f"{m['bias']:+.3f}", "")
 
     if run.get("loss_history"):
         lh = run["loss_history"]
@@ -611,13 +611,13 @@ def render_kp_hypothesis_testing_tab() -> None:
         st.markdown(f"### Verdict: <span style='color:{color}'>{result['verdict']}</span>", unsafe_allow_html=True)
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            metric_card("ΔR²", f"{result['delta_r2']:+.4f}", "")
+            terminal_metric("ΔR²", f"{result['delta_r2']:+.4f}", "")
         with c2:
-            metric_card("ΔMAE", f"{result['delta_mae']:+.4f}", "")
+            terminal_metric("ΔMAE", f"{result['delta_mae']:+.4f}", "")
         with c3:
-            metric_card("ΔRMSE", f"{result['delta_rmse']:+.4f}", "")
+            terminal_metric("ΔRMSE", f"{result['delta_rmse']:+.4f}", "")
         with c4:
-            metric_card("Baseline → Experimental R²", f"{result['baseline_r2']:.4f} → {result['experimental_r2']:.4f}", "")
+            terminal_metric("Baseline → Experimental R²", f"{result['baseline_r2']:.4f} → {result['experimental_r2']:.4f}", "")
 
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
     st.markdown("##### Hypothesis Test History")
@@ -734,73 +734,51 @@ def _kp_opt_latest_baseline_r2() -> float:
     return runs[0]["metrics"]["r2"] if runs else None
 
 
+def _kp_study_label(s: dict) -> str:
+    rec_icon = "✅" if s["recommendation"] == "Promote" else "⏸"
+    status_icon = {"pending": "🕓", "promoted": "🚀", "rejected": "❌"}.get(s.get("promotion_status", "pending"), "")
+    return (
+        f"{rec_icon} {pd.Timestamp(s['started_at']).strftime('%Y-%m-%d %H:%M UTC')} · "
+        f"Winner: {s['winner_model_type']} (R²={s['winner_metrics']['r2']:.4f}) · "
+        f"{status_icon} {s.get('promotion_status', 'pending')}"
+    )
+
+
+def _kp_success_message(study: dict) -> str:
+    return (
+        f"Study complete — winner: **{study['winner_model_type']}** "
+        f"(R²={study['winner_metrics']['r2']:.4f}) — recommendation: **{study['recommendation']}**"
+    )
+
+
 def _render_kp_automl_section() -> None:
     """AutoML orchestration layer for the Kp Optimization Study — mirrors
     the Bz lab's automation section, adapted for Kp's 10-experiment
     magnetosphere-coupling-focused pipeline. The manual Exp 1-10 tabs
     below stay fully intact; this only sequences the same underlying
-    kp_research functions those tabs call.
+    kp_research functions those tabs call. Shell shared with Bz/AE via
+    render_automl_shell.
     """
-    st.markdown("### 🤖 Automated Optimization (AutoML)")
-    st.caption(
-        "Runs all 10 experiments end-to-end — production baseline, persistence benchmark, Solar "
-        "Wind / IMF / Geomagnetic History input search, the full Physics Optimization sweep (26 "
-        "coupling-function groups), a structured combination of the strongest physics contributors, "
-        "a full model sweep, feature importance, SHAP, and a production recommendation."
+    render_automl_shell(
+        caption=(
+            "Runs all 10 experiments end-to-end — production baseline, persistence benchmark, Solar "
+            "Wind / IMF / Geomagnetic History input search, the full Physics Optimization sweep (26 "
+            "coupling-function groups), a structured combination of the strongest physics contributors, "
+            "a full model sweep, feature importance, SHAP, and a production recommendation."
+        ),
+        warning=(
+            "⚠️ This runs 45-55+ separate training runs, several on 100+ engineered features across "
+            "~27,000 rows — expect this to take a long time. **Turn on ⏸ Pause Live Refresh above before "
+            "clicking**, or the dashboard's 15-second auto-refresh can interrupt the run partway through."
+        ),
+        run_study_fn=kp_research.run_complete_kp_optimization_study,
+        list_studies_fn=kp_research.list_kp_studies,
+        render_detail_fn=_render_kp_study_detail,
+        study_label_fn=_kp_study_label,
+        success_message_fn=_kp_success_message,
+        session_key_prefix="kp_automl",
+        button_label="🚀 Run Complete Kp Optimization Study",
     )
-    st.warning(
-        "⚠️ This runs 45-55+ separate training runs, several on 100+ engineered features across "
-        "~27,000 rows — expect this to take a long time. **Turn on ⏸ Pause Live Refresh above before "
-        "clicking**, or the dashboard's 15-second auto-refresh can interrupt the run partway through."
-    )
-
-    if st.button("🚀 Run Complete Kp Optimization Study", key="kp_automl_run_study", type="primary"):
-        status_box = st.status("Running complete Kp optimization study…", expanded=True)
-
-        def _cb(step, total, msg):
-            status_box.update(label=f"Step {step}/{total} — {msg}")
-            status_box.write(f"**Step {step}/{total}:** {msg}")
-
-        try:
-            study = kp_research.run_complete_kp_optimization_study(progress_cb=_cb)
-            status_box.update(label="Optimization study complete.", state="complete", expanded=False)
-            st.session_state["kp_automl_last_study_id"] = study["study_id"]
-            st.success(
-                f"Study complete — winner: **{study['winner_model_type']}** "
-                f"(R²={study['winner_metrics']['r2']:.4f}) — recommendation: **{study['recommendation']}**"
-            )
-            st.rerun()
-        except Exception as exc:
-            status_box.update(label="Optimization study failed.", state="error")
-            st.error(f"Study failed: {exc}")
-
-    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
-    st.markdown("##### Study History")
-    studies = kp_research.list_kp_studies()
-    if not studies:
-        st.info("No optimization studies run yet — click the button above to run the first one.")
-        return
-
-    def _study_label(s):
-        rec_icon = "✅" if s["recommendation"] == "Promote" else "⏸"
-        status_icon = {"pending": "🕓", "promoted": "🚀", "rejected": "❌"}.get(s.get("promotion_status", "pending"), "")
-        return (
-            f"{rec_icon} {pd.Timestamp(s['started_at']).strftime('%Y-%m-%d %H:%M UTC')} · "
-            f"Winner: {s['winner_model_type']} (R²={s['winner_metrics']['r2']:.4f}) · "
-            f"{status_icon} {s.get('promotion_status', 'pending')}"
-        )
-
-    study_labels = [_study_label(s) for s in studies]
-    default_idx = 0
-    last_id = st.session_state.get("kp_automl_last_study_id")
-    if last_id:
-        for i, s in enumerate(studies):
-            if s["study_id"] == last_id:
-                default_idx = i
-                break
-    chosen_label = st.selectbox("Select a study to inspect", study_labels, index=default_idx, key="kp_automl_study_select")
-    study = studies[study_labels.index(chosen_label)]
-    _render_kp_study_detail(study)
 
 
 def _render_kp_study_detail(study: dict) -> None:
@@ -1454,6 +1432,20 @@ def _ae_opt_isolated_toggles(groups: dict) -> dict:
     return ae_research._build_isolated_toggles(groups)
 
 
+def _ae_study_label(s: dict) -> str:
+    rec_count = sum(1 for h in s["horizons"] if s["horizon_results"][str(h)]["recommendation"] == "Promote")
+    promoted_count = sum(1 for v in s.get("promotion_status_by_horizon", {}).values() if v == "promoted")
+    return (
+        f"{pd.Timestamp(s['started_at']).strftime('%Y-%m-%d %H:%M UTC')} · "
+        f"{rec_count}/{len(s['horizons'])} horizons recommended · {promoted_count} promoted"
+    )
+
+
+def _ae_success_message(study: dict) -> str:
+    rec_count = sum(1 for h in study["horizons"] if study["horizon_results"][str(h)]["recommendation"] == "Promote")
+    return f"Study complete across all 5 horizons — {rec_count}/{len(study['horizons'])} horizons recommended for promotion."
+
+
 def _render_ae_automl_section() -> None:
     """AutoML orchestration layer for the AE Optimization Study — the
     flagship scientific component of this project. Unlike the Bz/Kp
@@ -1463,75 +1455,42 @@ def _render_ae_automl_section() -> None:
     Scientific Synthesis. The manual Exp 1-10 tabs below stay fully
     intact for hands-on, single-horizon investigation; this only
     sequences the same underlying ae_research functions those tabs call.
+    Shell shared with Bz/Kp via render_automl_shell — AE's genuinely
+    different success/label formatting (per-horizon recommendation
+    counts, not a single winner) is passed in as callables rather than
+    forcing AE's multi-horizon shape into Bz/Kp's single-result one.
     """
-    st.markdown("### 🤖 Automated Optimization (AutoML)")
-    st.caption(
-        "Runs all 10 experiments end-to-end, independently at every one of AE's 5 production "
-        "horizons — production baseline reproduction, persistence benchmark, the Solar Wind + IMF "
-        "raw explanatory floor, 14 coupling-physics variables tested individually, a structured "
-        "cumulative Physics Engine ablation, Geomagnetic Memory (Previous AE/Kp/Dst), the best "
-        "combined feature set per horizon, a full 12-model sweep, feature importance/SHAP/"
-        "permutation importance, and — the centerpiece — a Cross-Horizon Scientific Synthesis "
-        "that checks whether AE prediction shifts from persistence-dominated to physics-dominated "
-        "as the horizon grows."
+    render_automl_shell(
+        caption=(
+            "Runs all 10 experiments end-to-end, independently at every one of AE's 5 production "
+            "horizons — production baseline reproduction, persistence benchmark, the Solar Wind + IMF "
+            "raw explanatory floor, 14 coupling-physics variables tested individually, a structured "
+            "cumulative Physics Engine ablation, Geomagnetic Memory (Previous AE/Kp/Dst), the best "
+            "combined feature set per horizon, a full 12-model sweep, feature importance/SHAP/"
+            "permutation importance, and — the centerpiece — a Cross-Horizon Scientific Synthesis "
+            "that checks whether AE prediction shifts from persistence-dominated to physics-dominated "
+            "as the horizon grows."
+        ),
+        warning=(
+            "⚠️ This runs roughly 45-50 training runs PER HORIZON (~230-250 total across all 5 "
+            "horizons), including SVR/MLP and a permutation-importance pass at every horizon — measured "
+            "on this project's own hardware, expect **an hour or more** for the complete study, not just "
+            "a few minutes. **Turn on ⏸ Pause Live Refresh above before clicking**, or the dashboard's "
+            "15-second auto-refresh can interrupt the run partway through."
+        ),
+        extra_caption=(
+            "The minute-resolution Kyoto AE archive plays NO role in this study — Production forecasts "
+            "hourly AE, so every experiment here trains and evaluates against the same hourly "
+            "ae_analytics_features.csv Production itself uses."
+        ),
+        run_study_fn=ae_research.run_complete_ae_optimization_study,
+        list_studies_fn=ae_research.list_ae_studies,
+        render_detail_fn=_render_ae_study_detail,
+        study_label_fn=_ae_study_label,
+        success_message_fn=_ae_success_message,
+        session_key_prefix="ae_automl",
+        button_label="🚀 Run Complete AE Optimization Study",
     )
-    st.warning(
-        "⚠️ This runs roughly 45-50 training runs PER HORIZON (~230-250 total across all 5 "
-        "horizons), including SVR/MLP and a permutation-importance pass at every horizon — measured "
-        "on this project's own hardware, expect **an hour or more** for the complete study, not just "
-        "a few minutes. **Turn on ⏸ Pause Live Refresh above before clicking**, or the dashboard's "
-        "15-second auto-refresh can interrupt the run partway through."
-    )
-    st.caption(
-        "The minute-resolution Kyoto AE archive plays NO role in this study — Production forecasts "
-        "hourly AE, so every experiment here trains and evaluates against the same hourly "
-        "ae_analytics_features.csv Production itself uses."
-    )
-
-    if st.button("🚀 Run Complete AE Optimization Study", key="ae_automl_run_study", type="primary"):
-        status_box = st.status("Running complete AE optimization study across all 5 horizons…", expanded=True)
-
-        def _cb(step, total, msg):
-            status_box.update(label=f"Step {step}/{total} — {msg}")
-            status_box.write(f"**Step {step}/{total}:** {msg}")
-
-        try:
-            study = ae_research.run_complete_ae_optimization_study(progress_cb=_cb)
-            status_box.update(label="Optimization study complete.", state="complete", expanded=False)
-            st.session_state["ae_automl_last_study_id"] = study["study_id"]
-            rec_count = sum(1 for h in study["horizons"] if study["horizon_results"][str(h)]["recommendation"] == "Promote")
-            st.success(f"Study complete across all 5 horizons — {rec_count}/{len(study['horizons'])} horizons recommended for promotion.")
-            st.rerun()
-        except Exception as exc:
-            status_box.update(label="Optimization study failed.", state="error")
-            st.error(f"Study failed: {exc}")
-
-    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
-    st.markdown("##### Study History")
-    studies = ae_research.list_ae_studies()
-    if not studies:
-        st.info("No optimization studies run yet — click the button above to run the first one.")
-        return
-
-    def _study_label(s):
-        rec_count = sum(1 for h in s["horizons"] if s["horizon_results"][str(h)]["recommendation"] == "Promote")
-        promoted_count = sum(1 for v in s.get("promotion_status_by_horizon", {}).values() if v == "promoted")
-        return (
-            f"{pd.Timestamp(s['started_at']).strftime('%Y-%m-%d %H:%M UTC')} · "
-            f"{rec_count}/{len(s['horizons'])} horizons recommended · {promoted_count} promoted"
-        )
-
-    study_labels = [_study_label(s) for s in studies]
-    default_idx = 0
-    last_id = st.session_state.get("ae_automl_last_study_id")
-    if last_id:
-        for i, s in enumerate(studies):
-            if s["study_id"] == last_id:
-                default_idx = i
-                break
-    chosen_label = st.selectbox("Select a study to inspect", study_labels, index=default_idx, key="ae_automl_study_select")
-    study = studies[study_labels.index(chosen_label)]
-    _render_ae_study_detail(study)
 
 
 def _render_ae_study_detail(study: dict) -> None:

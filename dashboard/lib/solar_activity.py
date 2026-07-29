@@ -16,8 +16,6 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from swdss.paths import PROJECT_ROOT
-
 from dashboard.lib.data_helpers import (
     format_value,
     get_base64_image,
@@ -40,7 +38,8 @@ from dashboard.lib.event_explorer import (
     render_event_terminal_panel,
     render_event_timeline,
 )
-from dashboard.lib.shared_ui import metric_card, plot_retro
+from dashboard.lib.shared_ui import plot_retro, terminal_metric
+from swdss.paths import PROJECT_ROOT
 
 
 def solar_event_news_feed() -> None:
@@ -128,17 +127,17 @@ def solar_events_analysis() -> None:
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     with c1:
-        metric_card("Today's Solar Events", str(total_events_today))
+        terminal_metric("Today's Solar Events", str(total_events_today))
     with c2:
-        metric_card("Total Solar Flares (7d)", str(total_flares))
+        terminal_metric("Total Solar Flares (7d)", str(total_flares))
     with c3:
-        metric_card("Total Radio Bursts (7d)", str(total_radio_bursts))
+        terminal_metric("Total Radio Bursts (7d)", str(total_radio_bursts))
     with c4:
-        metric_card("X-Class Flares (7d)", str(x_class_count))
+        terminal_metric("X-Class Flares (7d)", str(x_class_count))
     with c5:
-        metric_card("Associated CMEs (7d)", str(associated_cme_count))
+        terminal_metric("Associated CMEs (7d)", str(associated_cme_count))
     with c6:
-        metric_card("Most Active Region", str(most_active_region))
+        terminal_metric("Most Active Region", str(most_active_region))
 
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
 
@@ -211,11 +210,11 @@ def solar_events_analysis() -> None:
     average_events_per_day = len(recent) / 7 if not recent.empty else 0
     st1, st2, st3 = st.columns(3)
     with st1:
-        metric_card("Total Events (7d)", str(len(recent)))
+        terminal_metric("Total Events (7d)", str(len(recent)))
     with st2:
-        metric_card("M-Class Flares (7d)", str(m_class_count))
+        terminal_metric("M-Class Flares (7d)", str(m_class_count))
     with st3:
-        metric_card("Avg Events/Day (7d)", format_value(average_events_per_day, "", 1))
+        terminal_metric("Avg Events/Day (7d)", format_value(average_events_per_day, "", 1))
 
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
 
@@ -268,19 +267,19 @@ def cme_analysis() -> None:
 
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        metric_card("Latest CME Speed", format_value(latest_speed, " km/s", 1), latest_label_time(latest_speed_time))
+        terminal_metric("Latest CME Speed", format_value(latest_speed, " km/s", 1), latest_label_time(latest_speed_time))
     with c2:
-        metric_card(
+        terminal_metric(
             "Fastest CME (7d)",
             format_value(None if fastest_row is None else fastest_row["speed"], " km/s", 1),
             time_caption(fastest_row),
         )
     with c3:
-        metric_card("Average Speed (7d)", format_value(avg_speed, " km/s", 1))
+        terminal_metric("Average Speed (7d)", format_value(avg_speed, " km/s", 1))
     with c4:
-        metric_card("Total CMEs This Week", str(total_cmes))
+        terminal_metric("Total CMEs This Week", str(total_cmes))
     with c5:
-        metric_card(
+        terminal_metric(
             "Earth-Directed CMEs (7d)",
             str(earth_directed_count),
             f"|longitude| ≤ {EARTH_DIRECTED_LONGITUDE_DEG}°",
@@ -296,11 +295,11 @@ def cme_analysis() -> None:
     if not speeds.empty:
         s1, s2, s3 = st.columns(3)
         with s1:
-            metric_card("Min Speed (7d)", format_value(speeds.min(), " km/s", 1))
+            terminal_metric("Min Speed (7d)", format_value(speeds.min(), " km/s", 1))
         with s2:
-            metric_card("Median Speed (7d)", format_value(speeds.median(), " km/s", 1))
+            terminal_metric("Median Speed (7d)", format_value(speeds.median(), " km/s", 1))
         with s3:
-            metric_card("Std Deviation (7d)", format_value(speeds.std(), " km/s", 1))
+            terminal_metric("Std Deviation (7d)", format_value(speeds.std(), " km/s", 1))
     else:
         st.info("No CME speed data available for statistics.")
 
@@ -531,15 +530,6 @@ def heliomap_cme_tab() -> None:
             st.info("No active region column available.")
 
 
-def cme_predictions() -> None:
-    st.subheader("CME — Predictions")
-
-    tabs = st.tabs(["Predict Arrival Time", "Estimated Travel Time", "Estimated Storm Risk"])
-    for tab in tabs:
-        with tab:
-            st.info("Prediction module will be added later.")
-
-
 def f107_classification(value) -> str:
     if value is None or pd.isna(value):
         return "No data"
@@ -603,21 +593,21 @@ def f107_analysis() -> None:
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        metric_card("Today's Flux", format_value(latest_flux, "", 1), latest_label_time(latest_flux_time))
+        terminal_metric("Today's Flux", format_value(latest_flux, "", 1), latest_label_time(latest_flux_time))
     with c2:
-        metric_card(
+        terminal_metric(
             "Highest Flux (7d)",
             format_value(None if highest_row is None else highest_row["f107_flux"], "", 1),
             time_caption(highest_row),
         )
     with c3:
-        metric_card(
+        terminal_metric(
             "Lowest Flux (7d)",
             format_value(None if lowest_row is None else lowest_row["f107_flux"], "", 1),
             time_caption(lowest_row),
         )
     with c4:
-        metric_card("Average Flux (7d)", format_value(avg_flux, "", 1))
+        terminal_metric("Average Flux (7d)", format_value(avg_flux, "", 1))
 
     st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
 
@@ -655,12 +645,5 @@ def f107_analysis() -> None:
                     plot_retro(chart_fig)
 
 
-def f107_predictions() -> None:
-    st.subheader("F10.7 — Predictions")
-
-    tabs = st.tabs(["Tomorrow's Flux", "Next Week Trend"])
-    for tab in tabs:
-        with tab:
-            st.info("Prediction module will be added later.")
 
 
