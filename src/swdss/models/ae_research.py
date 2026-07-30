@@ -245,6 +245,7 @@ def load_ae_research_frame(
     feature_toggles: dict = None,
     engineered_groups: dict = None,
     physics_features: dict = None,
+    _require_features: bool = True,
 ) -> tuple:
     """Builds the AE research frame and returns (frame, feature_columns).
     Same three-toggle contract as kp_research.load_kp_research_frame:
@@ -253,6 +254,15 @@ def load_ae_research_frame(
     gates which of Lags/Rolling Mean/Rolling Std/Rate of Change are
     applied to the enabled base columns, and physics_features is the
     opt-in exotic-physics registry (each independently toggleable).
+
+    `_require_features` is a private escape hatch used only by
+    load_ae_research_frame_with_geomagnetic_memory: a legitimate
+    "geomagnetic memory alone" configuration (e.g. Experiment 6's
+    "Previous Kp" combo, groups={}) has zero base/physics/engineered
+    columns at THIS point by design — its real features (Previous Kp/
+    Dst) are only added afterward by that wrapper. Every direct caller
+    of this function keeps the default (True), so a genuinely empty
+    call still fails fast exactly as before.
     """
     feature_toggles = feature_toggles or default_feature_toggles()
     engineered_groups = engineered_groups or default_engineered_toggles()
@@ -290,7 +300,7 @@ def load_ae_research_frame(
         engineered_cols += add_change_features(frame, base_cols)
 
     feature_columns = base_cols + physics_cols + engineered_cols
-    if not feature_columns:
+    if _require_features and not feature_columns:
         raise ValueError("At least one feature group, physics feature, or engineered group must be enabled.")
     return frame, feature_columns
 
@@ -330,7 +340,9 @@ def load_ae_research_frame_with_geomagnetic_memory(
     would, so every existing caller of that function is unaffected. Used
     only by train_ae_research_model when include_kp/include_dst is set.
     """
-    frame, feature_columns = load_ae_research_frame(feature_toggles, engineered_groups, physics_features)
+    frame, feature_columns = load_ae_research_frame(
+        feature_toggles, engineered_groups, physics_features, _require_features=not (include_kp or include_dst)
+    )
     if not include_kp and not include_dst:
         return frame, feature_columns
 
@@ -350,7 +362,10 @@ def load_ae_research_frame_with_geomagnetic_memory(
     if engineered_groups.get("Rate of Change", True):
         engineered_cols += add_change_features(frame, merge_cols)
 
-    return frame, feature_columns + extra_cols + engineered_cols
+    all_feature_columns = feature_columns + extra_cols + engineered_cols
+    if not all_feature_columns:
+        raise ValueError("At least one feature group, physics feature, engineered group, or geomagnetic memory column must be enabled.")
+    return frame, all_feature_columns
 
 
 def build_sequences(frame: pd.DataFrame, feature_columns: list[str], target: pd.Series, seq_len: int) -> tuple:
