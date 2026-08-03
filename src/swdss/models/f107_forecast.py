@@ -178,14 +178,30 @@ def forecast_f107(f107_df: pd.DataFrame) -> dict | None:
 
     tomorrow_model = harmonic_forecast(daily, 1)
     tomorrow_naive = seasonal_naive_forecast(daily, 1)
-    week_trend = [
-        {
+
+    # Confidence band per day: ± that day's own walk-forward MAE for
+    # whichever method is actually being shown (harmonic once validated,
+    # naive baseline otherwise) — same "predicted ± the model's own MAE"
+    # convention already used for Bz/Kp elsewhere in this project, not a
+    # new statistical standard invented just for this chart. Computed per
+    # horizon rather than assumed to grow with sqrt(horizon) or similar,
+    # since compute_f107_skill's walk-forward holdout already measures
+    # each horizon's real error directly — None where there isn't yet
+    # enough holdout history for that specific horizon (same honesty gate
+    # as harmonic_validated above, not silently narrower than it should be).
+    week_trend = []
+    for h in range(1, 8):
+        day_skill = compute_f107_skill(daily, horizon_days=h)
+        day_validated = day_skill is not None and day_skill["skill_score"] is not None and day_skill["skill_score"] > 0
+        model_value = harmonic_forecast(daily, h) if day_validated else seasonal_naive_forecast(daily, h)
+        band_mae = day_skill["model_mae"] if day_validated else (day_skill["naive_mae"] if day_skill else None)
+        week_trend.append({
             "day": h,
             "model": harmonic_forecast(daily, h),
             "naive": seasonal_naive_forecast(daily, h),
-        }
-        for h in range(1, 8)
-    ]
+            "shown_value": model_value,
+            "confidence_range": [model_value - band_mae, model_value + band_mae] if band_mae is not None and model_value is not None else None,
+        })
 
     if harmonic_validated:
         tomorrow_method = "harmonic"

@@ -33,6 +33,7 @@ from dashboard.lib.event_explorer import (
     _event_severity,
     count_associated_cmes,
     dedupe_near_duplicate_events,
+    estimate_cme_arrival_detailed,
     get_notable_solar_events,
     render_event_button_list,
     render_event_terminal_panel,
@@ -188,13 +189,12 @@ def solar_events_analysis() -> None:
             fig.update_layout(height=340)
             event_charts.append(fig)
 
-    if "duration_minutes" in recent.columns:
-        duration_data = recent.dropna(subset=["duration_minutes"])
-        duration_data = duration_data[duration_data["duration_minutes"] > 0]
-        if not duration_data.empty:
-            fig = px.histogram(duration_data, x="duration_minutes", nbins=20, title="Event Duration (Minutes, Last 7 Days)")
-            fig.update_layout(height=340)
-            event_charts.append(fig)
+    # An "Event Duration (Minutes)" histogram previously lived here —
+    # dropped (UI audit, 2026-07): purely descriptive, with no tie to any
+    # forecast or decision this project's engine actually makes, and no
+    # honest forecast-relevant redesign for it was found (unlike the CME
+    # half-angle chart below, which does have one). Duration is still
+    # visible per-event in the Latest Events table further down.
 
     for row_start in range(0, len(event_charts), 2):
         chart_cols = st.columns(2)
@@ -331,15 +331,33 @@ def cme_analysis() -> None:
             cme_charts.append(fig)
 
     if "half_angle" in recent.columns and not recent.empty:
-        width_data = recent.dropna(subset=["half_angle"])
+        # Redesigned (UI audit, 2026-07): the previous version plotted
+        # half-angle vs. time — purely descriptive, no tie to any
+        # forecast. This tests a real, physically motivated question
+        # instead: does a wider CME (larger half-angle, a rougher/less
+        # collimated eruption) come with a wider DBM arrival-time
+        # uncertainty window? Reuses estimate_cme_arrival_detailed
+        # (the same DBM ensemble already driving the live CME arrival
+        # estimates) rather than a new physics path.
+        width_data = recent.dropna(subset=["half_angle"]).copy()
+        uncertainty_hours = []
+        for _, row in width_data.iterrows():
+            detail = estimate_cme_arrival_detailed(row)
+            uncertainty_hours.append(
+                detail["travel_hours_max"] - detail["travel_hours_min"] if detail is not None else None
+            )
+        width_data["arrival_uncertainty_hours"] = uncertainty_hours
+        width_data = width_data.dropna(subset=["arrival_uncertainty_hours"])
         if not width_data.empty:
             fig = px.scatter(
                 width_data,
-                x="timestamp_utc",
-                y="half_angle",
+                x="half_angle",
+                y="arrival_uncertainty_hours",
                 size="speed" if "speed" in width_data.columns else None,
                 color="speed" if "speed" in width_data.columns else None,
-                title="CME Width (Half Angle) Over Time",
+                hover_data=["timestamp_utc"],
+                title="CME Width vs. DBM Arrival Uncertainty (Last 7 Days)",
+                labels={"half_angle": "Half Angle (°)", "arrival_uncertainty_hours": "Arrival Window Width (hours)"},
             )
             fig.update_layout(height=340)
             cme_charts.append(fig)

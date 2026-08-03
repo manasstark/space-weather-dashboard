@@ -17,8 +17,10 @@ def test_fit_best_returns_cv_metrics_alongside_the_original_holdout_metrics():
 
     best_name, best_metrics, best_cv, final_model, all_candidates = _fit_best(X, y)
 
+    regime_keys = {"quiet_mae", "quiet_n", "active_mae", "active_n", "storm_mae", "storm_n"}
     assert best_name in CANDIDATE_MODELS
-    assert set(best_metrics) == {"r2", "mae", "rmse"}
+    assert {"r2", "mae", "rmse"} <= set(best_metrics)
+    assert set(best_metrics) - {"r2", "mae", "rmse"} <= regime_keys
     assert set(best_cv) == {"n_folds", "folds", "r2_mean", "r2_std", "mae_mean", "mae_std", "rmse_mean", "rmse_std"}
     # all_candidates always includes every base CANDIDATE_MODELS entry, plus
     # an "Ensemble" blend when 2+ candidates had positive walk-forward weight.

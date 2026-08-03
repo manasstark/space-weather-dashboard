@@ -598,6 +598,21 @@ def _render_explanation_expander(variable: str, exp: dict) -> None:
         for detail in exp.get("detail", []):
             st.markdown(f'<div class="term-root term-caption">— {escape(detail)}</div>', unsafe_allow_html=True)
 
+        shap = exp.get("shap")
+        if shap and shap.get("top_drivers"):
+            method_label = "SHAP (exact Shapley values)" if shap.get("method") == "shap" else "Permutation sensitivity (SHAP unavailable for this model type)"
+            st.markdown(
+                f'<div class="term-root term-caption">Model Attribution ({escape(method_label)}) '
+                f'— {escape(shap.get("model_name") or "—")}:</div>',
+                unsafe_allow_html=True,
+            )
+            shap_headers = ["FEATURE", "VALUE", "CONTRIBUTION"]
+            shap_rows = [
+                [escape(str(d["feature"])), f"{d['value']:.3f}", f"{d['contribution']:+.4f}"]
+                for d in shap["top_drivers"]
+            ]
+            st.markdown(f'<div class="term-root">{_table(shap_headers, shap_rows)}</div>', unsafe_allow_html=True)
+
 
 def _render_section_report(title: str, dataset: str, variables: list, snapshot: dict) -> None:
     st.markdown(f'<div class="term-root"><div class="term-section">{escape(title)}</div></div>', unsafe_allow_html=True)

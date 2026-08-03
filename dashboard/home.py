@@ -819,6 +819,23 @@ def line_chart(df: pd.DataFrame, columns: list[str], title: str) -> None:
     plot_retro(fig)
 
 
+def _pearson_r_confidence_interval(r: float, n: int, confidence: float = 0.95) -> tuple[float, float] | None:
+    """95% CI for a Pearson correlation via the Fisher z-transform — the
+    standard closed-form approach (no bootstrap needed): z = arctanh(r)
+    is approximately normal with SE = 1/sqrt(n-3), so the interval is
+    built in z-space and transformed back with tanh. Needs n >= 4 (n-3
+    must be positive) and |r| < 1 (arctanh is undefined at exactly ±1,
+    which only happens with a perfectly collinear pair or n=2).
+    """
+    if n < 4 or r is None or np.isnan(r) or abs(r) >= 1:
+        return None
+    z = np.arctanh(r)
+    se = 1 / np.sqrt(n - 3)
+    z_crit = {0.90: 1.645, 0.95: 1.96, 0.99: 2.576}.get(confidence, 1.96)
+    lo, hi = np.tanh(z - z_crit * se), np.tanh(z + z_crit * se)
+    return float(lo), float(hi)
+
+
 def correlation_explorer(df: pd.DataFrame, columns: list[str], title: str) -> None:
     available = [col for col in columns if col in df.columns and df[col].notna().any()]
 
@@ -851,7 +868,10 @@ def correlation_explorer(df: pd.DataFrame, columns: list[str], title: str) -> No
         return
 
     corr_value = scatter_df[[x_col, y_col]].corr().iloc[0, 1]
+    ci = _pearson_r_confidence_interval(corr_value, len(scatter_df))
+    ci_caption = f"95% CI: [{ci[0]:.3f}, {ci[1]:.3f}] (n={len(scatter_df)})" if ci else f"n={len(scatter_df)} — too few points for a confidence interval"
     st.metric("Selected Correlation", format_value(corr_value, decimals=3))
+    st.caption(ci_caption)
 
     scatter = px.scatter(
         scatter_df,

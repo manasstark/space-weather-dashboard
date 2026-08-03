@@ -945,12 +945,23 @@ def refresh_dashboard_products() -> dict:
     }
     try:
         explanations = explanation.build_explanations(physics_summary, headline_entries)
-        for variable, entry in headline_entries.items():
-            if entry is not None:
-                entry["explanation"] = explanations.get(variable)
     except Exception:
         explanations = {}
         traceback.print_exc()
+
+    # Layers real per-forecast SHAP attribution against the deployed
+    # model on top of the rule-based ranking above (see
+    # swdss.engine.explanation.attach_shap_attribution) — isolated in
+    # its own try/except so a SHAP failure never discards the
+    # rule-based explanations that already succeeded.
+    try:
+        explanation.attach_shap_attribution(explanations, headline_entries)
+    except Exception:
+        traceback.print_exc()
+
+    for variable, entry in headline_entries.items():
+        if entry is not None:
+            entry["explanation"] = explanations.get(variable)
 
     # ==================== Stage 5: Assemble the Snapshot ====================
     completed_at = _now_iso()

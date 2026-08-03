@@ -426,18 +426,49 @@ def render_automl_shell(
 def style_sticky_header() -> None:
     """Pins the masthead + top navigation bar — rendered together inside
     st.container(key="sticky_header") in home.py — to the top of the
-    viewport while the rest of the page scrolls beneath it. A standard
-    website fixed-header pattern; Streamlit has no native equivalent, so
-    this is plain CSS position:sticky on the outer wrapper Streamlit
-    already gives every keyed container.
+    viewport while the rest of the page scrolls beneath it.
+
+    `position: sticky` (the first thing tried here) does not work in this
+    layout, and not for a browser-specific reason — confirmed via direct
+    DOM measurement, not assumed: Streamlit wraps `st.container(key=...)`
+    in a div sized to exactly its own content, so the sticky element's
+    containing block is EXACTLY as tall as the element itself. Sticky
+    positioning can only hold an element in place while its containing
+    block still has room below the stuck position; with zero extra
+    height, there is no room at all, so the element behaves as if it
+    were static the instant any scroll happens (verified by scrolling
+    the actual internal scroll container, `section.stMain`, and watching
+    the header's own bounding rect move 1:1 with the scroll rather than
+    staying pinned).
+
+    `position: fixed` doesn't have that containing-block constraint, so
+    it's used instead — anchored to the actual viewport, spanning full
+    width so it isn't limited to `section.stMain`'s own left offset
+    (which shifts if Streamlit's sidebar is collapsed/expanded, and would
+    otherwise need to be measured and kept in sync via JS). Fixed removes
+    the header from normal flow, so both the sidebar and main content
+    need matching top padding added back — sized to this app's actual
+    rendered header height (measured directly, not guessed) plus a small
+    safety margin, since the header's own content (title/subtitle/date +
+    one nav row) is static layout, not something that grows with live
+    data.
     """
     st.markdown(
         """
         <style>
         div[class*="st-key-sticky_header"] {
-            position: sticky;
+            position: fixed !important;
             top: 0;
-            z-index: 999;
+            left: 0;
+            right: 0;
+            width: 100%;
+            z-index: 1000000;
+        }
+        section.stMain > div.stMainBlockContainer {
+            padding-top: 185px;
+        }
+        section[data-testid="stSidebar"] > div {
+            padding-top: 185px;
         }
         </style>
         """,

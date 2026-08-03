@@ -74,23 +74,30 @@ MEANINGFUL_IMPROVEMENT = 0.05  # same relative-improvement bar storm_learning.py
 TAU_MODES = ("constant", "variable")
 
 
-def _calibrate_and_predict_burton(train_corpus: pd.DataFrame, storm_raw: pd.DataFrame, tau_mode: str):
+def _calibrate_and_predict_burton(train_corpus: pd.DataFrame, storm_raw: pd.DataFrame, tau_mode: str, horizon_hours: int = 1):
     """Isolates the ONE thing that differs between the constant-tau and
     variable-tau experiments — everything else (residual ML training,
     production comparison, per-regime breakdown, verdicts) stays identical
     so any difference in results is attributable to tau's treatment alone,
     not conflated with some other pipeline change.
+
+    `horizon_hours` (default 1, matching the original single-hour design)
+    is passed through as dt_hours to both the calibration fit and the
+    one-step forecast — a 6/12/24h step is a coarser finite-difference
+    approximation of the same continuous-time ODE, calibrated and
+    evaluated consistently at that same step size rather than mixing a
+    1h-fit tau against a longer forecast step.
     """
     if tau_mode == "constant":
-        calib = calibrate_burton_params(train_corpus)
+        calib = calibrate_burton_params(train_corpus, dt_hours=horizon_hours)
         a, tau_hours = calib["a"], calib["tau_hours"]
         if tau_hours is None or tau_hours <= 0:
             raise ValueError(
                 "Burton calibration produced a non-physical decay time (tau <= 0) on this training corpus — "
                 "the fit could not find a stable, mean-reverting ring-current decay to integrate against."
             )
-        burton_pred_train = burton_one_step_forecast_dst(train_corpus, a, tau_hours)
-        burton_pred_full = burton_one_step_forecast_dst(storm_raw, a, tau_hours)
+        burton_pred_train = burton_one_step_forecast_dst(train_corpus, a, tau_hours, dt_hours=horizon_hours)
+        burton_pred_full = burton_one_step_forecast_dst(storm_raw, a, tau_hours, dt_hours=horizon_hours)
         calib_fields = {
             "tau_mode": "constant",
             "burton_a": a,
@@ -100,10 +107,10 @@ def _calibrate_and_predict_burton(train_corpus: pd.DataFrame, storm_raw: pd.Data
             "burton_calibration_n_samples": calib["n_samples"],
         }
     elif tau_mode == "variable":
-        calib = calibrate_burton_variable_tau_a(train_corpus)
+        calib = calibrate_burton_variable_tau_a(train_corpus, dt_hours=horizon_hours)
         a = calib["a"]
-        burton_pred_train = burton_variable_tau_one_step_forecast_dst(train_corpus, a)
-        burton_pred_full = burton_variable_tau_one_step_forecast_dst(storm_raw, a)
+        burton_pred_train = burton_variable_tau_one_step_forecast_dst(train_corpus, a, dt_hours=horizon_hours)
+        burton_pred_full = burton_variable_tau_one_step_forecast_dst(storm_raw, a, dt_hours=horizon_hours)
         vbs_storm = southward_efield_series(storm_raw["speed"], storm_raw["bz_gsm"])
         tau_storm = variable_tau_hours(vbs_storm)
         calib_fields = {
@@ -148,7 +155,13 @@ def _per_regime_mae(abs_errors: np.ndarray, context: pd.DataFrame) -> dict:
     return per_regime
 
 
-def run_burton_hybrid_backtest(held_out_storm: str, tau_mode: str = "constant") -> dict:
+def run_burton_hybrid_backtest(held_out_storm: str, tau_mode: str = "constant", horizon_hours: int = PRODUCTION_HORIZON_HOURS) -> dict:
+    """`horizon_hours` defaults to the original 1h design (matching
+    production's dst_1h model); passing 3/6/12/24 tests the same
+    physics-hybrid approach against production's own longer-horizon Dst
+    models instead, per "test the physics approach at longer horizons"
+    in Development Roadmap — Burton hasn't been tried past 1h before this.
+    """
     if held_out_storm not in NAMED_STORMS:
         raise ValueError(f"Unknown storm key: {held_out_storm!r}")
     storm = NAMED_STORMS[held_out_storm]
@@ -176,8 +189,10 @@ def run_burton_hybrid_backtest(held_out_storm: str, tau_mode: str = "constant") 
     #    tau_mode selects constant tau (calibrated on this corpus) or
     #    O'Brien & McPherron's driving-dependent variable tau — see
     #    _calibrate_and_predict_burton for the one place that differs.
-    burton_pred_train, burton_pred_full, calib_fields = _calibrate_and_predict_burton(train_corpus, storm_raw, tau_mode)
-    actual_target_full = build_target_series("dst", PRODUCTION_HORIZON_HOURS, storm_raw)
+    burton_pred_train, burton_pred_full, calib_fields = _calibrate_and_predict_burton(
+        train_corpus, storm_raw, tau_mode, horizon_hours=horizon_hours
+    )
+    actual_target_full = build_target_series("dst", horizon_hours, storm_raw)
 
     win_start = pd.Timestamp(storm["window_start"])
     win_end = pd.Timestamp(storm["window_end"]) + pd.Timedelta(hours=24)
@@ -188,7 +203,7 @@ def run_burton_hybrid_backtest(held_out_storm: str, tau_mode: str = "constant") 
     #    one-step physics formula (deterministic given the driving series at
     #    t, so no leakage from "fitting" it — it's a closed-form projection,
     #    not a model with weights to overfit).
-    actual_target_train = build_target_series("dst", PRODUCTION_HORIZON_HOURS, train_corpus)
+    actual_target_train = build_target_series("dst", horizon_hours, train_corpus)
     residual_target_train = actual_target_train - burton_pred_train
 
     feature_vars = DATASETS["analytics"].feature_variables or DATASETS["analytics"].variables
@@ -246,9 +261,9 @@ def run_burton_hybrid_backtest(held_out_storm: str, tau_mode: str = "constant") 
 
     # 7. Production comparison — the real, already-deployed frozen model,
     #    reusing storm_backtest.py rather than re-deriving that logic.
-    production_result = run_storm_backtest("analytics", "dst", PRODUCTION_HORIZON_HOURS, held_out_storm)
+    production_result = run_storm_backtest("analytics", "dst", horizon_hours, held_out_storm)
 
-    persistence_pred = build_persistence_series("dst", PRODUCTION_HORIZON_HOURS, storm_raw).reindex(storm_eval.index)
+    persistence_pred = build_persistence_series("dst", horizon_hours, storm_raw).reindex(storm_eval.index)
     persistence_mae = float(np.mean(np.abs(actual - persistence_pred.to_numpy())))
 
     # 8. Per-regime breakdown, same Quiet/Active/Storm buckets storm_backtest
@@ -267,6 +282,7 @@ def run_burton_hybrid_backtest(held_out_storm: str, tau_mode: str = "constant") 
 
     result = {
         "held_out_storm": held_out_storm,
+        "horizon_hours": horizon_hours,
         "held_out_storm_label": storm["label"],
         "storm_g_scale": storm["g_scale"],
         "storm_dst_min_nT": storm["dst_min_nT"],

@@ -92,14 +92,83 @@ def _ensemble_weights(all_candidates: dict) -> dict:
     return {name: r2 / total for name, r2 in positive_r2.items()}
 
 
-def evaluate_split(model, X_train, y_train, X_test, y_test) -> dict:
+def _load_regime_context() -> pd.DataFrame:
+    """Kp/Dst/AE on their natural 0-9/nT/nT scales, indexed by datetime —
+    analytics_features.csv is the only training corpus with all three on
+    the same hourly index (same source/pattern swdss.models.ae_research.
+    _load_kp_dst_for_ae already uses for its own geomagnetic-memory
+    feature), reused here purely to tag OTHER datasets' own rows with the
+    REAL historical activity regime they occurred in, not as a feature.
+    """
+    config = DATASETS["analytics"]
+    raw = pd.read_csv(config.training_csv)
+    raw["datetime"] = pd.to_datetime(raw["datetime"])
+    raw = raw.sort_values("datetime").set_index("datetime")
+    context = raw[["kp", "dst", "ae"]].copy()
+    for column, factor in (config.scale_factors or {}).items():
+        if column in context.columns:
+            context[column] = context[column] / factor
+    return context
+
+
+def _regime_labels_for_index(index: pd.DatetimeIndex) -> pd.Series:
+    """Real (not predicted) Quiet/Active/Storm tag per row in `index`,
+    reusing swdss.engine.outlook.classify_activity_regime — the same
+    worst-of-Kp/Dst/AE bucketing already used for LIVE regime-conditioned
+    error bands (swdss.engine.calibration), applied here at TRAINING time
+    instead so a candidate's storm-period accuracy is visible before it's
+    ever deployed, not only discoverable afterward via Storm Backtest.
+    Rows outside analytics_features.csv's own date range (or missing
+    kp/dst/ae) fall back to "Quiet" via classify_activity_regime's own
+    None-handling — a conservative default, not a crash.
+    """
+    from swdss.engine.outlook import classify_activity_regime
+
+    context = _load_regime_context().reindex(index)
+    labels = [
+        classify_activity_regime(
+            predicted_kp=None if pd.isna(row.kp) else row.kp,
+            predicted_dst=None if pd.isna(row.dst) else row.dst,
+            predicted_ae=None if pd.isna(row.ae) else row.ae,
+        )
+        for row in context.itertuples()
+    ]
+    return pd.Series(labels, index=index)
+
+
+def _storm_quiet_mae(abs_errors: np.ndarray, regime_labels: pd.Series) -> dict:
+    """Per-regime MAE + sample count over one holdout split — reporting
+    only, the same Quiet/Active/Storm segmentation swdss.engine.
+    calibration.compute_regime_error_bands applies to live evaluated
+    forecasts, computed here at training time so a candidate's real
+    storm-period accuracy is reported alongside its aggregate score
+    rather than assumed to track it.
+    """
+    labels = regime_labels.to_numpy()
+    result = {}
+    for regime, key in (("Quiet", "quiet"), ("Active", "active"), ("Storm", "storm")):
+        mask = labels == regime
+        if mask.any():
+            result[f"{key}_mae"] = float(abs_errors[mask].mean())
+            result[f"{key}_n"] = int(mask.sum())
+        else:
+            result[f"{key}_mae"] = None
+            result[f"{key}_n"] = 0
+    return result
+
+
+def evaluate_split(model, X_train, y_train, X_test, y_test, regime_labels: pd.Series = None) -> dict:
     model.fit(X_train, y_train)
     preds = model.predict(X_test)
-    return {
+    result = {
         "r2": float(r2_score(y_test, preds)),
         "mae": float(mean_absolute_error(y_test, preds)),
         "rmse": float(np.sqrt(mean_squared_error(y_test, preds))),
     }
+    if regime_labels is not None:
+        abs_errors = np.abs(y_test.to_numpy() - preds)
+        result.update(_storm_quiet_mae(abs_errors, regime_labels))
+    return result
 
 
 def _fit_best(X, y) -> tuple:
@@ -132,15 +201,22 @@ def _fit_best(X, y) -> tuple:
     where all_candidates maps every candidate name (plus "Ensemble" when
     one was built) to its own holdout/cv metrics, for transparency about
     what was and wasn't selected — same contract as before, one possible
-    extra key.
+    extra key. Each candidate's holdout metrics also now report
+    storm/active/quiet MAE (see _storm_quiet_mae) — reporting only, this
+    does NOT change which candidate wins: selection is still purely by
+    mean walk-forward CV R², same as before. Surfacing per-regime holdout
+    accuracy here is the "explicitly report it" half of storm-aware model
+    selection; actually weighting selection by it is a deliberately
+    separate, not-yet-taken step (see Development Roadmap).
     """
     split_idx = int(len(X) * (1 - TEST_FRACTION))
     X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
     y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+    regime_labels = _regime_labels_for_index(X_test.index)
 
     all_candidates = {}
     for name, factory in CANDIDATE_MODELS.items():
-        holdout_metrics = evaluate_split(factory(), X_train, y_train, X_test, y_test)
+        holdout_metrics = evaluate_split(factory(), X_train, y_train, X_test, y_test, regime_labels)
         cv_metrics = evaluate_walk_forward(factory, X, y, n_folds=CV_FOLDS)
         all_candidates[name] = {"holdout": holdout_metrics, "cv": cv_metrics}
 
@@ -153,7 +229,7 @@ def _fit_best(X, y) -> tuple:
             return WeightedEnsembleRegressor(weights)
         ensemble_cv = evaluate_walk_forward(ensemble_factory, X, y, n_folds=CV_FOLDS)
         all_candidates["Ensemble"] = {
-            "holdout": evaluate_split(ensemble_factory(), X_train, y_train, X_test, y_test),
+            "holdout": evaluate_split(ensemble_factory(), X_train, y_train, X_test, y_test, regime_labels),
             "cv": ensemble_cv,
             "weights": weights,
         }
@@ -250,6 +326,12 @@ def train_slot(dataset_key: str, variable: str, horizon: int, prepared: tuple | 
         "algorithm_candidates_cv_r2": {
             name: round(res["cv"]["r2_mean"], 4) for name, res in all_candidates.items()
         },
+        "quiet_mae": best_metrics.get("quiet_mae"),
+        "quiet_n": best_metrics.get("quiet_n"),
+        "active_mae": best_metrics.get("active_mae"),
+        "active_n": best_metrics.get("active_n"),
+        "storm_mae": best_metrics.get("storm_mae"),
+        "storm_n": best_metrics.get("storm_n"),
         "feature_columns": feature_columns,
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "n_samples": int(len(X)),
@@ -343,6 +425,12 @@ def train_kp_interval_slot(dataset: str = "analytics") -> tuple:
         "algorithm_candidates_cv_r2": {
             name: round(res["cv"]["r2_mean"], 4) for name, res in all_candidates.items()
         },
+        "quiet_mae": best_metrics.get("quiet_mae"),
+        "quiet_n": best_metrics.get("quiet_n"),
+        "active_mae": best_metrics.get("active_mae"),
+        "active_n": best_metrics.get("active_n"),
+        "storm_mae": best_metrics.get("storm_mae"),
+        "storm_n": best_metrics.get("storm_n"),
         "feature_columns": feature_columns,
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "n_samples": int(len(X)),
