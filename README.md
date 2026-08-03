@@ -40,16 +40,11 @@ Built as a portfolio project to practice professional software development, data
 
 ---
 
-## ⚠️ Testing Phase Notice
+## Project Status
 
-**This project is currently in active testing and development.** Core features are functional and working, but the system is still being stress-tested, validated, and refined. If you're reviewing this:
+Actively developed and continuously operated, not a static demo. The Operational Forecast Engine runs as a supervised background process (auto-restart on crash, see `scripts/run_live_update.sh`), issuing and verifying real forecasts around the clock on NOAA/NASA-cadence data — the dashboard only reads its output and never blocks it. All data shown is real, pulled live from NOAA SWPC, NASA DONKI, and Kyoto WDC; nothing here is mocked or simulated.
 
-- Live prediction jobs, research labs, and verification pipelines are operational but may have rough edges
-- Some features (AE Quicklook, Kyoto WDC verification, Kp/AE Research Labs, and the new Bz/Kp/AE Optimization Studies) are newly built and under active validation
-- Data displayed is real — pulled from NOAA SWPC, NASA DONKI, and Kyoto WDC — not mocked or simulated
-- If something looks off or broken, it is likely being actively worked on
-
-Feedback is welcome. Full public deployment is a planned next step once testing is complete.
+Specific caveats — a calibration edge case still being narrowed down, one Docker build not yet verified locally, a couple of research questions still genuinely open — are tracked precisely in [Known Limitations](#known-limitations) rather than smoothed over with a blanket disclaimer; reporting a gap exactly, not hiding it, is this project's own standard throughout. **Actively in progress:** the [Satellite Operator Module](#next-milestone--satellite-operator-module) — the next major domain extension, already phased and scoped.
 
 ---
 
