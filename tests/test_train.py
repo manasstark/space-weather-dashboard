@@ -1,7 +1,10 @@
+import dataclasses
+
 import numpy as np
 import pandas as pd
 
-from swdss.models.train import CANDIDATE_MODELS, _fit_best
+from swdss.models.registry import DATASETS
+from swdss.models.train import CANDIDATE_MODELS, _fit_best, _regime_labels_for_index
 
 
 def test_fit_best_returns_cv_metrics_alongside_the_original_holdout_metrics():
@@ -50,3 +53,21 @@ def test_fit_best_selects_by_cv_mean_r2_not_holdout_r2():
     _, _, best_cv, _, all_candidates = _fit_best(X, y)
     best_cv_r2 = max(c["cv"]["r2_mean"] for c in all_candidates.values())
     assert best_cv["r2_mean"] == best_cv_r2
+
+
+def test_regime_labels_fall_back_to_quiet_when_analytics_features_csv_is_missing(monkeypatch):
+    """analytics_features.csv is a generated, gitignored training artifact
+    — it won't exist in a fresh checkout or CI. Regime tagging must degrade
+    to "Quiet" for every row (the same fallback already applied to per-row
+    missing kp/dst/ae), not raise FileNotFoundError and take every caller
+    of _fit_best down with it, which is what actually broke CI here.
+    """
+    missing_path_config = dataclasses.replace(
+        DATASETS["analytics"], training_csv="/nonexistent/analytics_features.csv"
+    )
+    monkeypatch.setitem(DATASETS, "analytics", missing_path_config)
+
+    index = pd.date_range("2026-01-01", periods=5, freq="h")
+    labels = _regime_labels_for_index(index)
+
+    assert list(labels) == ["Quiet"] * 5

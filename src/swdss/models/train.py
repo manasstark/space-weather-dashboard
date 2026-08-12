@@ -99,9 +99,18 @@ def _load_regime_context() -> pd.DataFrame:
     _load_kp_dst_for_ae already uses for its own geomagnetic-memory
     feature), reused here purely to tag OTHER datasets' own rows with the
     REAL historical activity regime they occurred in, not as a feature.
+
+    analytics_features.csv is a generated training artifact (gitignored,
+    rebuilt by the refresh pipeline), so it legitimately won't exist yet
+    in a fresh checkout or CI — that must degrade to the same "Quiet"
+    fallback _regime_labels_for_index already applies to per-row missing
+    values, not crash every caller of _fit_best.
     """
     config = DATASETS["analytics"]
-    raw = pd.read_csv(config.training_csv)
+    try:
+        raw = pd.read_csv(config.training_csv)
+    except FileNotFoundError:
+        return pd.DataFrame(columns=["kp", "dst", "ae"], index=pd.DatetimeIndex([], name="datetime"))
     raw["datetime"] = pd.to_datetime(raw["datetime"])
     raw = raw.sort_values("datetime").set_index("datetime")
     context = raw[["kp", "dst", "ae"]].copy()
