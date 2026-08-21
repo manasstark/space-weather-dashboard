@@ -445,10 +445,23 @@ def clean_flr(payload: list) -> pd.DataFrame:
     return df.sort_values("timestamp_utc").reset_index(drop=True)
 
 
+def atomic_to_parquet(df: pd.DataFrame, path) -> None:
+    """Write via temp file + os.replace. to_parquet() writes its footer
+    last and is not atomic on its own — a reader (the dashboard, or
+    another process) landing mid-write sees a truncated file with no
+    footer, surfacing as ArrowInvalid: Parquet magic bytes not found in
+    footer. These processed/ files are polled by the dashboard on every
+    page load, so this window gets hit in practice, not just in theory.
+    """
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    df.to_parquet(tmp_path, index=False)
+    os.replace(tmp_path, path)
+
+
 def save_processed(name: str, df: pd.DataFrame) -> None:
     path = PROCESSED_DIR / name / f"{name}_processed.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(path, index=False)
+    atomic_to_parquet(df, path)
 
 
 def save_processed_append(
@@ -475,7 +488,7 @@ def save_processed_append(
     combined = combined.drop_duplicates(subset=dedupe_subset, keep="last")
     combined = combined.sort_values("timestamp_utc").reset_index(drop=True)
 
-    combined.to_parquet(path, index=False)
+    atomic_to_parquet(combined, path)
     return combined
 
 
@@ -519,7 +532,7 @@ def build_master() -> pd.DataFrame:
     master = master.sort_values("timestamp_utc").reset_index(drop=True)
 
     MASTER_V1_PATH.parent.mkdir(parents=True, exist_ok=True)
-    master.to_parquet(MASTER_V1_PATH, index=False)
+    atomic_to_parquet(master, MASTER_V1_PATH)
 
     print(f"Saved master dataset: {MASTER_V1_PATH}")
     print(master.tail())

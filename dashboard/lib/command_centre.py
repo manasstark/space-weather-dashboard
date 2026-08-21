@@ -12,8 +12,11 @@ touches jobs.py's SQLite DB directly, and never recomputes physics. If
 the engine hasn't produced a snapshot yet, it shows one line of plain
 text and nothing else.
 
-Eleven fixed tabs: Forecast (default), Current, Physics, Timeline,
-Verification, Logs, Downloads, Alerts, System, Search, Solar Forecast.
+Ten fixed tabs: Forecast (default), Current, Physics, Timeline,
+Verification, Logs, Downloads, Alerts, System, Solar Forecast. (Search
+was removed 2026-08 — see storage.FORECAST_HISTORY_RETENTION_HOURS;
+history is now a rolling 72h window rather than a permanent archive, so
+there's much less "past" left for a moment-lookup tool to search.)
 Solar Forecast is the odd one out architecturally — F10.7 and CME
 arrival aren't PRODUCTION_MATRIX jobs, so it reads
 swdss.engine.storage.load_solar_forecast() (written by
@@ -28,11 +31,67 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from dashboard.lib import report_pdf
 from dashboard.lib.design_tokens import ACCENT, AMBER, BG, BLUE, BORDER, MONO, MUTED, PANEL_BG, RED, TEXT
 from dashboard.lib.shared_ui import open_dialog
 from swdss.engine import calibration, packages, skill, storage
 from swdss.engine.labels import classify_current_reading
-from swdss.paths import PROCESSED_DIR
+
+# ==================== Cached storage reads ====================
+# storage.py's history readers do a full pd.read_parquet() every call —
+# forecast_snapshot_history.parquet alone is multi-million rows and
+# takes multiple seconds to read. Streamlit reruns this whole module on
+# every widget interaction, so without caching, every dropdown change on
+# Timeline/Search re-reads that file from disk. TTL matches the engine's
+# own cycle cadence (~60s) so the dashboard still picks up each new
+# cycle promptly rather than caching stale data indefinitely.
+#
+# The two large ones use cache_resource rather than cache_data: cache_data
+# deep-copies its return value on every hit, and for a multi-million-row
+# frame that copy alone costs real seconds — cache_resource hands back the
+# same object instead. Safe here because every caller below filters into
+# its own .copy() before mutating rather than touching the cached frame
+# directly (verified against every call site as of this writing).
+_HISTORY_CACHE_TTL = 60
+
+
+@st.cache_resource(ttl=_HISTORY_CACHE_TTL)
+def _cached_forecast_history_full() -> pd.DataFrame:
+    return storage.load_forecast_history()
+
+
+def _cached_forecast_history(days: int | None = None) -> pd.DataFrame:
+    """Timeline asks for days=1, Downloads asks for the full history —
+    those used to be two distinct cache_resource keys, meaning two full
+    disk reads back to back on every cold cache. st.tabs runs every tab
+    body on every rerun regardless of which is visible, so that pair of
+    reads blocked the whole page — Alerts/System/Solar Forecast come
+    after Timeline/Downloads in render order and simply hadn't executed
+    yet. Reading the full history once and filtering in memory (cheap)
+    collapses it back to a single read.
+    """
+    history = _cached_forecast_history_full()
+    if days is None or history.empty or "generated_at" not in history.columns:
+        return history
+    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=days)
+    ts = pd.to_datetime(history["generated_at"], utc=True, errors="coerce")
+    return history[ts >= cutoff]
+
+
+@st.cache_data(ttl=_HISTORY_CACHE_TTL)
+def _cached_evaluation_history() -> pd.DataFrame:
+    return storage.load_evaluation_history()
+
+
+@st.cache_data(ttl=_HISTORY_CACHE_TTL)
+def _cached_package_verification_history() -> pd.DataFrame:
+    return storage.load_package_verification_history()
+
+
+@st.cache_data(ttl=_HISTORY_CACHE_TTL)
+def _cached_report_history() -> pd.DataFrame:
+    return storage.load_report_history()
+
 
 # ==================== Terminal design tokens ====================
 # (BG/PANEL_BG/BORDER/TEXT/MUTED/ACCENT/AMBER/RED/BLUE/MONO now live in
@@ -82,20 +141,6 @@ VARIABLE_DECIMALS = {
     "bt": 2, "bx_gsm": 2, "by_gsm": 2, "bz_gsm": 2,
     "kp": 1, "dst": 1, "ae": 1,
 }
-
-
-def _horizon_sort_key(horizon_label) -> int:
-    """Sorts '1h' < '3h' < ... < '24h', with Kp's 'interval' label last —
-    used only to order the Search tab's multi-horizon match table by lead
-    time, since horizon_label strings don't sort correctly as plain text
-    ('12h' would otherwise sort before '3h').
-    """
-    if horizon_label == "interval":
-        return 10_000
-    try:
-        return int(str(horizon_label).rstrip("h"))
-    except ValueError:
-        return 9_999
 
 
 def _css() -> None:
@@ -479,9 +524,13 @@ def render_operational_command_centre() -> None:
     _render_banner(snapshot)
     _render_package_banner(storage.load_current_package())
 
+    # Search removed (2026-08) — it read the full forecast history just
+    # to look up one past moment, and with history now a rolling 72h
+    # window (see storage.FORECAST_HISTORY_RETENTION_HOURS) there's a lot
+    # less of a "past" left to search through anyway.
     tabs = st.tabs([
         "Forecast", "Current", "Physics", "Timeline", "Verification",
-        "Logs", "Downloads", "Alerts", "System", "Search", "Solar Forecast",
+        "Logs", "Downloads", "Alerts", "System", "Solar Forecast",
     ])
     with tabs[0]:
         _render_forecast_tab(snapshot)
@@ -502,8 +551,6 @@ def render_operational_command_centre() -> None:
     with tabs[8]:
         _render_system_tab(snapshot)
     with tabs[9]:
-        _render_search_tab(snapshot)
-    with tabs[10]:
         _render_solar_forecast_tab()
 
 
@@ -774,7 +821,12 @@ def _render_physics_tab(snapshot: dict) -> None:
 # ==================== Timeline ====================
 
 def _render_timeline_tab(snapshot: dict) -> None:
-    history = storage.load_forecast_history(days=14)
+    # 1 day, not 3 — forecast_snapshot_history.parquet is now a rolling
+    # 24h window (see storage.FORECAST_HISTORY_RETENTION_HOURS), so
+    # nothing older than that exists to show regardless of what's asked
+    # for here. Kept explicit rather than dropping the argument, so this
+    # reads correctly on its own without needing to know that fact.
+    history = _cached_forecast_history(days=1)
     if history.empty:
         st.markdown('<div class="term-root term-caption">No forecast history yet.</div>', unsafe_allow_html=True)
         return
@@ -790,11 +842,28 @@ def _render_timeline_tab(snapshot: dict) -> None:
     subset["generated_at"] = pd.to_datetime(subset["generated_at"], utc=True, errors="coerce")
     subset = subset.sort_values("generated_at")
 
+    # The chart plots one point per HOUR, not one per logged row. A
+    # continuously-reissued 1h-horizon slot can still log many rows within
+    # a single hour (every candidate, every ~60s cycle), and handing all
+    # of them straight to Plotly as individual markers is what made this
+    # chart unreadable and slow to render — tens of thousands of
+    # overlapping points for one variable. Averaging within each hour
+    # keeps the chart honest (still reflects the real forecast/observed
+    # trend) while capping it at ~24 points regardless of how much raw
+    # history exists underneath. The Lifecycle Log table below still shows
+    # the real, individual logged rows for anyone who wants that detail.
+    hourly = (
+        subset.assign(hour=subset["generated_at"].dt.floor("h"))
+        .groupby("hour", as_index=False)
+        .agg(predicted_value=("predicted_value", "mean"), actual_value=("actual_value", "mean"))
+    )
+
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=subset["generated_at"], y=subset["predicted_value"], mode="lines+markers", name="Forecast", line=dict(color=BLUE, width=1.4), marker=dict(size=4)))
-    if subset["actual_value"].notna().any():
-        fig.add_trace(go.Scatter(x=subset["generated_at"], y=subset["actual_value"], mode="markers", name="Observed", marker=dict(size=7, symbol="diamond", color=ACCENT)))
-    _dark_plotly_layout(fig, f"{variable.upper()} @ {horizon} — Forecast vs. Observed", height=300)
+    fig.add_trace(go.Scatter(x=hourly["hour"], y=hourly["predicted_value"], mode="lines+markers", name="Forecast", line=dict(color=BLUE, width=1.4), marker=dict(size=5)))
+    if hourly["actual_value"].notna().any():
+        fig.add_trace(go.Scatter(x=hourly["hour"], y=hourly["actual_value"], mode="lines+markers", name="Observed", line=dict(color=ACCENT, width=1.4, dash="dot"), marker=dict(size=7, symbol="diamond", color=ACCENT)))
+    _dark_plotly_layout(fig, f"{variable.upper()} @ {horizon} — Forecast vs. Observed (hourly average)", height=300)
+    fig.update_xaxes(tickformat="%H:%M\n%b %d")
     st.plotly_chart(fig, use_container_width=True, key="cc_timeline_chart")
 
     st.markdown('<div class="term-root"><div class="term-section">Lifecycle Log</div></div>', unsafe_allow_html=True)
@@ -905,7 +974,7 @@ def _verified_forecasts_subtable(evals: pd.DataFrame, subtitle: str) -> None:
 
 
 def _render_verification_tab(snapshot: dict) -> None:
-    evaluations = storage.load_evaluation_history()
+    evaluations = _cached_evaluation_history()
     if evaluations.empty:
         st.markdown('<div class="term-root term-caption">No evaluated forecasts yet.</div>', unsafe_allow_html=True)
         return
@@ -928,7 +997,7 @@ def _render_verification_tab(snapshot: dict) -> None:
         st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
         _verified_forecasts_subtable(extended_evals, _EXTENDED_LABEL)
 
-    package_verifications = storage.load_package_verification_history()
+    package_verifications = _cached_package_verification_history()
     if not package_verifications.empty:
         # Not split — a Forecast Package is BY DEFINITION built only from
         # the headline members (see packages.HEADLINE_KEYS), so there is
@@ -1157,38 +1226,132 @@ def _file_row(label: str, path, fmt: str, mime: str) -> None:
         st.download_button("↓ FETCH", data=path.read_bytes(), file_name=path.name, mime=mime, key=f"dl_{path.name}")
 
 
-def _render_downloads_tab(snapshot: dict) -> None:
-    st.markdown('<div class="term-root"><div class="term-section">Forecast Package</div></div>', unsafe_allow_html=True)
-    _file_row("Current Package", storage.CURRENT_PACKAGE_PATH, "JSON", "application/json")
-    _file_row("Package History", storage.PACKAGE_HISTORY_PATH, "PARQUET", "application/octet-stream")
-    _file_row("Package Verification History", storage.PACKAGE_VERIFICATION_HISTORY_PATH, "PARQUET", "application/octet-stream")
-
-    package_history = storage.load_package_history()
-    if not package_history.empty:
-        flat_cols = [c for c in package_history.columns if c != "snapshot_json"]
+def _prepare_csv_download(label: str, session_key: str, build_csv) -> None:
+    """A plain st.download_button eagerly evaluates its `data=` argument
+    as a normal Python function call — every single rerun, whether or not
+    anyone clicks it, since st.tabs() runs every tab's code regardless of
+    which is visible. For forecast_history.csv that meant calling
+    .to_csv() on a multi-million-row DataFrame (confirmed to take minutes,
+    not seconds) on every page load, forever — which is exactly why
+    Alerts/System/Search/Solar Forecast, all of which render after
+    Downloads in tab order, never rendered at all: the uncaught delay
+    inside this function blocked the rest of the render loop from ever
+    reaching them. Preparing on an explicit click instead means the cost
+    is only ever paid by someone who actually wants that export.
+    """
+    if st.button(f"Prepare {label}", key=f"prep_{session_key}"):
+        with st.spinner(f"Building {label}…"):
+            st.session_state[session_key] = build_csv()
+    if session_key in st.session_state:
         st.download_button(
-            "↓ FETCH package_history.csv", data=package_history[flat_cols].to_csv(index=False),
-            file_name="package_history.csv", mime="text/csv", key="dl_pkg_history_csv",
+            f"↓ FETCH {label}", data=st.session_state[session_key],
+            file_name=label, mime="text/csv", key=f"dl_{session_key}",
         )
 
-    st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
-    st.markdown('<div class="term-root"><div class="term-section">Forecast Products</div></div>', unsafe_allow_html=True)
-    _file_row("Current Snapshot", storage.CURRENT_SNAPSHOT_PATH, "JSON", "application/json")
-    _file_row("Forecast History", storage.FORECAST_HISTORY_PATH, "PARQUET", "application/octet-stream")
-    _file_row("Evaluation History", storage.EVALUATION_HISTORY_PATH, "PARQUET", "application/octet-stream")
-    _file_row("Engine Log", storage.ENGINE_LOG_PATH, "JSONL", "application/json")
 
-    history = storage.load_forecast_history()
-    if not history.empty:
-        st.download_button("↓ FETCH forecast_history.csv", data=history.to_csv(index=False), file_name="forecast_history.csv", mime="text/csv", key="dl_history_csv")
-    evaluations = storage.load_evaluation_history()
-    if not evaluations.empty:
-        st.download_button("↓ FETCH evaluation_history.csv", data=evaluations.to_csv(index=False), file_name="evaluation_history.csv", mime="text/csv", key="dl_eval_csv")
+_REPORT_TABLE_HEADERS = ["VARIABLE", "HORIZON", "PREDICTED", "ACTUAL", "ERROR", "CONFIDENCE", "VS. PERSISTENCE", "FLAGS"]
+
+
+def _report_hour_table(group: pd.DataFrame) -> str:
+    rows = []
+    for _, r in group.sort_values("variable").iterrows():
+        persistence_abs_error = r.get("persistence_abs_error")
+        if _is_missing(persistence_abs_error):
+            vs_persistence = "—"
+        elif r["abs_error"] <= persistence_abs_error:
+            vs_persistence = "beat persistence"
+        else:
+            vs_persistence = "underperformed"
+        flags = r.get("flags") or ""
+        rows.append([
+            escape(str(r["variable"]).upper()),
+            escape(str(r["horizon"])),
+            _fmt(r["predicted_value"]),
+            _fmt(r["actual_value"]),
+            _fmt_signed(r["error"]),
+            escape(str(r.get("confidence_category") or "—")),
+            vs_persistence,
+            escape(flags) if flags else "—",
+        ])
+    return _table(_REPORT_TABLE_HEADERS, rows, numeric_cols={2, 3, 4})
+
+
+def _render_downloads_tab(snapshot: dict) -> None:
+    st.markdown('<div class="term-root"><div class="term-section">Reports</div></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="term-root term-caption">How each headline variable performed, hour by hour, grouped '
+        'by day — predicted vs. observed, error, confidence, and anything that went wrong. Rolling window '
+        f'of the last {storage.REPORT_HISTORY_RETENTION_DAYS} days; a variable missing from an hour means '
+        'no forecast was evaluated for it that hour (a gap, not a zero). Everything here lives in one file.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+
+    reports = _cached_report_history()
+    if reports.empty:
+        st.markdown(
+            '<div class="term-root term-caption">No hours evaluated yet — the first report appears once '
+            "an hour's predictions have real observed values to compare against.</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    reports = reports.copy()
+    reports["valid_end_ts"] = pd.to_datetime(reports["valid_end"], utc=True, errors="coerce")
+    now = pd.Timestamp.now(tz="UTC")
+    last_closed_boundary = now.floor("h")
+    all_boundaries = set(reports["valid_end_ts"].dt.floor("h"))
+
+    day_groups = sorted(reports.groupby(reports["valid_end_ts"].dt.date), key=lambda item: item[0], reverse=True)
+    for day_index, (date, day_group) in enumerate(day_groups):
+        hours_covered = day_group["valid_end_ts"].dt.floor("h").nunique()
+        is_today = date == now.date()
+        hours_expected = now.hour if is_today else 24
+        day_label = f"{date.strftime('%d %b %Y')} — ran {hours_covered} of {hours_expected} expected hours"
+
+        with st.expander(day_label, expanded=(day_index == 0)):
+            if is_today and last_closed_boundary not in all_boundaries:
+                st.markdown(
+                    '<div class="term-root term-caption">Hour ending '
+                    f'{last_closed_boundary.strftime("%H:%M")} UTC still evaluating — not yet included below.'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+            day_group_sorted = day_group.sort_values("valid_end_ts", ascending=False)
+            for hour_end, hour_group in day_group_sorted.groupby("valid_end_ts", sort=False):
+                hour_start = hour_end - pd.Timedelta(hours=1)
+                st.markdown(
+                    f'<div class="term-root term-caption">{hour_start.strftime("%H:%M")}–{hour_end.strftime("%H:%M")} UTC</div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(f'<div class="term-root">{_report_hour_table(hour_group)}</div>', unsafe_allow_html=True)
 
     st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
-    st.markdown('<div class="term-root"><div class="term-section">Verification Science</div></div>', unsafe_allow_html=True)
-    _file_row("Skill Scores", storage.SKILL_SCORES_PATH, "JSON", "application/json")
-    _file_row("Calibration Report", storage.CALIBRATION_REPORT_PATH, "JSON", "application/json")
+    _file_row("Hourly Report", storage.REPORT_HISTORY_PATH, "PARQUET", "application/octet-stream")
+    _prepare_csv_download(
+        "hourly_report.csv", "report_csv",
+        lambda: reports.drop(columns=["valid_end_ts"]).to_csv(index=False),
+    )
+    _prepare_pdf_download(reports)
+
+
+def _prepare_pdf_download(reports: pd.DataFrame) -> None:
+    """Same lazy build-on-click pattern as _prepare_csv_download — the PDF
+    is only ever generated the moment someone clicks, so the "is the last
+    hour still evaluating" check inside report_pdf.build_report_pdf reads
+    true live state at download time, not a stale pre-baked snapshot."""
+    if st.button("Prepare hourly_report.pdf", key="prep_report_pdf"):
+        with st.spinner("Building hourly_report.pdf…"):
+            st.session_state["report_pdf"] = report_pdf.build_report_pdf(
+                reports.drop(columns=["valid_end_ts"], errors="ignore"),
+                storage.REPORT_HISTORY_RETENTION_DAYS,
+            )
+    if "report_pdf" in st.session_state:
+        st.download_button(
+            "↓ FETCH hourly_report.pdf", data=st.session_state["report_pdf"],
+            file_name="hourly_report.pdf", mime="application/pdf", key="dl_report_pdf",
+        )
 
 
 # ==================== Alerts ====================
@@ -1253,151 +1416,6 @@ def _render_system_tab(snapshot: dict) -> None:
         headers = ["DATASET", "VARIABLE", "HORIZON", "ALGORITHM", "TRAINED", "R²", "STATUS"]
         if model_rows:
             st.markdown(f'<div class="term-root">{_table(headers, model_rows, numeric_cols={5})}</div>', unsafe_allow_html=True)
-
-
-# ==================== Search ====================
-
-# (dataset, column, mode, label, decimals, suffix) — reads the minute-
-# level processed parquet directly (never master_df_v1.parquet) so a
-# real spike isn't smoothed away by the hourly-merged table. Bx/By are
-# deliberately excluded: neither has a canonical "interesting direction"
-# the way Bz (southward = geoeffective) or Bt (magnitude) do.
-EXTREME_SPECS = [
-    ("solar_wind", "solar_wind_speed", "max", "Highest Speed", 1, " km/s"),
-    ("solar_wind", "proton_density", "max", "Highest Density", 2, " p/cm3"),
-    ("solar_wind", "temperature", "max", "Highest Temperature", 0, " K"),
-    ("imf", "bt", "max", "Highest Bt", 2, " nT"),
-    ("imf", "bz", "min", "Lowest Bz", 2, " nT"),
-    ("kp", "kp", "max", "Highest Kp", 1, ""),
-    ("dst", "dst", "min", "Lowest Dst", 1, " nT"),
-    ("ae", "ae", "max", "Highest AE", 1, " nT"),
-]
-
-
-def _load_7day_extremes() -> list:
-    """One row per EXTREME_SPECS entry: the true minute-level extreme
-    over the trailing 7 days, with its timestamp. Independent of the
-    Operational Forecast Engine — this is observed data, not a forecast
-    product — so it reads swdss.paths.PROCESSED_DIR directly rather than
-    swdss.engine.storage.
-    """
-    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=7)
-    rows = []
-    for dataset, column, mode, label, decimals, suffix in EXTREME_SPECS:
-        path = PROCESSED_DIR / dataset / f"{dataset}_processed.parquet"
-        try:
-            df = pd.read_parquet(path, columns=["timestamp_utc", column])
-        except Exception:
-            rows.append([label, "—", "—"])
-            continue
-        df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
-        df = df.dropna(subset=["timestamp_utc", column])
-        df = df[df["timestamp_utc"] >= cutoff]
-        if df.empty:
-            rows.append([label, "—", "—"])
-            continue
-        idx = df[column].idxmax() if mode == "max" else df[column].idxmin()
-        best = df.loc[idx]
-        rows.append([label, f'<span class="num">{_fmt(best[column], decimals, suffix)}</span>', _fmt_time(best["timestamp_utc"])])
-    return rows
-
-
-def _render_search_tab(snapshot: dict) -> None:
-    """Lookup over swdss.engine.storage.load_forecast_history() — no new
-    computation, purely a filter over the same append-only history the
-    Timeline tab already reads. Given a variable and a target date/hour,
-    shows every horizon's forecast whose VALID WINDOW covers that moment
-    — since every horizon's valid window is the same 1-hour (or Kp's 3-
-    hour) target slot (see orchestrator._valid_window), a 1h-ahead and a
-    24h-ahead forecast for the identical historical moment both show up
-    side by side, letting you compare how much lead time actually cost
-    in accuracy for that specific event.
-    """
-    st.markdown('<div class="term-root term-caption">Look up what was forecast for a specific past moment — e.g. "what did we predict for the hour Speed hit its 7-day high?"</div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="term-root"><div class="term-section">7-Day Extremes (observed)</div></div>', unsafe_allow_html=True)
-    extreme_rows = _load_7day_extremes()
-    st.markdown(f'<div class="term-root">{_table(["METRIC", "VALUE", "OBSERVED AT"], extreme_rows, numeric_cols={1})}</div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="term-root term-caption">Search a specific moment below — plug a date/hour here in and pull up its forecast.</div>', unsafe_allow_html=True)
-    variables = list(VARIABLE_LABELS_DISPLAY.keys())
-    col1, col2, col3 = st.columns([2, 2, 1])
-    with col1:
-        variable = st.selectbox("Variable", variables, format_func=lambda v: VARIABLE_LABELS_DISPLAY.get(v, v), key="cc_search_var")
-    with col2:
-        search_date = st.date_input("Date (UTC)", value=pd.Timestamp.now(tz="UTC").date(), key="cc_search_date")
-    with col3:
-        search_hour = st.selectbox("Hour (UTC)", list(range(24)), key="cc_search_hour")
-
-    target_time = pd.Timestamp(search_date, tz="UTC") + pd.Timedelta(hours=search_hour)
-
-    history = storage.load_forecast_history()
-    if history.empty:
-        st.markdown('<div class="term-root term-caption">No forecast history recorded yet.</div>', unsafe_allow_html=True)
-        return
-
-    subset = history[history["variable"] == variable].copy()
-    if subset.empty:
-        st.markdown('<div class="term-root term-caption">No history for this variable yet.</div>', unsafe_allow_html=True)
-        return
-
-    subset["generated_at"] = pd.to_datetime(subset["generated_at"], utc=True, errors="coerce")
-    subset["valid_start"] = pd.to_datetime(subset["valid_start"], utc=True, errors="coerce")
-    subset["valid_end"] = pd.to_datetime(subset["valid_end"], utc=True, errors="coerce")
-
-    covering = subset[(subset["valid_start"] <= target_time) & (target_time < subset["valid_end"])]
-    if covering.empty:
-        st.markdown(
-            f'<div class="term-root term-caption">No forecast found covering {escape(target_time.strftime("%Y-%m-%d %H:%M UTC"))} '
-            f'for {escape(VARIABLE_LABELS_DISPLAY.get(variable, variable))}.</div>',
-            unsafe_allow_html=True,
-        )
-        return
-
-    # One settled record per (horizon, valid_start): the last-logged row
-    # for that combination, since the same forecast is re-logged every
-    # cycle while it's LIVE/ACTIVE and its status (and eventually its
-    # actual_value) keeps advancing — the last one logged reflects its
-    # most up-to-date state.
-    settled = (
-        covering.sort_values("generated_at")
-        .drop_duplicates(subset=["horizon", "valid_start"], keep="last")
-        .sort_values("horizon", key=lambda s: s.map(_horizon_sort_key))
-    )
-
-    st.markdown(f'<div class="term-root"><div class="term-section">Matches — {escape(VARIABLE_LABELS_DISPLAY.get(variable, variable))} @ {escape(target_time.strftime("%Y-%m-%d %H:%M UTC"))}</div></div>', unsafe_allow_html=True)
-    headers = ["HORIZON", "ISSUED (UTC)", "VALID PERIOD", "PREDICTED", "ACTUAL", "STATUS", "CONF", "MODEL"]
-    rows = []
-    for _, r in settled.iterrows():
-        rows.append([
-            r["horizon"],
-            _fmt_time(r["generated_at"]),
-            _fmt_period(r["valid_start"].isoformat(), r["valid_end"].isoformat()),
-            f'<span class="num">{_fmt(r.get("predicted_value"), 2)}</span>',
-            f'<span class="num">{_fmt(r.get("actual_value"), 2)}</span>',
-            _status_span(r.get("status", "—")),
-            _confidence_span(r.get("confidence_category")),
-            escape(r.get("model_name", "—")),
-        ])
-    st.markdown(f'<div class="term-root">{_table(headers, rows, numeric_cols={3,4})}</div>', unsafe_allow_html=True)
-
-    horizon_options = list(settled["horizon"])
-    if horizon_options:
-        with st.expander("▸ Full cycle history for one horizon"):
-            chosen_horizon = st.selectbox("Horizon", horizon_options, key="cc_search_detail_horizon")
-            detail = covering[covering["horizon"] == chosen_horizon].sort_values("generated_at", ascending=False)
-            detail_headers = ["CYCLE GENERATED", "STATUS", "PREDICTED", "ACTUAL", "CONF"]
-            detail_rows = [
-                [
-                    _fmt_time(r["generated_at"]),
-                    _status_span(r.get("status", "—")),
-                    _fmt(r.get("predicted_value"), 2),
-                    _fmt(r.get("actual_value"), 2),
-                    _confidence_span(r.get("confidence_category")),
-                ]
-                for _, r in detail.iterrows()
-            ]
-            st.markdown(f'<div class="term-root">{_table(detail_headers, detail_rows)}</div>', unsafe_allow_html=True)
 
 
 # ==================== Solar Forecast ====================

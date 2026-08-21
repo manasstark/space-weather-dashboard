@@ -28,8 +28,14 @@ from html import escape
 import pandas as pd
 import streamlit as st
 
-from dashboard.lib.shared_ui import REFRESH_SECONDS
 from swdss.paths import MASTER_V1_PATH, PROCESSED_DIR
+
+# Deliberately its own constant, not shared_ui.REFRESH_SECONDS: tying this
+# cache's TTL to the auto-refresh interval meant the cache expired at
+# almost the exact moment the next refresh would invalidate it anyway, so
+# nearly every rerun paid a full read+parse+sort instead of hitting the
+# cache.
+MASTER_DATA_CACHE_TTL = 60
 
 
 def get_base64_image(path) -> str:
@@ -277,7 +283,7 @@ def render_simple_retro_table(df: pd.DataFrame, display_names: dict | None = Non
     st.markdown(html, unsafe_allow_html=True)
 
 
-@st.cache_data(ttl=REFRESH_SECONDS)
+@st.cache_data(ttl=MASTER_DATA_CACHE_TTL)
 def load_master_data(path) -> pd.DataFrame:
     df = pd.read_parquet(path)
     df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
@@ -285,7 +291,7 @@ def load_master_data(path) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=REFRESH_SECONDS)
+@st.cache_data(ttl=MASTER_DATA_CACHE_TTL)
 def load_processed_data(name: str) -> pd.DataFrame:
     path = PROCESSED_DIR / name / f"{name}_processed.parquet"
 

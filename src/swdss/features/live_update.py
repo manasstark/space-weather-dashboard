@@ -10,6 +10,7 @@ import pandas as pd
 
 from swdss.engine.orchestrator import evaluate_due_forecasts, refresh_dashboard_products, run_forecast_cycle
 from swdss.features.build_master import (
+    atomic_to_parquet,
     clean_cme,
     clean_dst,
     clean_f107,
@@ -170,7 +171,7 @@ def rebuild_master_from_processed() -> pd.DataFrame | None:
     master = master.sort_values("timestamp_utc").reset_index(drop=True)
 
     MASTER_V1_PATH.parent.mkdir(parents=True, exist_ok=True)
-    master.to_parquet(MASTER_V1_PATH, index=False)
+    atomic_to_parquet(master, MASTER_V1_PATH)
 
     print(
         f"[{utc_now().isoformat()}] Rebuilt {MASTER_V1_PATH}. "

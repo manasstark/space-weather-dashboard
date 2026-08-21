@@ -43,35 +43,32 @@ STRONG_SOUTHWARD_THRESHOLD_NT = -5.0
 
 
 def add_minute_lag_features(df: pd.DataFrame, columns: list[str], lags: list[int] = MINUTE_LAGS) -> list[str]:
-    created = []
+    # Built as a dict and assigned once rather than one df[name] = ... per
+    # lag — with len(columns) x len(lags) columns, per-column assignment
+    # fragments the frame badly enough for pandas to warn about it.
+    new_cols = {}
     for column in columns:
         for lag in lags:
-            name = f"{column}_lag{lag}m"
-            df[name] = df[column].shift(lag)
-            created.append(name)
-    return created
+            new_cols[f"{column}_lag{lag}m"] = df[column].shift(lag)
+    df[list(new_cols)] = pd.DataFrame(new_cols, index=df.index)
+    return list(new_cols)
 
 
 def add_minute_rolling_features(
     df: pd.DataFrame, columns: list[str], window: int = MINUTE_ROLLING_WINDOW
 ) -> list[str]:
-    created = []
+    new_cols = {}
     for column in columns:
-        mean_name = f"{column}_{window}m"
-        std_name = f"{column}_{window}m_std"
-        df[mean_name] = df[column].rolling(window).mean()
-        df[std_name] = df[column].rolling(window).std()
-        created.extend([mean_name, std_name])
-    return created
+        new_cols[f"{column}_{window}m"] = df[column].rolling(window).mean()
+        new_cols[f"{column}_{window}m_std"] = df[column].rolling(window).std()
+    df[list(new_cols)] = pd.DataFrame(new_cols, index=df.index)
+    return list(new_cols)
 
 
 def add_minute_change_features(df: pd.DataFrame, columns: list[str]) -> list[str]:
-    created = []
-    for column in columns:
-        name = f"{column}_change"
-        df[name] = df[column].diff()
-        created.append(name)
-    return created
+    new_cols = {f"{column}_change": df[column].diff() for column in columns}
+    df[list(new_cols)] = pd.DataFrame(new_cols, index=df.index)
+    return list(new_cols)
 
 
 def add_southward_duration(df: pd.DataFrame, bz_col: str = "bz_gsm") -> list[str]:
@@ -105,12 +102,12 @@ def add_integrated_southward_bz(
     stretch can integrate to the same total, which a simple instantaneous
     Bz reading can't distinguish but this can.
     """
-    created = []
-    for window in windows:
-        name = f"integrated_southward_bz_{window}m"
-        df[name] = physics_core.integrated_southward_bz_series(df[bz_col], window)
-        created.append(name)
-    return created
+    new_cols = {
+        f"integrated_southward_bz_{window}m": physics_core.integrated_southward_bz_series(df[bz_col], window)
+        for window in windows
+    }
+    df[list(new_cols)] = pd.DataFrame(new_cols, index=df.index)
+    return list(new_cols)
 
 
 def add_magnetic_rotation(
@@ -121,12 +118,9 @@ def add_magnetic_rotation(
     all three) indicates a structurally complex or turbulent IMF, as
     opposed to a steady, slowly-evolving field.
     """
-    created = []
-    for column in columns:
-        name = f"d{column}"
-        df[name] = df[column].diff()
-        created.append(name)
-    return created
+    new_cols = {f"d{column}": df[column].diff() for column in columns}
+    df[list(new_cols)] = pd.DataFrame(new_cols, index=df.index)
+    return list(new_cols)
 
 
 def add_clock_angle(df: pd.DataFrame, by_col: str = "by_gsm", bz_col: str = "bz_gsm") -> list[str]:
@@ -162,13 +156,10 @@ def add_bt_persistence(df: pd.DataFrame, bt_col: str = "bt", window: int = MINUT
     high std) — two very different physical situations that share the
     same instantaneous Bt reading.
     """
-    created = []
     stats = physics_persistence.persistence_stats_series(df[bt_col], window)
-    for stat, series in stats.items():
-        name = f"bt_persistence_{window}m_{stat}"
-        df[name] = series
-        created.append(name)
-    return created
+    new_cols = {f"bt_persistence_{window}m_{stat}": series for stat, series in stats.items()}
+    df[list(new_cols)] = pd.DataFrame(new_cols, index=df.index)
+    return list(new_cols)
 
 
 def add_all_imf_physics_features(df: pd.DataFrame) -> list[str]:

@@ -367,6 +367,46 @@ def predict_kp_rolling(dataset: str = "analytics") -> dict:
     }
 
 
+def _latest_complete_hour(usable: pd.DataFrame) -> tuple:
+    """The last row of an hourly resample (load_live_features) is whatever
+    hour bucket is CURRENTLY FORMING, not necessarily a complete 60-minute
+    average — continuous re-issue means a fresh 1h/interval job is often
+    created within a minute of a new hour starting, so usable.iloc[-1] can
+    be built from just 1-2 minutes of real data. Training only ever saw
+    complete hourly means (train._load_base_df reads a static historical
+    CSV where every row is a fully-elapsed hour), so feeding the model a
+    barely-started partial average is a genuine train/serve mismatch, not
+    merely "1h is a hard horizon" — confirmed by every headline variable's
+    skill-vs-persistence score recovering sharply at 3h+, where jobs are
+    created far less often and mostly land on already-complete buckets.
+
+    Returns (feature_row, anchor_ts). anchor_ts is ALWAYS usable.index[-1]
+    — the true latest available moment — never the fallback's own
+    timestamp. This matters: predict()'s caller computes
+    predicted_for = observed_at + horizon, and that becomes the job's
+    actual target hour (jobs.start_job). An earlier version of this fix
+    mistakenly returned the fallback row's OWN timestamp as observed_at,
+    which quietly shortened the real forecast lead time — a job created
+    at 17:05 would anchor to 16:00 and target 17:00 instead of 18:00,
+    turning a "1 hour ahead" forecast into one for an hour that's already
+    in progress. Only feature_row (what actually gets fed to the model)
+    falls back to the prior complete hour; the timing stays anchored to
+    right now regardless. Deliberately scoped to the model's own input
+    only — the persistence baseline (orchestrator._resolve_persistence_
+    anchor) intentionally keeps reading whatever is freshest, since a
+    naive "assume no change" guess doing zero transformation on noisy
+    data is a fair, unmodified comparison; it's the model's learned
+    coefficients that amplify that noise, not persistence's identity
+    function.
+    """
+    anchor_ts = usable.index[-1]
+    bucket_end = anchor_ts + pd.Timedelta(hours=1)
+    now_naive = pd.Timestamp.now(tz="UTC").tz_localize(None)
+    if now_naive < bucket_end and len(usable) > 1:
+        return usable.iloc[-2], anchor_ts
+    return usable.iloc[-1], anchor_ts
+
+
 def predict(dataset: str, variable: str, horizon: int) -> dict:
     # Both the production "analytics" and experimental cascade Kp models
     # follow NOAA's real 3-hour publishing cadence, not an arbitrary
@@ -387,8 +427,7 @@ def predict(dataset: str, variable: str, horizon: int) -> dict:
     if usable.empty:
         raise ValueError(f"Not enough live history to build features for {dataset}/{variable}.")
 
-    latest = usable.iloc[-1]
-    observed_at = usable.index[-1]
+    latest, observed_at = _latest_complete_hour(usable)
 
     model = _load_model(dataset, variable, horizon)
     X = latest[feature_columns].to_frame().T

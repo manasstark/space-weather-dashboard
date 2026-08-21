@@ -2176,7 +2176,16 @@ style_sticky_header()
 #  - When the user has toggled "Pause Live Refresh" inside a research lab tab
 #    (session_state["pause_autorefresh"] = True) — stops the blink while
 #    they are actively working in the Kp or AE lab. Toggle it off to resume.
-_pause = st.session_state.get("pause_autorefresh", False)
+#  - When any st.dialog (Event Explorer, Reverse Explorer, Storyboard,
+#    Saved Events, Animations) is open. Every dialog is rendered AFTER
+#    the full page below, not instead of it — so leaving auto-refresh on
+#    while one is open meant the whole page (all 11 Command Centre tabs)
+#    plus the dialog's own computation reran every refresh interval, for
+#    as long as the dialog stayed open. Several of these dialogs are
+#    dismissible=False, so the only way out is their own close button —
+#    which then has to wait behind that same slow rerun. Pausing here
+#    means opening a dialog stops the clock until the user closes it.
+_pause = st.session_state.get("pause_autorefresh", False) or st.session_state.get("active_dialog") is not None
 if page not in ("Research Lab", "Project Status") and not _pause:
     auto_refresh()
 

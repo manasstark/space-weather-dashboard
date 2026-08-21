@@ -20,7 +20,16 @@ except ImportError:
     st_autorefresh = None
 
 
-REFRESH_SECONDS = 15
+# 15s used to be safe when history reads were cheap. Now that
+# command_centre.py's Timeline/Downloads/Search tabs read a multi-
+# million-row parquet file through a 60s cache (see _HISTORY_CACHE_TTL
+# in command_centre.py), a refresh landing on a cold cache blocks the
+# whole page for several seconds — and at 15s, the next auto-refresh can
+# fire again before that finishes, queuing reruns behind each other.
+# 30s halves how often a refresh can land in that cold window without
+# making the "live" feel noticeably less live (the underlying data itself
+# only updates on the engine's own ~60s cycle anyway).
+REFRESH_SECONDS = 30
 
 RETRO_CHART_COLORWAY = ["#0000FF", "#008000", "#FF0000", "#00BFBF", "#BF00BF", "#BFBF00", "#404040"]
 RETRO_CHART_FONT = "Courier New, Consolas, monospace"

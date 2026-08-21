@@ -81,6 +81,17 @@ from swdss.physics.cme_dbm import estimate_cme_arrival_dbm
 SOLAR_FORECAST_CME_LOOKBACK_HOURS = 120
 FLARE_CME_OUTLOOK_REFRESH_MINUTES = 20  # JSOC queries + classifier inference are far more expensive than the DBM/F10.7 math above and don't need 60s-cycle freshness
 
+# The permanent forecast_snapshot_history.parquet log only ever needs the
+# 10 headline (dataset, variable, horizon) forecasts — the ones the
+# Forecast Package and Verification tab's "Operational" split already
+# treat as the operationally meaningful set — not the extended horizons
+# (3h/6h/12h/24h) on top of them. Extended horizons are still computed
+# and shown live on the Forecast tab; they're just never logged, since
+# logging every candidate at every horizon every cycle (continuous
+# re-issue can mean several candidates per slot) is what grew this file
+# to multiple millions of rows.
+_HEADLINE_KEY_SET = set(packages.HEADLINE_KEYS)
+
 ENGINE_VERSION = "1.0"
 
 # Reference variable used to detect data-feed staleness per dataset, for
@@ -728,6 +739,7 @@ def refresh_dashboard_products() -> dict:
     forecasts = {"solar_wind": {}, "imf": {}, "analytics": {}, "ae": {}}
     history_rows = []
     evaluation_rows = []
+    report_rows = []
     already_evaluated = storage.already_evaluated_job_ids()
 
     # source='engine' explicitly — the Forecast Package must only ever
@@ -797,6 +809,8 @@ def refresh_dashboard_products() -> dict:
             # querying the jobs table directly showed ALL 10 of a single
             # day's completed 1h Speed jobs had a real actual_value with
             # zero of them ever evaluated.
+            is_headline_horizon = (dataset, variable, horizon_label) in _HEADLINE_KEY_SET
+
             for candidate in candidates:
                 candidate_entry = entry if candidate is job else _build_forecast_entry(
                     dataset, variable, semantic_horizon, candidate, trend, current_value, current_observed_at,
@@ -805,26 +819,48 @@ def refresh_dashboard_products() -> dict:
                 if candidate_entry is None:
                     continue
 
-                history_rows.append({
-                    "generated_at": generated_at,
-                    "dataset": dataset,
-                    "variable": variable,
-                    "horizon": horizon_label,
-                    "job_id": candidate_entry["job_id"],
-                    "status": candidate_entry["status"],
-                    "job_status": candidate_entry["job_status"],
-                    "valid_start": candidate_entry["valid_start"],
-                    "valid_end": candidate_entry["valid_end"],
-                    "current_value": candidate_entry["current_value"],
-                    "predicted_value": candidate_entry["predicted_value"],
-                    "model_name": candidate_entry["model_name"],
-                    "r2": candidate_entry["metrics"].get("r2"),
-                    "mae": candidate_entry["metrics"].get("mae"),
-                    "confidence_score": candidate_entry["confidence"]["score"],
-                    "confidence_category": candidate_entry["confidence"]["category"],
-                    "actual_value": candidate_entry["actual_value"],
-                    "abs_error": candidate_entry["abs_error"],
-                })
+                # Once a candidate is completed AND already evaluated, its
+                # history row can never change again — logging it again on
+                # every subsequent cycle is pure waste, and with 1h-horizon
+                # jobs re-issuing roughly hourly and staying in the jobs
+                # table for PRUNE_RETENTION_DAYS (7 days) before pruning,
+                # that waste compounds badly: a single finished job got
+                # re-logged, unchanged, once per ~60s cycle for up to a
+                # week. This was the actual cause of individual headline
+                # slots accumulating 150K-225K history rows within a mere
+                # 72h window — not the horizon count, not retention length.
+                # already_evaluated is already computed above for exactly
+                # this kind of check (see its use for evaluation_rows
+                # below); reusing it here needs no new state.
+                already_logged_terminal = candidate["status"] == "completed" and candidate["job_id"] in already_evaluated
+
+                # Only the 10 headline (dataset, variable, horizon) slots
+                # get a permanent history row — extended horizons are
+                # still fully computed and evaluated below (skill score,
+                # calibration, drift all keep working for every horizon),
+                # they're just not logged to forecast_snapshot_history,
+                # which is what actually grew unbounded.
+                if is_headline_horizon and not already_logged_terminal:
+                    history_rows.append({
+                        "generated_at": generated_at,
+                        "dataset": dataset,
+                        "variable": variable,
+                        "horizon": horizon_label,
+                        "job_id": candidate_entry["job_id"],
+                        "status": candidate_entry["status"],
+                        "job_status": candidate_entry["job_status"],
+                        "valid_start": candidate_entry["valid_start"],
+                        "valid_end": candidate_entry["valid_end"],
+                        "current_value": candidate_entry["current_value"],
+                        "predicted_value": candidate_entry["predicted_value"],
+                        "model_name": candidate_entry["model_name"],
+                        "r2": candidate_entry["metrics"].get("r2"),
+                        "mae": candidate_entry["metrics"].get("mae"),
+                        "confidence_score": candidate_entry["confidence"]["score"],
+                        "confidence_category": candidate_entry["confidence"]["category"],
+                        "actual_value": candidate_entry["actual_value"],
+                        "abs_error": candidate_entry["abs_error"],
+                    })
 
                 if candidate["status"] != "completed" or candidate_entry["actual_value"] is None:
                     continue
@@ -874,6 +910,38 @@ def refresh_dashboard_products() -> dict:
                     "persistence_abs_error": abs(persistence_error) if persistence_error is not None else None,
                     "persistence_squared_error": persistence_error ** 2 if persistence_error is not None else None,
                 })
+
+                # Reports tab (see storage.append_report_rows) — only the
+                # 10 headline slots get a report row, and only the instant
+                # a candidate is newly evaluated above (so this fires once
+                # per (variable, horizon, hour), not every cycle). A gap
+                # here for a given hour IS the "missing data" signal — no
+                # candidate ever completed/evaluated for that slot that
+                # hour — so there's no separate flag needed for it.
+                if is_headline_horizon:
+                    persistence_abs_error = abs(persistence_error) if persistence_error is not None else None
+                    flags = []
+                    if candidate_entry["confidence"]["category"] in ("low", "poor"):
+                        flags.append("low_confidence")
+                    if persistence_abs_error is not None and candidate_entry["abs_error"] > persistence_abs_error:
+                        flags.append("underperformed_persistence")
+
+                    report_rows.append({
+                        "dataset": dataset,
+                        "variable": variable,
+                        "horizon": horizon_label,
+                        "valid_start": candidate_entry["valid_start"],
+                        "valid_end": candidate_entry["valid_end"],
+                        "predicted_value": candidate_entry["predicted_value"],
+                        "actual_value": candidate_entry["actual_value"],
+                        "error": signed_error,
+                        "abs_error": candidate_entry["abs_error"],
+                        "model_name": candidate_entry["model_name"],
+                        "confidence_category": candidate_entry["confidence"]["category"],
+                        "persistence_abs_error": persistence_abs_error,
+                        "flags": ",".join(flags),
+                        "evaluated_at": _now_iso(),
+                    })
 
             is_headline = semantic_horizon == "interval" or semantic_horizon == 1
             if is_headline and entry is not None:
@@ -999,9 +1067,13 @@ def refresh_dashboard_products() -> dict:
         traceback.print_exc()
 
     # ==================== Stage 7: Persist History & Verification Science ====================
-    storage.write_snapshot(snapshot)
-    storage.append_forecast_history_rows(history_rows)
-    storage.append_evaluation_rows(evaluation_rows)
+    try:
+        storage.write_snapshot(snapshot)
+        storage.append_forecast_history_rows(history_rows)
+        storage.append_evaluation_rows(evaluation_rows)
+        storage.append_report_rows(report_rows)
+    except Exception:
+        traceback.print_exc()
 
     # Verification science — skill.py and calibration.py are pure
     # analysis over the FULL evaluation history (including the rows just
