@@ -26,3 +26,5 @@ __pycache__/
 .mypy_cache/
 htmlcov/
 .coverage
+# Personal interview-prep notes — not meant for public view
+/docs/Codebase_Map.md
