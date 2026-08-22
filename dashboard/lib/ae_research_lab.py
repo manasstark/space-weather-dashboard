@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from dashboard.lib.data_helpers import retry_on_cache_race
 from dashboard.lib.kp_research_lab import render_ae_optimization_study
 from dashboard.lib.shared_ui import (
     CONCLUSION_COLORS,
@@ -197,6 +198,7 @@ def _ae_research_run_row(run: dict, best_run_id: str = None, key_prefix: str = "
                     st.rerun()
 
 
+@retry_on_cache_race
 @st.cache_data(ttl=REFRESH_SECONDS, show_spinner=False)
 def _cached_ae_research_frame(feature_toggles: dict = None, engineered_groups: dict = None, physics_features: dict = None):
     """Same rationale as _cached_kp_research_frame: ae_analytics_features.csv

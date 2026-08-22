@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from dashboard.lib.data_helpers import retry_on_cache_race
 from dashboard.lib.shared_ui import (
     CONCLUSION_COLORS,
     REFRESH_SECONDS,
@@ -354,6 +355,7 @@ def render_imf_model_comparison_tab() -> None:
         plot_retro(fig4)
 
 
+@retry_on_cache_race
 @st.cache_data(ttl=REFRESH_SECONDS, show_spinner=False)
 def _cached_imf_research_frame(granularity: str = DEFAULT_GRANULARITY):
     """Same redundant-read problem as the Kp lab's Physics Experiments tab

@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from dashboard.lib.data_helpers import retry_on_cache_race
 from dashboard.lib.shared_ui import REFRESH_SECONDS, plot_retro, render_automl_shell, terminal_metric
 from swdss.models import ae_research, kp_research
 from swdss.models.registry import VARIABLE_LABELS
@@ -369,6 +370,7 @@ def render_kp_feature_ablation_tab() -> None:
     )
 
 
+@retry_on_cache_race
 @st.cache_data(ttl=REFRESH_SECONDS, show_spinner=False)
 def _cached_kp_research_frame(feature_toggles: dict = None, engineered_groups: dict = None, physics_features: dict = None):
     """Read-only exploratory calls into kp_research.load_kp_research_frame()

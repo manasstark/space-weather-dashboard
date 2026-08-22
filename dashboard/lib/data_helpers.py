@@ -23,6 +23,7 @@ module's global namespace.
 """
 
 import base64
+import functools
 from html import escape
 
 import pandas as pd
@@ -36,6 +37,34 @@ from swdss.paths import MASTER_V1_PATH, PROCESSED_DIR
 # nearly every rerun paid a full read+parse+sort instead of hitting the
 # cache.
 MASTER_DATA_CACHE_TTL = 60
+
+
+def retry_on_cache_race(func):
+    """Wraps an @st.cache_data/@st.cache_resource-decorated function to
+    retry once on KeyError. Streamlit's own in-memory cache storage has a
+    known race: a cached entry can be evicted (TTL expiry sweep) between
+    the "is this key cached" check and the actual read, raising a bare
+    KeyError from inside cachetools instead of transparently recomputing
+    (streamlit/runtime/caching/storage/in_memory_cache_storage_wrapper.py).
+    Confirmed live: took down the entire dashboard when it hit
+    load_master_data, since that call sits near the top of home.py and
+    nothing below it got a chance to render.
+
+    Retrying once is the correct fix here, not a workaround — the race is
+    a pure timing coincidence in the cache read, not a real data problem,
+    so an immediate retry either hits a freshly (re)written cache entry or
+    recomputes the wrapped function from scratch; either way it resolves
+    cleanly. Apply this as the OUTERMOST decorator (above @st.cache_data/
+    @st.cache_resource) so it wraps the cache lookup itself, not the raw
+    function body.
+    """
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except KeyError:
+            return func(*args, **kwargs)
+    return wrapper
 
 
 def get_base64_image(path) -> str:
@@ -283,6 +312,7 @@ def render_simple_retro_table(df: pd.DataFrame, display_names: dict | None = Non
     st.markdown(html, unsafe_allow_html=True)
 
 
+@retry_on_cache_race
 @st.cache_data(ttl=MASTER_DATA_CACHE_TTL)
 def load_master_data(path) -> pd.DataFrame:
     df = pd.read_parquet(path)
@@ -291,6 +321,7 @@ def load_master_data(path) -> pd.DataFrame:
     return df
 
 
+@retry_on_cache_race
 @st.cache_data(ttl=MASTER_DATA_CACHE_TTL)
 def load_processed_data(name: str) -> pd.DataFrame:
     path = PROCESSED_DIR / name / f"{name}_processed.parquet"

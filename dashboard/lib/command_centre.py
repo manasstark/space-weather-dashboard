@@ -32,6 +32,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from dashboard.lib import report_pdf
+from dashboard.lib.data_helpers import retry_on_cache_race
 from dashboard.lib.design_tokens import ACCENT, AMBER, BG, BLUE, BORDER, MONO, MUTED, PANEL_BG, RED, TEXT
 from dashboard.lib.shared_ui import open_dialog
 from swdss.engine import calibration, packages, skill, storage
@@ -55,6 +56,7 @@ from swdss.engine.labels import classify_current_reading
 _HISTORY_CACHE_TTL = 60
 
 
+@retry_on_cache_race
 @st.cache_resource(ttl=_HISTORY_CACHE_TTL)
 def _cached_forecast_history_full() -> pd.DataFrame:
     return storage.load_forecast_history()
@@ -78,16 +80,19 @@ def _cached_forecast_history(days: int | None = None) -> pd.DataFrame:
     return history[ts >= cutoff]
 
 
+@retry_on_cache_race
 @st.cache_data(ttl=_HISTORY_CACHE_TTL)
 def _cached_evaluation_history() -> pd.DataFrame:
     return storage.load_evaluation_history()
 
 
+@retry_on_cache_race
 @st.cache_data(ttl=_HISTORY_CACHE_TTL)
 def _cached_package_verification_history() -> pd.DataFrame:
     return storage.load_package_verification_history()
 
 
+@retry_on_cache_race
 @st.cache_data(ttl=_HISTORY_CACHE_TTL)
 def _cached_report_history() -> pd.DataFrame:
     return storage.load_report_history()

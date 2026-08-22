@@ -143,14 +143,19 @@ def load_flare_cme_metrics() -> dict | None:
 
 
 def predict_flare_probability(latest_features: pd.DataFrame) -> pd.Series | None:
-    if not FLARE_MODEL_PATH.exists():
+    # latest_features can legitimately be empty — e.g. every currently
+    # active region is younger than the 24h history the *_24h_ago/_24h_delta
+    # features need (orchestrator._flare_cme_outlook_and_lean's dropna) —
+    # sklearn raises rather than returning an empty result for 0 rows, so
+    # this must be caught before predict_proba, not treated as an error.
+    if not FLARE_MODEL_PATH.exists() or latest_features.empty:
         return None
     model = joblib.load(FLARE_MODEL_PATH)
     return pd.Series(model.predict_proba(latest_features[FEATURE_COLUMNS])[:, 1], index=latest_features.index)
 
 
 def predict_cme_probability(latest_features: pd.DataFrame) -> pd.Series | None:
-    if not CME_MODEL_PATH.exists():
+    if not CME_MODEL_PATH.exists() or latest_features.empty:
         return None
     model = joblib.load(CME_MODEL_PATH)
     return pd.Series(model.predict_proba(latest_features[FEATURE_COLUMNS])[:, 1], index=latest_features.index)
