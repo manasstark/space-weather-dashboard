@@ -1332,6 +1332,9 @@ def _render_downloads_tab(snapshot: dict) -> None:
                 )
                 st.markdown(f'<div class="term-root">{_report_hour_table(hour_group)}</div>', unsafe_allow_html=True)
 
+            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+            _prepare_day_pdf_download(reports, date)
+
     st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
     _file_row("Hourly Report", storage.REPORT_HISTORY_PATH, "PARQUET", "application/octet-stream")
     _prepare_csv_download(
@@ -1341,12 +1344,31 @@ def _render_downloads_tab(snapshot: dict) -> None:
     _prepare_pdf_download(reports)
 
 
+def _prepare_day_pdf_download(reports: pd.DataFrame, date) -> None:
+    """One PDF per calendar day, scoped to ONLY that day — added after the
+    single whole-window PDF below turned out to bundle every day in the
+    retention window together even when someone only wanted one day's
+    report. Same lazy build-on-click pattern, keyed per date so each
+    day's prepared PDF persists independently in session state."""
+    day_key = date.isoformat()
+    if st.button(f"Prepare PDF for {date.strftime('%d %b %Y')}", key=f"prep_day_pdf_{day_key}"):
+        with st.spinner(f"Building report for {date.strftime('%d %b %Y')}…"):
+            st.session_state[f"day_pdf_{day_key}"] = report_pdf.build_single_day_report_pdf(
+                reports.drop(columns=["valid_end_ts"], errors="ignore"), date,
+            )
+    if f"day_pdf_{day_key}" in st.session_state:
+        st.download_button(
+            f"↓ FETCH {date.strftime('%d %b %Y')}.pdf", data=st.session_state[f"day_pdf_{day_key}"],
+            file_name=f"hourly_report_{day_key}.pdf", mime="application/pdf", key=f"dl_day_pdf_{day_key}",
+        )
+
+
 def _prepare_pdf_download(reports: pd.DataFrame) -> None:
     """Same lazy build-on-click pattern as _prepare_csv_download — the PDF
     is only ever generated the moment someone clicks, so the "is the last
     hour still evaluating" check inside report_pdf.build_report_pdf reads
     true live state at download time, not a stale pre-baked snapshot."""
-    if st.button("Prepare hourly_report.pdf", key="prep_report_pdf"):
+    if st.button("Prepare hourly_report.pdf (full 7-day window)", key="prep_report_pdf"):
         with st.spinner("Building hourly_report.pdf…"):
             st.session_state["report_pdf"] = report_pdf.build_report_pdf(
                 reports.drop(columns=["valid_end_ts"], errors="ignore"),

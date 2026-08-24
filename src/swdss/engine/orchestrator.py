@@ -241,10 +241,22 @@ def _resolve_persistence_anchor(dataset: str, variable: str, created_at):
     """The naive "persistence" forecast's input: the last known hourly-
     mean observation at/before the job's own creation time — i.e. "what
     if we'd just assumed nothing changes between now and the target
-    hour." Reuses jobs.resolve_actual_value's existing hourly-mean
-    lookup (identical mechanics — an observed value at a given hour) at
-    the issuance timestamp instead of the target timestamp, rather than
-    adding a second lookup path.
+    hour."
+
+    Anchored to the last COMPLETE hour as of created_at, not created_at's
+    own (still-forming) hour — matching predict._latest_complete_hour's
+    model input exactly, for the same reason. created_at's own hour is,
+    by construction, always still accumulating data at created_at itself
+    (continuous re-issue creates jobs seconds to minutes into a fresh
+    hour, never at its close), so floor(created_at) would hand
+    persistence a fresher reading than the model is fed for the same
+    forecast. Confirmed live before this fix: at a real evaluation,
+    persistence's anchor (354.08) exactly matched the RAW partial-hour
+    value the model's own fix was specifically built to avoid using —
+    persistence was quietly getting a one-hour freshness advantage the
+    model didn't have, which is not "zero-transformation on the same
+    input," it's a different, easier input. Both sides now reason from
+    the identical hour.
 
     AE always returns None: it has no live feed (swdss.models.registry's
     static_variables), so there is no real "value known at issuance" to
@@ -254,7 +266,10 @@ def _resolve_persistence_anchor(dataset: str, variable: str, created_at):
     if dataset == "ae" or created_at is None:
         return None
     try:
-        return resolve_actual_value(dataset, variable, created_at)
+        created_ts = pd.Timestamp(created_at)
+        created_ts = created_ts.tz_convert(None) if created_ts.tzinfo is not None else created_ts
+        last_complete_hour = created_ts.floor("h") - pd.Timedelta(hours=1)
+        return resolve_actual_value(dataset, variable, last_complete_hour)
     except Exception:
         return None
 

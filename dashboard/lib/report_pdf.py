@@ -206,6 +206,73 @@ def _day_table_pages(pdf, date, day_group: pd.DataFrame, covered: int, expected:
         plt.close(fig)
 
 
+def _single_day_title(pdf, day_reports: pd.DataFrame, date, covered: int, expected: int, pending_note, now: pd.Timestamp) -> None:
+    fig = plt.figure(figsize=_PAGE_SIZE)
+    fig.patch.set_facecolor("white")
+    lines = []
+    lines.append("SPACE WEATHER FORECAST -- DAILY PERFORMANCE REPORT")
+    lines.append(_dash_rule())
+    lines.append(f"Day             : {date.strftime('%d %b %Y')}")
+    lines.append(f"Generated       : {now.strftime('%d %b %Y %H:%M UTC')}")
+    lines.append(f"Hours covered   : ran {covered} of {expected} expected hours")
+    lines.append(f"Rows (var-hour) : {len(day_reports)}")
+    if pending_note:
+        lines.append(f"NOTE            : {pending_note}")
+    lines.append("")
+
+    lines.append(f"HOURS WITH FLAGS: {(day_reports['flags'].fillna('') != '').sum() if not day_reports.empty else 0} of {len(day_reports)} variable-hours")
+    lines.append(_dash_rule(60))
+    if day_reports.empty:
+        lines.append("  No evaluated hours for this day.")
+    else:
+        flagged = day_reports[day_reports["flags"].fillna("") != ""]
+        if flagged.empty:
+            lines.append("  None -- every evaluated hour was clean this day.")
+        else:
+            for flag_name in ("low_confidence", "underperformed_persistence"):
+                count = flagged["flags"].str.contains(flag_name, na=False).sum()
+                if count:
+                    lines.append(f"  {flag_name:<28s} {count:>3d} occurrence(s)")
+
+    y = 0.95
+    for line in lines:
+        weight = "bold" if line.isupper() and line.strip() else "normal"
+        fig.text(0.06, y, line, fontsize=10, fontfamily=_MONO, fontweight=weight, va="top")
+        y -= 0.028
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def build_single_day_report_pdf(reports: pd.DataFrame, date) -> bytes:
+    """Same rendering as build_report_pdf, scoped to exactly one calendar
+    day — the Downloads tab's per-day download button, added after the
+    original whole-window PDF turned out to bundle every day in the
+    retention window together even when someone only wanted one day's
+    report. `date` is a plain date (not Timestamp) matching a day
+    returned by grouping reports["valid_end_ts"].dt.date, same as the
+    on-screen day expanders in command_centre._render_downloads_tab."""
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    reports = reports.copy()
+    reports["valid_end_ts"] = pd.to_datetime(reports["valid_end"], utc=True, errors="coerce")
+    reports = reports.dropna(subset=["valid_end_ts"])
+    now = pd.Timestamp.now(tz="UTC")
+
+    all_summaries = _day_summaries(reports, now)
+    match = next((s for s in all_summaries if s[0] == date), None)
+    _, covered, expected, pending_note = match if match else (date, 0, 0, None)
+    day_reports = reports[reports["valid_end_ts"].dt.date == date]
+
+    buffer = io.BytesIO()
+    with PdfPages(buffer) as pdf:
+        _single_day_title(pdf, day_reports, date, covered, expected, pending_note, now)
+        if not day_reports.empty:
+            _predicted_vs_actual_page(pdf, day_reports)
+        _day_table_pages(pdf, date, day_reports, covered, expected, pending_note)
+
+    return buffer.getvalue()
+
+
 def build_report_pdf(reports: pd.DataFrame, retention_days: int) -> bytes:
     """Renders hourly_report.parquet to a plain, monospace PDF: title +
     coverage summary, predicted-vs-actual charts per variable, then one

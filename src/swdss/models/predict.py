@@ -380,31 +380,38 @@ def _latest_complete_hour(usable: pd.DataFrame) -> tuple:
     skill-vs-persistence score recovering sharply at 3h+, where jobs are
     created far less often and mostly land on already-complete buckets.
 
-    Returns (feature_row, anchor_ts). anchor_ts is ALWAYS usable.index[-1]
-    — the true latest available moment — never the fallback's own
-    timestamp. This matters: predict()'s caller computes
-    predicted_for = observed_at + horizon, and that becomes the job's
-    actual target hour (jobs.start_job). An earlier version of this fix
-    mistakenly returned the fallback row's OWN timestamp as observed_at,
-    which quietly shortened the real forecast lead time — a job created
-    at 17:05 would anchor to 16:00 and target 17:00 instead of 18:00,
-    turning a "1 hour ahead" forecast into one for an hour that's already
-    in progress. Only feature_row (what actually gets fed to the model)
-    falls back to the prior complete hour; the timing stays anchored to
-    right now regardless. Deliberately scoped to the model's own input
-    only — the persistence baseline (orchestrator._resolve_persistence_
-    anchor) intentionally keeps reading whatever is freshest, since a
-    naive "assume no change" guess doing zero transformation on noisy
-    data is a fair, unmodified comparison; it's the model's learned
-    coefficients that amplify that noise, not persistence's identity
-    function.
+    Returns (feature_row, observed_at) as a MATCHED pair — when the latest
+    bucket is still forming, BOTH the row and its timestamp fall back to
+    the prior complete hour together, so predicted_for = observed_at +
+    horizon still lands exactly one real hour past the data actually used.
+
+    An earlier version of this fix kept observed_at pinned to the true
+    latest hour while only the feature row fell back, on the theory that
+    changing observed_at would "shorten the forecast lead time." That was
+    wrong in a different, worse way: it left the model reasoning from an
+    hour-old data point while still being asked to predict a FULL hour
+    past the CURRENT hour — a 2-hour real gap the model was never trained
+    to extrapolate across (training only ever saw 1-hour gaps). Confirmed
+    live: a job created at 18:06 was using 17:00's data but targeting
+    19:00. Advancing both together fixes it exactly the way training
+    expects — 17:00's data targets 18:00, a genuine 1-hour gap — at the
+    honest cost of the forecast only refreshing once an hour (right after
+    the previous hour closes) instead of within the first few minutes of
+    a new one.
+
+    Also no longer scoped to the model alone: orchestrator._resolve_
+    persistence_anchor now anchors to this same last-complete-hour
+    definition instead of whatever's freshest, since persistence reading
+    fresher data than the model got fed was a real, measured advantage
+    that made persistence look stronger than it actually was — not a
+    fair "zero-transformation" comparison.
     """
-    anchor_ts = usable.index[-1]
-    bucket_end = anchor_ts + pd.Timedelta(hours=1)
+    last_ts = usable.index[-1]
+    bucket_end = last_ts + pd.Timedelta(hours=1)
     now_naive = pd.Timestamp.now(tz="UTC").tz_localize(None)
     if now_naive < bucket_end and len(usable) > 1:
-        return usable.iloc[-2], anchor_ts
-    return usable.iloc[-1], anchor_ts
+        return usable.iloc[-2], usable.index[-2]
+    return usable.iloc[-1], last_ts
 
 
 def predict(dataset: str, variable: str, horizon: int) -> dict:
